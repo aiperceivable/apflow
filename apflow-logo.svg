@@ -1,136 +1,86 @@
-<svg width="512" height="512" viewBox="50 36 412 412" xmlns="http://www.w3.org/2000/svg">
-  <!-- apflow starfish logo v3 - with gradient effects -->
-
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- apflow Cute Manta Ray Logo - Tech Blue Edition -->
+  
   <defs>
-    <!-- Body radial gradient: warm center → deeper coral at edges -->
-    <radialGradient id="bodyGrad" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" stop-color="#FF7B6B"/>
-      <stop offset="100%" stop-color="#D94030"/>
-    </radialGradient>
-
-    <!-- Arm radial gradient: bright coral near center → deeper coral at tips -->
-    <radialGradient id="armGrad" cx="256" cy="256" r="190" fx="256" fy="256"
-                    gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#FF8A70"/>
-      <stop offset="40%" stop-color="#FF6347"/>
-      <stop offset="100%" stop-color="#E04535"/>
-    </radialGradient>
-
-    <!-- Warm glow overlay (same coral family) -->
-    <radialGradient id="glowGrad" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" stop-color="#FFB4A2" stop-opacity="0.3"/>
-      <stop offset="100%" stop-color="#FFB4A2" stop-opacity="0"/>
-    </radialGradient>
-
-    <!-- Arm highlight gradient: visible near body → fades toward tip -->
-    <radialGradient id="highlightGrad" cx="256" cy="256" r="180"
-                    gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#FFB088" stop-opacity="0.5"/>
-      <stop offset="60%" stop-color="#FF8066" stop-opacity="0.25"/>
-      <stop offset="100%" stop-color="#FF8066" stop-opacity="0"/>
-    </radialGradient>
+    <!-- Tech Blue Gradient -->
+    <linearGradient id="bodyBlue" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#60A5FA"/> <!-- Blue 400 -->
+      <stop offset="100%" stop-color="#3B82F6"/> <!-- Blue 500 -->
+    </linearGradient>
   </defs>
 
-  <!-- Five arms (same shape, rotated 72° each) -->
-  <g fill="url(#armGrad)">
-    <path d="M 229,200 C 218,155 232,115 248,88 Q 256,68 264,88 C 280,115 294,155 283,200 Z"/>
-    <path d="M 229,200 C 218,155 232,115 248,88 Q 256,68 264,88 C 280,115 294,155 283,200 Z"
-          transform="rotate(72, 256, 256)"/>
-    <path d="M 229,200 C 218,155 232,115 248,88 Q 256,68 264,88 C 280,115 294,155 283,200 Z"
-          transform="rotate(144, 256, 256)"/>
-    <path d="M 229,200 C 218,155 232,115 248,88 Q 256,68 264,88 C 280,115 294,155 283,200 Z"
-          transform="rotate(216, 256, 256)"/>
-    <path d="M 229,200 C 218,155 232,115 248,88 Q 256,68 264,88 C 280,115 294,155 283,200 Z"
-          transform="rotate(288, 256, 256)"/>
+  <!-- Thick Outline -->
+  <path d="M 256,80 
+           C 160,80 80,140 40,240 
+           Q 35,255 55,260 
+           C 100,270 160,320 230,320 
+           L 235,340 
+           C 220,350 220,375 240,375 
+           L 250,375 
+           C 250,450 260,480 280,470 
+           C 270,475 265,450 265,375 
+           L 275,375 
+           C 295,375 295,350 280,340 
+           L 285,320 
+           C 355,320 415,270 460,260 
+           Q 480,255 475,240 
+           C 435,140 355,80 256,80 Z" 
+        fill="none" stroke="#0F172A" stroke-width="12" stroke-linejoin="round"/>
+
+  <!-- Main Body Fill -->
+  <path d="M 256,80 
+           C 160,80 80,140 40,240 
+           Q 35,255 55,260 
+           C 100,270 160,320 230,320 
+           L 235,340 
+           C 220,350 220,375 240,375 
+           L 250,375 
+           C 250,450 260,480 280,470 
+           C 270,475 265,450 265,375 
+           L 275,375 
+           C 295,375 295,350 280,340 
+           L 285,320 
+           C 355,320 415,270 460,260 
+           Q 480,255 475,240 
+           C 435,140 355,80 256,80 Z" 
+        fill="url(#bodyBlue)"/>
+
+  <!-- Tech Dark Blue Spots (The "Task Nodes") -->
+  <g fill="#1D4ED8" opacity="0.4">
+    <ellipse cx="120" cy="235" rx="18" ry="12" transform="rotate(-20, 120, 235)"/>
+    <ellipse cx="165" cy="275" rx="15" ry="10" transform="rotate(-10, 165, 275)"/>
+    <ellipse cx="215" cy="295" rx="12" ry="8"/>
+    
+    <ellipse cx="392" cy="235" rx="18" ry="12" transform="rotate(20, 392, 235)"/>
+    <ellipse cx="347" cy="275" rx="15" ry="10" transform="rotate(10, 347, 275)"/>
+    <ellipse cx="297" cy="295" rx="12" ry="8"/>
+
+    <circle cx="256" cy="275" r="5"/>
+    <circle cx="225" cy="255" r="4"/>
+    <circle cx="287" cy="255" r="4"/>
   </g>
 
-  <!-- Center body (same gradient as arms for seamless junction) -->
-  <circle cx="256" cy="256" r="68" fill="url(#armGrad)"/>
-
-  <!-- Warm glow overlay on body -->
-  <circle cx="256" cy="256" r="65" fill="url(#glowGrad)"/>
-
-  <!-- Arm highlights (inner lighter strip with gradient) -->
-  <g fill="url(#highlightGrad)">
-    <path d="M 242,205 C 237,168 244,130 252,98 Q 256,85 260,98 C 268,130 275,168 270,205 Z"/>
-    <path d="M 242,205 C 237,168 244,130 252,98 Q 256,85 260,98 C 268,130 275,168 270,205 Z"
-          transform="rotate(72, 256, 256)"/>
-    <path d="M 242,205 C 237,168 244,130 252,98 Q 256,85 260,98 C 268,130 275,168 270,205 Z"
-          transform="rotate(144, 256, 256)"/>
-    <path d="M 242,205 C 237,168 244,130 252,98 Q 256,85 260,98 C 268,130 275,168 270,205 Z"
-          transform="rotate(216, 256, 256)"/>
-    <path d="M 242,205 C 237,168 244,130 252,98 Q 256,85 260,98 C 268,130 275,168 270,205 Z"
-          transform="rotate(288, 256, 256)"/>
-  </g>
-
-  <!-- Arm texture dots (per arm, then rotated) -->
-  <!-- Top arm dots -->
-  <g fill="#FFD5C8" opacity="0.55">
-    <circle cx="246" cy="175" r="3.5"/>
-    <circle cx="266" cy="170" r="3"/>
-    <circle cx="252" cy="148" r="3.2"/>
-    <circle cx="263" cy="142" r="2.8"/>
-    <circle cx="248" cy="122" r="2.8"/>
-    <circle cx="260" cy="118" r="2.5"/>
-    <circle cx="254" cy="100" r="2.2"/>
-  </g>
-  <!-- Arm 2 dots (72°) -->
-  <g fill="#FFD5C8" opacity="0.55" transform="rotate(72, 256, 256)">
-    <circle cx="246" cy="175" r="3.5"/>
-    <circle cx="266" cy="170" r="3"/>
-    <circle cx="252" cy="148" r="3.2"/>
-    <circle cx="263" cy="142" r="2.8"/>
-    <circle cx="248" cy="122" r="2.8"/>
-    <circle cx="260" cy="118" r="2.5"/>
-    <circle cx="254" cy="100" r="2.2"/>
-  </g>
-  <!-- Arm 3 dots (144°) -->
-  <g fill="#FFD5C8" opacity="0.55" transform="rotate(144, 256, 256)">
-    <circle cx="246" cy="175" r="3.5"/>
-    <circle cx="266" cy="170" r="3"/>
-    <circle cx="252" cy="148" r="3.2"/>
-    <circle cx="263" cy="142" r="2.8"/>
-    <circle cx="248" cy="122" r="2.8"/>
-    <circle cx="260" cy="118" r="2.5"/>
-    <circle cx="254" cy="100" r="2.2"/>
-  </g>
-  <!-- Arm 4 dots (216°) -->
-  <g fill="#FFD5C8" opacity="0.55" transform="rotate(216, 256, 256)">
-    <circle cx="246" cy="175" r="3.5"/>
-    <circle cx="266" cy="170" r="3"/>
-    <circle cx="252" cy="148" r="3.2"/>
-    <circle cx="263" cy="142" r="2.8"/>
-    <circle cx="248" cy="122" r="2.8"/>
-    <circle cx="260" cy="118" r="2.5"/>
-    <circle cx="254" cy="100" r="2.2"/>
-  </g>
-  <!-- Arm 5 dots (288°) -->
-  <g fill="#FFD5C8" opacity="0.55" transform="rotate(288, 256, 256)">
-    <circle cx="246" cy="175" r="3.5"/>
-    <circle cx="266" cy="170" r="3"/>
-    <circle cx="252" cy="148" r="3.2"/>
-    <circle cx="263" cy="142" r="2.8"/>
-    <circle cx="248" cy="122" r="2.8"/>
-    <circle cx="260" cy="118" r="2.5"/>
-    <circle cx="254" cy="100" r="2.2"/>
-  </g>
-
-  <!-- Center body highlight -->
-  <ellipse cx="244" cy="240" rx="28" ry="22" fill="#FFB088" opacity="0.3"/>
-
+  <!-- Cute Face -->
   <!-- Eyes -->
-  <ellipse cx="236" cy="247" rx="19" ry="20" fill="white"/>
-  <ellipse cx="276" cy="247" rx="19" ry="20" fill="white"/>
-  <circle cx="241" cy="250" r="11" fill="#2D3748"/>
-  <circle cx="281" cy="250" r="11" fill="#2D3748"/>
-  <circle cx="245" cy="244" r="5" fill="white"/>
-  <circle cx="285" cy="244" r="5" fill="white"/>
+  <ellipse cx="215" cy="185" rx="10" ry="14" fill="#0F172A"/>
+  <ellipse cx="297" cy="185" rx="10" ry="14" fill="#0F172A"/>
+  
+  <!-- Mouth (W-shape) -->
+  <path d="M 235,195 Q 245,210 256,200 Q 267,210 277,195" 
+        fill="none" stroke="#0F172A" stroke-width="6" stroke-linecap="round"/>
+  
+  <!-- Pink Cheeks -->
+  <ellipse cx="180" cy="215" rx="22" ry="14" fill="#F472B6" opacity="0.6"/>
+  <ellipse cx="332" cy="215" rx="22" ry="14" fill="#F472B6" opacity="0.6"/>
 
-  <!-- Smile -->
-  <path d="M 245,273 Q 256,286 267,273"
-        stroke="#C0392B" stroke-width="3.5" fill="none" stroke-linecap="round"/>
-
-  <!-- Cheek blush -->
-  <ellipse cx="220" cy="268" rx="12" ry="8" fill="#FF9999" opacity="0.4"/>
-  <ellipse cx="292" cy="268" rx="12" ry="8" fill="#FF9999" opacity="0.4"/>
+  <!-- Gills (Action flow indicators) -->
+  <g stroke="#0F172A" stroke-width="4" stroke-linecap="round" opacity="0.2">
+    <line x1="230" y1="230" x2="245" y2="230"/>
+    <line x1="230" y1="245" x2="245" y2="245"/>
+    <line x1="230" y1="260" x2="245" y2="260"/>
+    
+    <line x1="267" y1="230" x2="282" y2="230"/>
+    <line x1="267" y1="245" x2="282" y2="245"/>
+    <line x1="267" y1="260" x2="282" y2="260"/>
+  </g>
 </svg>
