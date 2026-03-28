@@ -186,6 +186,21 @@ class TaskModel(Base):
     idempotency_key = Column(String(255), nullable=True)
     last_assigned_node = Column(String(100), nullable=True)
 
+    # === Durability Fields (F-003) ===
+    checkpoint_at = Column(DateTime(timezone=True), nullable=True)
+    resume_from = Column(String(255), nullable=True)
+    attempt_count = Column(Integer, default=0)
+    max_attempts = Column(Integer, default=3)
+    backoff_strategy = Column(String(20), default="exponential")
+    backoff_base_seconds = Column(Numeric(10, 2), default=1.0)
+
+    # === Cost Governance Fields (F-004) ===
+    token_usage = Column(JSON, nullable=True)
+    token_budget = Column(Integer, nullable=True)
+    estimated_cost_usd = Column(Numeric(12, 6), nullable=True)
+    actual_cost_usd = Column(Numeric(12, 6), nullable=True)
+    cost_policy = Column(String(100), nullable=True)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert model to dictionary"""
         return {
@@ -249,6 +264,25 @@ class TaskModel(Base):
             "attempt_id": self.attempt_id,
             "idempotency_key": self.idempotency_key,
             "last_assigned_node": self.last_assigned_node,
+            # Durability fields
+            "checkpoint_at": self.checkpoint_at,
+            "resume_from": self.resume_from,
+            "attempt_count": self.attempt_count,
+            "max_attempts": self.max_attempts,
+            "backoff_strategy": self.backoff_strategy,
+            "backoff_base_seconds": (
+                float(self.backoff_base_seconds) if self.backoff_base_seconds else 1.0
+            ),
+            # Cost governance fields
+            "token_usage": self.token_usage,
+            "token_budget": self.token_budget,
+            "estimated_cost_usd": (
+                float(self.estimated_cost_usd) if self.estimated_cost_usd else None
+            ),
+            "actual_cost_usd": (
+                float(self.actual_cost_usd) if self.actual_cost_usd else None
+            ),
+            "cost_policy": self.cost_policy,
         }
 
     def output(self) -> Dict[str, Any]:
@@ -328,6 +362,19 @@ class TaskModel(Base):
             "attempt_id": 0,
             "idempotency_key": None,
             "last_assigned_node": None,
+            # Durability defaults
+            "checkpoint_at": None,
+            "resume_from": None,
+            "attempt_count": 0,
+            "max_attempts": 3,
+            "backoff_strategy": "exponential",
+            "backoff_base_seconds": 1.0,
+            # Cost governance defaults
+            "token_usage": None,
+            "token_budget": None,
+            "estimated_cost_usd": None,
+            "actual_cost_usd": None,
+            "cost_policy": None,
         }
 
     @classmethod
@@ -506,3 +553,23 @@ class TaskEvent(Base):
             f"<TaskEvent(event_id='{self.event_id}', "
             f"task_id='{self.task_id}', event_type='{self.event_type}')>"
         )
+
+
+class TaskCheckpointModel(Base):
+    """Checkpoint storage for durable task execution (F-003)."""
+
+    __tablename__ = "task_checkpoints"
+
+    id = Column(String(255), primary_key=True, default=lambda: str(uuid.uuid4()))
+    task_id = Column(
+        String(255),
+        ForeignKey(f"{TASK_TABLE_NAME}.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    checkpoint_data = Column(Text, nullable=False)
+    step_name = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    def __repr__(self) -> str:
+        return f"<TaskCheckpoint(id='{self.id}', task_id='{self.task_id}')>"

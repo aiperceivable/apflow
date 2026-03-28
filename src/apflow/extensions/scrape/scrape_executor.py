@@ -9,7 +9,10 @@ from pydantic import BaseModel, Field
 from apflow.core.base import BaseTask
 from apflow.core.extensions.decorators import executor_register
 from apflow.core.execution.errors import ValidationError
-from apflow.extensions.tools.limited_scrape_tools import LimitedScrapeWebsiteTool
+try:
+    from apflow.extensions.tools.limited_scrape_tools import LimitedScrapeWebsiteTool
+except ImportError:
+    LimitedScrapeWebsiteTool = None  # type: ignore[assignment,misc]
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)

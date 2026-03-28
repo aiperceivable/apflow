@@ -1,27 +1,26 @@
 """
-apflow - Task Orchestration and Execution Framework
+apflow - AI Agent Production Middleware
 
-Core orchestration framework with optional features.
+Framework-agnostic production middleware that makes AI agents reliable,
+cost-governed, and auditable.
 
 Core modules (always included):
 - core.interfaces: Core interfaces (ExecutableTask, BaseTask)
 - core.execution: Task orchestration (TaskManager, StreamingCallbacks)
-- core.extensions: Unified extension system (ExtensionRegistry, ExtensionCategory)
-- core.storage: Database session factory (DuckDB default, PostgreSQL optional)
-- core.utils: Utility functions
+- core.extensions: Unified extension system (ExtensionRegistry)
+- core.storage: Database session factory (SQLite default, PostgreSQL optional)
+- bridge: apcore Module registration (auto-discovery of executors)
+- durability: Checkpoint/resume, retry with backoff, circuit breaker
+- governance: Token budget, cost policy, model downgrade, usage reporting
 
-Optional extensions (require extras):
-- extensions.crewai: CrewAI support [crewai]
-- api: A2A Protocol Server [a2a] (A2A Protocol is the standard)
-- cli: CLI tools [cli]
-
-Protocol Standard: A2A (Agent-to-Agent) Protocol
+Protocol integration via apcore ecosystem:
+- apcore-mcp: Model Context Protocol server [mcp-server]
+- apcore-a2a: Agent-to-Agent Protocol server [a2a-server]
+- apcore-cli: Command-line interface [cli-gen]
 """
 
-__version__ = "0.18.2"
+__version__ = "0.20.0a1"
 
-# Lazy imports to keep package import fast and avoid circular dependencies
-# Core framework exports are loaded on first access via __getattr__
 __all__ = [
     # Core framework
     "ExecutableTask",
@@ -32,9 +31,6 @@ __all__ = [
     "get_default_session",
     "get_hook_session",
     "get_hook_repository",
-    # Backward compatibility (deprecated)
-    "create_storage",
-    "get_default_storage",
     # Unified decorators
     "register_pre_hook",
     "register_post_hook",
@@ -76,8 +72,6 @@ def __getattr__(name):
         "get_default_session",
         "get_hook_session",
         "get_hook_repository",
-        "create_storage",
-        "get_default_storage",
     ):
         from apflow.core import (
             ExecutableTask,  # noqa: F401
@@ -88,8 +82,6 @@ def __getattr__(name):
             get_default_session,  # noqa: F401
             get_hook_session,  # noqa: F401
             get_hook_repository,  # noqa: F401
-            create_storage,  # noqa: F401
-            get_default_storage,  # noqa: F401
         )
 
         return locals()[name]

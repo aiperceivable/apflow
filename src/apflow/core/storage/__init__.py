@@ -1,7 +1,7 @@
 """
 Storage module for apflow
 
-Provides database session factory with default DuckDB (embedded, zero-config) and optional PostgreSQL support.
+Provides database session factory with default SQLite (embedded, zero-config) and optional PostgreSQL support.
 """
 
 from apflow.core.storage.factory import (

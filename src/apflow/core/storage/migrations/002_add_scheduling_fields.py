@@ -16,7 +16,7 @@ File: 002_add_scheduling_fields.py
 ID: 002_add_scheduling_fields (auto-extracted from filename)
 """
 
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine, inspect as sa_inspect, text
 from apflow.core.storage.migrations import Migration
 from apflow.core.storage.sqlalchemy.models import TASK_TABLE_NAME
 from apflow.logger import get_logger
@@ -34,42 +34,22 @@ class AddSchedulingFields(Migration):
         """Apply migration"""
         table_name = TASK_TABLE_NAME
 
-        # Check if table exists using raw SQL for better DuckDB compatibility
+        # Check if table exists using SQLAlchemy inspector (works for SQLite + PostgreSQL)
         try:
-            with engine.begin() as conn:
-                result = conn.execute(
-                    text(
-                        f"SELECT COUNT(*) FROM information_schema.tables "
-                        f"WHERE table_name = '{table_name}'"
-                    )
-                )
-                if result.scalar() == 0:
-                    logger.debug(f"Table '{table_name}' does not exist, skipping migration")
-                    return
+            inspector = sa_inspect(engine)
+            if table_name not in inspector.get_table_names():
+                logger.debug(f"Table '{table_name}' does not exist, skipping migration")
+                return
         except Exception as e:
             logger.debug(f"Could not check table existence: {str(e)}, skipping migration")
             return
 
-        # Get existing columns using raw SQL for better DuckDB compatibility
+        # Get existing columns using SQLAlchemy inspector
         try:
-            with engine.begin() as conn:
-                result = conn.execute(
-                    text(
-                        f"SELECT column_name FROM information_schema.columns "
-                        f"WHERE table_name = '{table_name}'"
-                    )
-                )
-                existing_columns = {row[0] for row in result}
-        except Exception:
-            # Fallback: try to get columns using inspector
-            try:
-                from sqlalchemy import inspect as sa_inspect
-
-                inspector = sa_inspect(engine)
-                existing_columns = {col["name"] for col in inspector.get_columns(table_name)}
-            except Exception as e:
-                logger.warning(f"Could not get columns for '{table_name}': {str(e)}")
-                return
+            existing_columns = {col["name"] for col in inspector.get_columns(table_name)}
+        except Exception as e:
+            logger.warning(f"Could not get columns for '{table_name}': {str(e)}")
+            return
 
         # Define new columns to add
         new_columns = {
@@ -124,41 +104,22 @@ class AddSchedulingFields(Migration):
         """Rollback migration (drop columns)"""
         table_name = TASK_TABLE_NAME
 
-        # Check if table exists
+        # Check if table exists using SQLAlchemy inspector
         try:
-            with engine.begin() as conn:
-                result = conn.execute(
-                    text(
-                        f"SELECT COUNT(*) FROM information_schema.tables "
-                        f"WHERE table_name = '{table_name}'"
-                    )
-                )
-                if result.scalar() == 0:
-                    logger.debug(f"Table '{table_name}' does not exist, skipping downgrade")
-                    return
+            inspector = sa_inspect(engine)
+            if table_name not in inspector.get_table_names():
+                logger.debug(f"Table '{table_name}' does not exist, skipping downgrade")
+                return
         except Exception as e:
             logger.debug(f"Could not check table existence: {str(e)}, skipping downgrade")
             return
 
         # Get existing columns
         try:
-            with engine.begin() as conn:
-                result = conn.execute(
-                    text(
-                        f"SELECT column_name FROM information_schema.columns "
-                        f"WHERE table_name = '{table_name}'"
-                    )
-                )
-                existing_columns = {row[0] for row in result}
-        except Exception:
-            try:
-                from sqlalchemy import inspect as sa_inspect
-
-                inspector = sa_inspect(engine)
-                existing_columns = {col["name"] for col in inspector.get_columns(table_name)}
-            except Exception as e:
-                logger.warning(f"Could not get columns for '{table_name}': {str(e)}")
-                return
+            existing_columns = {col["name"] for col in inspector.get_columns(table_name)}
+        except Exception as e:
+            logger.warning(f"Could not get columns for '{table_name}': {str(e)}")
+            return
 
         # Columns to drop
         columns_to_drop = [

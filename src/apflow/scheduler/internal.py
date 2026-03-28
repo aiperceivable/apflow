@@ -5,7 +5,7 @@ Built-in scheduler for apflow that polls for due tasks and executes them.
 Uses asyncio for lightweight scheduling without external dependencies.
 
 When an API server is running (apflow serve), the scheduler auto-detects it
-and routes all operations through the API to avoid DuckDB single-writer
+and routes all operations through the API to avoid SQLite single-writer
 conflicts. Falls back to direct DB access when the API is unavailable.
 
 For production deployments requiring high availability, consider using
@@ -16,10 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone, timedelta
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
-
-if TYPE_CHECKING:
-    from apflow.cli.api_client import APIClient
+from typing import Any, Dict, List, Optional, Set
 
 from apflow.scheduler.base import (
     BaseScheduler,
@@ -327,7 +324,7 @@ class InternalScheduler(BaseScheduler):
 
         return self._auto_auth_token
 
-    def _create_api_client(self, timeout: Optional[float] = None) -> "APIClient":
+    def _create_api_client(self, timeout: Optional[float] = None) -> Any:
         """Create an APIClient configured from ConfigManager.
 
         Args:
@@ -337,7 +334,14 @@ class InternalScheduler(BaseScheduler):
         Returns:
             Configured APIClient instance (use as async context manager).
         """
-        from apflow.cli.api_client import APIClient
+        try:
+            from apflow.cli.api_client import APIClient
+        except ImportError:
+            raise ImportError(
+                "API client requires the [cli] extra. "
+                "Scheduler API mode is not available in v2. "
+                "Use direct DB mode instead."
+            )
         from apflow.core.config_manager import get_config_manager
 
         cm = get_config_manager()
@@ -434,7 +438,7 @@ class InternalScheduler(BaseScheduler):
         Get tasks that are due for execution.
 
         Uses API when configured, direct DB access otherwise.
-        When API mode is active, does NOT fall back to DB — DuckDB's
+        When API mode is active, does NOT fall back to DB — SQLite's
         single-writer lock means the API server already holds the lock.
 
         Returns:
@@ -493,7 +497,7 @@ class InternalScheduler(BaseScheduler):
         Execute a single scheduled task.
 
         Uses API when configured, direct DB access otherwise.
-        When API mode is active, does NOT fall back to DB — DuckDB's
+        When API mode is active, does NOT fall back to DB — SQLite's
         single-writer lock means the API server already holds the lock.
 
         Args:

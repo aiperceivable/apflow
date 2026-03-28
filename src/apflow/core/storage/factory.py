@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy import create_engine, Engine
+from sqlalchemy import event as sa_event
 from apflow.core.storage.sqlalchemy.models import Base
 from apflow.core.storage.dialects.registry import get_dialect_config
 from apflow.core.storage.migrate import MigrationManager
@@ -31,7 +32,7 @@ def _migrate_schema_if_needed(engine: Engine) -> None:
     Each migration is recorded in the migration history table to ensure
     idempotent execution - migrations are only run once.
 
-    Supports: DuckDB, PostgreSQL
+    Supports: SQLite, PostgreSQL
     """
     try:
         migration_manager = MigrationManager()
@@ -39,6 +40,19 @@ def _migrate_schema_if_needed(engine: Engine) -> None:
     except Exception as e:
         logger.error(f"✗ Schema migration failed: {str(e)}")
         raise
+
+
+def _apply_sqlite_pragmas(engine: Engine) -> None:
+    """Apply PRAGMA statements for WAL mode on SQLite connections."""
+    if "sqlite" in str(engine.url):
+        from apflow.core.storage.dialects.sqlite import SQLiteDialect
+
+        @sa_event.listens_for(engine, "connect")
+        def set_sqlite_pragma(dbapi_conn, connection_record):
+            cursor = dbapi_conn.cursor()
+            for pragma in SQLiteDialect.get_pragma_statements():
+                cursor.execute(pragma)
+            cursor.close()
 
 
 class SessionRegistry:
@@ -199,7 +213,7 @@ class SessionPoolManager:
 
         Args:
             connection_string: Database connection string
-            path: Database file path (DuckDB only)
+            path: Database file path (SQLite only)
             async_mode: Whether to use async mode
             **kwargs: Additional engine parameters
         """
@@ -232,31 +246,29 @@ class SessionPoolManager:
                     if async_mode is None:
                         async_mode = True
                     connection_string = normalize_postgresql_url(connection_string, async_mode)
-                elif connection_string.startswith("duckdb://"):
-                    dialect = "duckdb"
+                elif connection_string.startswith("sqlite://"):
+                    dialect = "sqlite"
                     if async_mode is None:
                         async_mode = False
-                    path = connection_string.replace("duckdb:///", "").replace("duckdb://", "")
+                    path = connection_string.replace("sqlite:///", "").replace("sqlite://", "")
                     if path == "" or path == ":memory:":
                         path = ":memory:"
                     else:
                         path = str(Path(path).absolute())
-                        # Ensure directory exists before creating connection
                         _ensure_database_directory_exists(path)
                 else:
                     raise ValueError(
                         f"Unsupported connection string format: {connection_string}. "
-                        f"Supported formats: postgresql://..., postgresql+asyncpg://..., duckdb://..."
+                        f"Supported formats: postgresql://..., postgresql+asyncpg://..., sqlite://..."
                     )
             else:
-                dialect = "duckdb"
+                dialect = "sqlite"
                 if async_mode is None:
                     async_mode = False
                 if path is None:
                     path = _get_default_db_path()
                 elif path != ":memory:":
                     path = str(Path(path).absolute())
-                    # Ensure directory exists before creating connection
                     _ensure_database_directory_exists(path)
 
             try:
@@ -265,9 +277,9 @@ class SessionPoolManager:
                 if dialect == "postgresql":
                     logger.warning(
                         "PostgreSQL not available (install with [postgres] extra), "
-                        "falling back to DuckDB"
+                        "falling back to SQLite"
                     )
-                    dialect = "duckdb"
+                    dialect = "sqlite"
                     dialect_config = get_dialect_config(dialect)
                     if path is None:
                         path = _get_default_db_path()
@@ -278,7 +290,7 @@ class SessionPoolManager:
 
             # Generate connection string if not provided
             if connection_string is None:
-                if dialect == "duckdb":
+                if dialect == "sqlite":
                     connection_string = dialect_config.get_connection_string(path=path)
                 else:
                     raise ValueError("Connection string is required for PostgreSQL")
@@ -296,6 +308,7 @@ class SessionPoolManager:
                 )
             else:
                 self._engine = create_engine(connection_string, **engine_kwargs)
+                _apply_sqlite_pragmas(self._engine)
                 self._sessionmaker = sessionmaker(
                     self._engine, class_=Session, expire_on_commit=False
                 )
@@ -509,7 +522,7 @@ def _ensure_database_directory_exists(db_path: Union[str, Path]) -> None:
     """
     Ensure database directory exists before creating connection.
 
-    DuckDB doesn't automatically create directories, so we need to create
+    SQLite doesn't automatically create directories, so we need to create
     the parent directory if the database path contains a directory component.
 
     Args:
@@ -541,11 +554,11 @@ def _get_default_db_path() -> str:
     """
     Get default database path with project-aware priority.
 
-    Priority order (only for DuckDB file path, not for DATABASE_URL):
-    1. Project-local .data/apflow.duckdb (if exists)
-    2. Legacy ~/.aiperceivable/data/apflow.duckdb (if exists - backward compatible)
-    3. Project-local .data/apflow.duckdb (default for new projects)
-    4. Global ~/.aiperceivable/data/apflow.duckdb (if not in project)
+    Priority order (only for SQLite file path, not for DATABASE_URL):
+    1. Project-local .data/apflow.db (if exists)
+    2. Legacy ~/.aiperceivable/data/apflow.db (if exists - backward compatible)
+    3. Project-local .data/apflow.db (default for new projects)
+    4. Global ~/.aiperceivable/data/apflow.db (if not in project)
 
     Note: If DATABASE_URL or APFLOW_DATABASE_URL is set, this function is not used.
           Use those environment variables for explicit path/connection control.
@@ -558,8 +571,8 @@ def _get_default_db_path() -> str:
     # Check if in project context
     project_data_dir = get_project_data_dir()
     if project_data_dir:
-        new_path = project_data_dir / "apflow.duckdb"
-        old_path = Path.home() / ".aiperceivable" / "data" / "apflow.duckdb"
+        new_path = project_data_dir / "apflow.db"
+        old_path = Path.home() / ".aiperceivable" / "data" / "apflow.db"
 
         # Priority: new location exists, or old exists (backward compat), or create new
         if new_path.exists():
@@ -581,7 +594,7 @@ def _get_default_db_path() -> str:
     home_dir = Path.home()
     data_dir = home_dir / ".aiperceivable" / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
-    db_path = str(data_dir / "apflow.duckdb")
+    db_path = str(data_dir / "apflow.db")
     logger.debug(f"Database path: {db_path} (global)")
     return db_path
 
@@ -597,59 +610,44 @@ def create_session(
 
     This function automatically detects the database type from the connection string.
     If connection_string is provided, it will be used directly (supports PostgreSQL with SSL).
-    If connection_string is None, it defaults to DuckDB.
+    If connection_string is None, it defaults to SQLite.
 
     Args:
         connection_string: Full database connection string. Examples:
-            - PostgreSQL: "postgresql://user:password@host:port/dbname" (automatically converted to postgresql+asyncpg:// for async mode)
+            - PostgreSQL: "postgresql://user:password@host:port/dbname"
             - PostgreSQL: "postgresql+asyncpg://user:password@host:port/dbname?sslmode=require"
-            - PostgreSQL with SSL cert: "postgresql+asyncpg://user:password@host:port/dbname?sslrootcert=/path/to/cert"
-            - DuckDB: "duckdb:///path/to/file.duckdb" or "duckdb:///:memory:"
-            If None, defaults to DuckDB using path parameter
-            Note: For PostgreSQL, if connection_string is "postgresql://..." (without driver),
-                  it will be automatically normalized to "postgresql+asyncpg://..." for async mode
-                  or "postgresql+psycopg2://..." for sync mode.
-        path: Database file path (DuckDB only, used when connection_string is None)
+            - SQLite: "sqlite:///path/to/file.db" or "sqlite:///:memory:"
+            If None, defaults to SQLite using path parameter
+        path: Database file path (SQLite only, used when connection_string is None)
             - If None and connection_string is None: uses default persistent path
             - If ":memory:": uses in-memory database
             - Otherwise: uses file path
         async_mode: Whether to use async mode. If None:
             - For PostgreSQL: defaults to True (async mode)
-            - For DuckDB: defaults to False (sync mode, DuckDB doesn't support async drivers)
+            - For SQLite: defaults to False (sync mode)
         **kwargs: Additional engine parameters (e.g., pool_size, pool_pre_ping)
 
     Returns:
         Database session (Session or AsyncSession)
 
     Examples:
-        # Default DuckDB (persistent file)
+        # Default SQLite (persistent file)
         session = create_session()
 
-        # DuckDB in-memory
+        # SQLite in-memory
         session = create_session(path=":memory:")
 
-        # DuckDB file
-        session = create_session(path="./data/agentflow.duckdb")
+        # SQLite file
+        session = create_session(path="./data/apflow.db")
 
         # PostgreSQL with connection string (recommended for library usage)
-        # Note: "postgresql://" is automatically converted to "postgresql+asyncpg://" for async mode
         session = create_session(
             connection_string="postgresql://user:password@localhost/dbname"
         )
 
-        # PostgreSQL with explicit driver
-        session = create_session(
-            connection_string="postgresql+asyncpg://user:password@localhost/dbname"
-        )
-
-        # PostgreSQL with SSL (auto-converted)
+        # PostgreSQL with SSL
         session = create_session(
             connection_string="postgresql://user:password@host:port/dbname?sslmode=require"
-        )
-
-        # PostgreSQL with SSL certificate (auto-converted)
-        session = create_session(
-            connection_string="postgresql://user:password@host:port/dbname?sslrootcert=/path/to/ca.crt"
         )
     """
     # Determine dialect and connection string
@@ -657,51 +655,44 @@ def create_session(
         # Connection string provided - detect dialect from connection string
         if is_postgresql_url(connection_string):
             dialect = "postgresql"
-            # For PostgreSQL, default to async mode if not specified
             if async_mode is None:
                 async_mode = True
-            # Normalize PostgreSQL URL to use appropriate driver
             connection_string = normalize_postgresql_url(connection_string, async_mode)
-        elif connection_string.startswith("duckdb://"):
-            dialect = "duckdb"
-            # For DuckDB, default to sync mode if not specified
+        elif connection_string.startswith("sqlite://"):
+            dialect = "sqlite"
             if async_mode is None:
                 async_mode = False
-            # Extract path from duckdb:// URL
-            path = connection_string.replace("duckdb:///", "").replace("duckdb://", "")
+            path = connection_string.replace("sqlite:///", "").replace("sqlite://", "")
             if path == "" or path == ":memory:":
                 path = ":memory:"
             else:
                 path = str(Path(path).absolute())
-                # Ensure directory exists before creating connection
                 _ensure_database_directory_exists(path)
         else:
             raise ValueError(
                 f"Unsupported connection string format: {connection_string}. "
-                f"Supported formats: postgresql://..., postgresql+asyncpg://..., duckdb://..."
+                f"Supported formats: postgresql://..., postgresql+asyncpg://..., sqlite://..."
             )
     else:
-        # No connection string - use DuckDB with path
-        dialect = "duckdb"
+        # No connection string - use SQLite with path
+        dialect = "sqlite"
         if async_mode is None:
             async_mode = False
         if path is None:
             path = _get_default_db_path()
         elif path != ":memory:":
             path = str(Path(path).absolute())
-            # Ensure directory exists before creating connection
             _ensure_database_directory_exists(path)
 
     try:
         dialect_config = get_dialect_config(dialect)
     except ValueError:
-        # If PostgreSQL not installed, fallback to DuckDB
         if dialect == "postgresql":
             logger.warning(
                 "PostgreSQL not available (install with [postgres] extra), "
-                "falling back to DuckDB"
+                "falling back to SQLite"
             )
-            dialect = "duckdb"
+            dialect = "sqlite"
             dialect_config = get_dialect_config(dialect)
             if path is None:
                 path = _get_default_db_path()
@@ -712,10 +703,9 @@ def create_session(
 
     # Generate connection string if not provided
     if connection_string is None:
-        if dialect == "duckdb":
+        if dialect == "sqlite":
             connection_string = dialect_config.get_connection_string(path=path)
         else:
-            # This should not happen, but handle it gracefully
             raise ValueError("Connection string is required for PostgreSQL")
 
     # Get engine kwargs from dialect config and merge with user-provided kwargs
@@ -729,6 +719,7 @@ def create_session(
         session = session_maker()
     else:
         engine = create_engine(connection_string, **engine_kwargs)
+        _apply_sqlite_pragmas(engine)
         session_maker = sessionmaker(engine, class_=Session, expire_on_commit=False)
         session = session_maker()
 
@@ -790,7 +781,7 @@ def get_default_session(
         - This function is still available for backward compatibility
         - Consider using `with_db_session_context()` for better session management
 
-    Supports both DuckDB (default) and PostgreSQL (via connection_string or DATABASE_URL environment variable).
+    Supports both SQLite (default) and PostgreSQL (via connection_string or DATABASE_URL environment variable).
 
     This function is designed for library usage - external projects can call this to set up database connection.
 
@@ -800,21 +791,21 @@ def get_default_session(
             Examples:
             - PostgreSQL: "postgresql://user:password@host:port/dbname" (automatically converted to postgresql+asyncpg:// for async mode)
             - PostgreSQL: "postgresql+asyncpg://user:password@host:port/dbname?sslmode=require"
-            - DuckDB: "duckdb:///path/to/file.duckdb"
+            - SQLite: "sqlite:///path/to/file.db"
             Note: For PostgreSQL, if connection_string is "postgresql://..." (without driver),
                   it will be automatically normalized to "postgresql+asyncpg://..." for async mode
                   or "postgresql+psycopg2://..." for sync mode.
-        path: Database file path (DuckDB only, used when connection_string is None).
+        path: Database file path (SQLite only, used when connection_string is None).
             If None:
               - Checks DATABASE_URL or APFLOW_DATABASE_URL environment variable first
               - If PostgreSQL URL, uses PostgreSQL
               - Otherwise, uses project-aware default path priority:
-                * Project-local .data/apflow.duckdb (if in project)
-                * Global ~/.aiperceivable/data/apflow.duckdb (if not in project)
-              - Otherwise, uses persistent database at ~/.aiperceivable/data/apflow.duckdb
+                * Project-local .data/apflow.db (if in project)
+                * Global ~/.aiperceivable/data/apflow.db (if not in project)
+              - Otherwise, uses persistent database at ~/.aiperceivable/data/apflow.db
         async_mode: Whether to use async mode. If None:
                    - For PostgreSQL: defaults to True (async mode)
-                   - For DuckDB: defaults to False (sync mode, since DuckDB doesn't support async drivers)
+                   - For SQLite: defaults to False (sync mode, since SQLite doesn't support async drivers)
         **kwargs: Additional engine parameters
 
     Returns:
@@ -834,8 +825,8 @@ def get_default_session(
             connection_string="postgresql+asyncpg://user:password@host:port/dbname?sslmode=require&sslrootcert=/path/to/ca.crt"
         )
 
-        # Use DuckDB file
-        session = get_default_session(path="./data/app.duckdb")
+        # Use SQLite file
+        session = get_default_session(path="./data/app.db")
     """
     session = SessionRegistry.get_default_session()
 
@@ -910,8 +901,8 @@ def configure_database(
             - PostgreSQL: "postgresql+asyncpg://user:password@host:port/dbname"
             - PostgreSQL with SSL: "postgresql+asyncpg://user:password@host:port/dbname?sslmode=require"
             - PostgreSQL with SSL cert: "postgresql+asyncpg://user:password@host:port/dbname?sslrootcert=/path/to/ca.crt"
-            - DuckDB: "duckdb:///path/to/file.duckdb"
-        path: Database file path (DuckDB only, used when connection_string is None)
+            - SQLite: "sqlite:///path/to/file.db"
+        path: Database file path (SQLite only, used when connection_string is None)
         async_mode: Whether to use async mode
         **kwargs: Additional engine parameters
 
@@ -931,8 +922,8 @@ def configure_database(
             connection_string="postgresql+asyncpg://user:password@host:port/dbname?sslmode=require&sslrootcert=/path/to/ca.crt"
         )
 
-        # Configure DuckDB
-        session = configure_database(path="./data/app.duckdb")
+        # Configure SQLite
+        session = configure_database(path="./data/app.db")
     """
     reset_default_session()
     return get_default_session(
@@ -973,8 +964,8 @@ class PooledSessionContext:
         Args:
             connection_string: Database connection string (optional)
                 - If starts with "postgresql://" or "postgresql+" → PostgreSQL, async_mode=True
-                - If starts with "duckdb://" → DuckDB, extract path, async_mode=False
-                - If None → use default DuckDB path
+                - If starts with "sqlite://" → SQLite, extract path, async_mode=False
+                - If None → use default SQLite path
             **kwargs: Additional engine parameters
         """
         self._pool_manager: Optional[SessionPoolManager] = None
@@ -988,9 +979,9 @@ class PooledSessionContext:
         if connection_string is not None:
             if is_postgresql_url(connection_string):
                 async_mode = True
-            elif connection_string.startswith("duckdb://"):
+            elif connection_string.startswith("sqlite://"):
                 async_mode = False
-                path = connection_string.replace("duckdb:///", "").replace("duckdb://", "")
+                path = connection_string.replace("sqlite:///", "").replace("sqlite://", "")
                 if path == "" or path == ":memory:":
                     path = ":memory:"
                 else:
@@ -998,7 +989,7 @@ class PooledSessionContext:
                     # Ensure directory exists before creating connection
                     _ensure_database_directory_exists(path)
         else:
-            # Default to DuckDB
+            # Default to SQLite
             async_mode = False
             path = _get_default_db_path()
             # Ensure directory exists (already handled in _get_default_db_path, but ensure for consistency)
@@ -1067,7 +1058,7 @@ def create_pooled_session(
 
     Args:
         connection_string: Database connection string (optional)
-        path: Database file path (DuckDB only, optional)
+        path: Database file path (SQLite only, optional)
         async_mode: Whether to use async mode (optional)
         **kwargs: Additional engine parameters
 

@@ -55,7 +55,7 @@ def get_project_data_dir() -> Optional[Path]:
     Examples:
         >>> data_dir = get_project_data_dir()
         >>> if data_dir:
-        ...     db_path = data_dir / "apflow.duckdb"
+        ...     db_path = data_dir / "apflow.db"
     """
     project_root = get_project_root()
     if project_root:

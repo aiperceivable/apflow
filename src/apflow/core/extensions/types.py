@@ -42,7 +42,7 @@ class ExtensionCategory(str, Enum):
     Storage backend implementations
     
     Examples:
-    - duckdb: DuckDB embedded database
+    - sqlite: SQLite embedded database
     - postgresql: PostgreSQL database
     
     Registered via @storage_register() decorator.

@@ -94,7 +94,7 @@ class Extension(ABC):
         This is used for categorization within a category.
         Examples:
         - Executor: "stdio", "crewai", "http"
-        - Storage: "duckdb", "postgres", "mongodb"
+        - Storage: "sqlite", "postgres", "mongodb"
         - Hook: "pre", "post", "error"
 
         Returns:

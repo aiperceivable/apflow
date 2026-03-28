@@ -17,7 +17,7 @@ Extensions are automatically registered when imported via type-specific decorato
 
 # Auto-import storage extensions to trigger registration
 try:
-    from apflow.extensions.storage import duckdb_storage  # noqa: F401
+    from apflow.extensions.storage import sqlite_storage  # noqa: F401
 
     try:
         from apflow.extensions.storage import postgres_storage  # noqa: F401

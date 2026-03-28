@@ -352,7 +352,7 @@ class ExtensionRegistry:
         Create a storage backend instance
 
         Args:
-            storage_id: Storage extension ID (e.g., "duckdb", "postgresql")
+            storage_id: Storage extension ID (e.g., "sqlite", "postgresql")
             **kwargs: Connection parameters for storage backend
 
         Returns:

@@ -20,10 +20,10 @@ class StorageBackend(Extension, ABC):
 
     Example:
         @storage_register()
-        class DuckDBStorage(StorageBackend):
-            id = "duckdb"
-            name = "DuckDB Storage"
-            type = "duckdb"
+        class SQLiteStorage(StorageBackend):
+            id = "sqlite"
+            name = "SQLite Storage"
+            type = "sqlite"
 
             def get_connection_string(self, **kwargs) -> str:
                 ...

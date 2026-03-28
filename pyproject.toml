@@ -4,62 +4,42 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "apflow"
-version = "0.18.2"
-description = "Agent workflow orchestration and execution platform"
+version = "0.20.0a1"
+description = "AI Agent Production Middleware"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
     {name = "aiperceivable", email = "tercel.yi@gmail.com"}
 ]
 license = {text = "Apache-2.0"}
-keywords = ["ai", "agent", "orchestration", "workflow", "task", "crewai", "a2a"]
+keywords = ["ai", "agent", "middleware", "production", "durable-execution", "cost-governance", "apcore"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
 
-# Core dependencies (pure orchestration framework - NO CrewAI)
+# Core dependencies
 dependencies = [
     "pydantic[email]>=2.0.0",
     "pydantic-settings>=2.0.0",
-    # Default storage support (embedded DuckDB)
+    # Default storage (SQLite via Python stdlib, no extra dep)
     "sqlalchemy>=2.0.0",
     "sqlalchemy-session-proxy>=0.1.0",
     "alembic>=1.13.0",
-    "duckdb-engine>=0.10.0",
-    "pytz>=2024.1",  # Required for DuckDB timezone support
+    # apcore module standard
+    "apcore>=0.14.0",
 ]
 
 # Optional dependencies
 [project.optional-dependencies]
-# A2A Protocol Server (Agent-to-Agent communication protocol)
-a2a = [
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.29.0",
-    "a2a-sdk[http-server]>=0.3.22",
-    "httpx[socks]>=0.27.0",  # Include socks support for proxy environments
-    "aiohttp[speedups]>=3.9.0",
-    "starlette>=0.27.0",
-    "websockets>=12.0",
-    "python-jose[cryptography]>=3.3.0",  # JWT token generation and verification
-]
-
-# CLI tools
-cli = [
-    "click>=8.0.0",
-    "rich>=13.0.0",
-    "typer>=0.9.0",
-    "python-dotenv>=1.0.0",  # For .env file support
-    "nest_asyncio>=1.5.0",  # For handling nested event loops in async CLI commands
-    "httpx>=0.27.0",  # For CLI → API gateway communication
-    "PyJWT>=2.8.0",  # For JWT token generation and verification
-    "pyyaml>=6.0.0",  # For YAML configuration file support
-]
+# Protocol exposure via apcore ecosystem
+mcp-server = ["apcore-mcp>=0.10.1"]
+a2a-server = ["apcore-a2a"]
+cli-gen = ["apcore-cli>=0.3.0"]
 
 # Documentation (MkDocs with Material theme)
 docs = [
@@ -70,128 +50,36 @@ docs = [
     "pymdown-extensions>=10.0.0",
 ]
 
-# PostgreSQL storage (enterprise/distributed scenarios)
+# PostgreSQL storage (distributed/production)
 postgres = [
     "asyncpg>=0.29.0",
     "psycopg2-binary>=2.9.9",
     "greenlet>=3.0.0",
 ]
 
-# CrewAI LLM task support (includes BatchCrewaiExecutor)
-crewai = [
-    "crewai[tools]>=1.7.2",
-    "litellm>=1.0.0",
-    "anthropic>=0.34.0",
-    # Fix compatibility issue: aiodns 3.6.0 is incompatible with pycares 5.0.0
-    # aiodns 3.6.1+ works with pycares 4.x, and pip will automatically resolve pycares version
-    "aiodns>=3.6.1",
-]
-
-# Templates feature removed - not planned for implementation
-# templates = []
-
-# Examples feature removed - demo tasks moved to apflow-demo project
-# examples = []  # Removed: use apflow-demo for demo task initialization
-
-# LLM Key Configuration Management (multi-user support)
-llm-key-config = []
-
 # Task scheduling (cron-like scheduling)
 scheduling = [
     "croniter>=1.0.0",
 ]
 
-# Email sending (Resend API + SMTP)
-email = [
-    "aiosmtplib>=3.0.0",
-]
-
-# SSH remote execution
-ssh = [
-    "asyncssh>=2.14.0",
-]
-
-# Docker container execution
-docker = [
-    "docker>=7.0.0",
-]
-
-# gRPC execution
-grpc = [
-    "grpclib>=0.4.7",
-    "protobuf>=4.25.0",
-    # Optional: nicer stubs/dataclasses when generating code
-    # "betterproto>=2.0.0rc3",
-]
-
-# GraphQL Protocol Server (Strawberry GraphQL)
-graphql = [
-    "strawberry-graphql>=0.220.0",
-    "fastapi>=0.115.0",
-    "starlette>=0.27.0",
-    "uvicorn[standard]>=0.29.0",
-]
-
-# MCP (Model Context Protocol) execution
-# Note: MCP executor uses stdio (standard library) and HTTP (httpx from a2a extra)
-# No additional dependencies required for stdio mode
-# For HTTP mode, install with [a2a] extra which includes httpx
-mcp = [
-    # MCP executor uses standard library for stdio mode
-    # httpx is available via [a2a] extra for HTTP mode
-    # No additional dependencies needed
-]
-
-# LLM execution via LiteLLM
-llm = [
-    "litellm>=1.0.0",
-]
-
-tools = [
-    "requests>=2.31.0",
-    "beautifulsoup4>=4.12.0",
-    "trafilatura>=2.0.0",
-    "brotli==1.2.0",
-    "bs4>=0.0.2",
-]
-
-# Standard installation (recommended for most use cases)
-# Includes A2A server, CLI tools, CrewAI, LLM support, and scheduling
-standard = [
-    "apflow[a2a,cli,crewai,llm,tools,scheduling]",
-]
+# Tool executors (optional)
+email = ["aiosmtplib>=3.0.0"]
+ssh = ["asyncssh>=2.14.0"]
+docker = ["docker>=7.0.0"]
 
 # Development dependencies
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
-    "pytest-timeout>=2.1.0",  # For detecting hanging tests
+    "pytest-timeout>=2.1.0",
     "black>=23.0.0",
     "ruff>=0.1.0",
     "mypy>=1.5.0",
     "build>=1.0.0",
     "twine>=4.0.0",
-    "jsonfinder>=0.4.0",
     "pre-commit>=3.0.0",
-    "apdev[dev]>=0.1.6",
-    "memory-profiler>=0.61.0",  # Memory profiling for leak detection
-    "psutil>=5.9.0",  # System and process utilities for memory monitoring
 ]
-
-# Full installation (all features)
-all = [
-    "apflow[crewai,a2a,cli,postgres,llm-key-config,email,ssh,docker,grpc,mcp,graphql,llm,tools,scheduling]",
-]
-
-[project.scripts]
-# CLI tools (requires [cli] extra)
-apflow = "apflow.cli.main:main"
-
-# A2A Protocol Server entry point (requires [a2a] extra)
-# Usage: python -m apflow.api.main
-# Or: apflow-server (if installed with [a2a] extra)
-apflow-server = "apflow.api.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -201,14 +89,14 @@ where = ["src"]
 
 [tool.black]
 line-length = 100
-target-version = ['py310', 'py311', 'py312']
+target-version = ['py311', 'py312']
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
@@ -219,4 +107,4 @@ src_dir = "src"
 
 [project.urls]
 Homepage = "https://aiperceivable.com"
-Source = "https://github.com/aiperceivable/apflow" 
+Source = "https://github.com/aiperceivable/apflow"

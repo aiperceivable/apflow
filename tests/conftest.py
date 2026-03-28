@@ -17,9 +17,9 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-# Set DATABASE_URL to a unique DuckDB file for the whole test session before any apflow or DB-related imports
-test_db_file = f"{project_root}/.data/apflow_{uuid.uuid4().hex[:8]}.test.duckdb"
-os.environ["DATABASE_URL"] = f"duckdb:///{test_db_file}"
+# Set DATABASE_URL to a unique SQLite file for the whole test session before any apflow or DB-related imports
+test_db_file = f"{project_root}/.data/apflow_{uuid.uuid4().hex[:8]}.test.db"
+os.environ["DATABASE_URL"] = f"sqlite:///{test_db_file}"
 print(f"set DATABASE_URL: {os.getenv('DATABASE_URL')}")
 
 # IMPORTANT: Set other environment variables BEFORE any imports that might use them
@@ -132,10 +132,10 @@ def _get_test_database_url() -> Optional[str]:
 @pytest.fixture(scope="session", autouse=True)
 def cleanup_test_db_file():
     yield
-    db_file = os.environ["DATABASE_URL"].replace("duckdb:///", "")
+    db_file = os.environ["DATABASE_URL"].replace("sqlite:///", "")
     print("cleanup_test_db_file called")
     print("db_file:", db_file, "exists:", os.path.exists(db_file))
-    if db_file.endswith(".test.duckdb") and os.path.exists(db_file):
+    if db_file.endswith(".test.db") and os.path.exists(db_file):
         try:
             print("Removing test database file:", db_file)
             os.remove(db_file)
@@ -157,7 +157,7 @@ def temp_db_path(tmp_path):
     # Use temporary file-based DuckDB instead of in-memory
     # This ensures all code paths accessing the database see the same data
     # In-memory databases are isolated per connection, causing table creation issues
-    db_file = tmp_path / f"test_{uuid.uuid4().hex[:8]}.duckdb"
+    db_file = tmp_path / f"test_{uuid.uuid4().hex[:8]}.db"
     logger.info(f"Using temporary DuckDB file for testing: {db_file}")
     yield str(db_file)
 
@@ -257,7 +257,7 @@ def sync_db_session(temp_db_path):
                 pass
 
         # Create engine with DuckDB
-        engine = create_engine(f"duckdb:///{temp_db_path}", echo=False)
+        engine = create_engine(f"sqlite:///{temp_db_path}", echo=False)
 
         # For DuckDB, we don't need to drop tables because each test uses a new file
         # The file is deleted after each test, so schema is always fresh
@@ -715,7 +715,7 @@ def use_test_db_session(sync_db_session, temp_db_path):
         os.environ["DATABASE_URL"] = test_db_url
     elif temp_db_path:
         # DuckDB file - set DATABASE_URL to point to the temp file
-        duckdb_url = f"duckdb:///{temp_db_path}"
+        duckdb_url = f"sqlite:///{temp_db_path}"
         os.environ["DATABASE_URL"] = duckdb_url
         logger.debug(f"Set test DATABASE_URL to: {duckdb_url}")
 
@@ -736,9 +736,6 @@ def use_test_db_session(sync_db_session, temp_db_path):
         patch(
             "apflow.core.storage.factory.create_pooled_session",
             side_effect=mock_create_pooled_session,
-        ),
-        patch(
-            "apflow.api.routes.tasks.create_pooled_session", side_effect=mock_create_pooled_session
         ),
         patch(
             "apflow.core.execution.task_executor.create_pooled_session",
@@ -841,7 +838,7 @@ def fresh_db_session(temp_db_path):
             except Exception:
                 pass
 
-        engine = create_engine(f"duckdb:///{temp_db_path}", echo=False)
+        engine = create_engine(f"sqlite:///{temp_db_path}", echo=False)
 
         # Drop and recreate tables to ensure schema matches
         try:

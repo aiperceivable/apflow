@@ -64,12 +64,12 @@ class TestDefaultDbPathPriority:
     """
 
     def test_new_project_uses_project_local_path(self, temp_project_with_pyproject, mock_home_dir):
-        """Test that new projects without existing db use project-local .data/apflow.duckdb."""
+        """Test that new projects without existing db use project-local .data/apflow.db."""
         with patch("pathlib.Path.cwd", return_value=temp_project_with_pyproject):
             with patch("pathlib.Path.home", return_value=mock_home_dir):
                 with patch.dict(os.environ, {}, clear=True):
                     result = _get_default_db_path()
-                    expected = str(temp_project_with_pyproject / ".data" / "apflow.duckdb")
+                    expected = str(temp_project_with_pyproject / ".data" / "apflow.db")
                     assert result == expected
 
     def test_existing_project_local_db_is_used(self, temp_project_with_pyproject, mock_home_dir):
@@ -77,7 +77,7 @@ class TestDefaultDbPathPriority:
         # Create project-local database
         data_dir = temp_project_with_pyproject / ".data"
         data_dir.mkdir()
-        project_db = data_dir / "apflow.duckdb"
+        project_db = data_dir / "apflow.db"
         project_db.touch()
 
         with patch("pathlib.Path.cwd", return_value=temp_project_with_pyproject):
@@ -93,7 +93,7 @@ class TestDefaultDbPathPriority:
         # Create legacy database location
         legacy_dir = mock_home_dir / ".aiperceivable" / "data"
         legacy_dir.mkdir(parents=True)
-        legacy_db = legacy_dir / "apflow.duckdb"
+        legacy_db = legacy_dir / "apflow.db"
         legacy_db.touch()
 
         with patch("pathlib.Path.cwd", return_value=temp_project_with_pyproject):
@@ -109,12 +109,12 @@ class TestDefaultDbPathPriority:
         # Create both databases
         data_dir = temp_project_with_pyproject / ".data"
         data_dir.mkdir()
-        project_db = data_dir / "apflow.duckdb"
+        project_db = data_dir / "apflow.db"
         project_db.touch()
 
         legacy_dir = mock_home_dir / ".aiperceivable" / "data"
         legacy_dir.mkdir(parents=True)
-        legacy_db = legacy_dir / "apflow.duckdb"
+        legacy_db = legacy_dir / "apflow.db"
         legacy_db.touch()
 
         with patch("pathlib.Path.cwd", return_value=temp_project_with_pyproject):
@@ -129,7 +129,7 @@ class TestDefaultDbPathPriority:
             with patch("pathlib.Path.home", return_value=mock_home_dir):
                 with patch.dict(os.environ, {}, clear=True):
                     result = _get_default_db_path()
-                    expected = str(mock_home_dir / ".aiperceivable" / "data" / "apflow.duckdb")
+                    expected = str(mock_home_dir / ".aiperceivable" / "data" / "apflow.db")
                     assert result == expected
 
     def test_global_location_directory_is_created(self, temp_non_project_dir, mock_home_dir):
@@ -168,7 +168,7 @@ class TestDefaultDbPathPriority:
         # Create project-local database
         data_dir = temp_project_with_pyproject / ".data"
         data_dir.mkdir()
-        project_db = data_dir / "apflow.duckdb"
+        project_db = data_dir / "apflow.db"
         project_db.touch()
 
         with patch("pathlib.Path.cwd", return_value=subdir):
@@ -250,7 +250,7 @@ class TestDatabasePathLogging:
         # Create legacy database
         legacy_dir = mock_home_dir / ".aiperceivable" / "data"
         legacy_dir.mkdir(parents=True)
-        legacy_db = legacy_dir / "apflow.duckdb"
+        legacy_db = legacy_dir / "apflow.db"
         legacy_db.touch()
 
         with caplog.at_level(logging.DEBUG, logger="apflow.core.storage.factory"):
@@ -285,7 +285,7 @@ class TestDatabasePathEdgeCases:
                 with patch.dict(os.environ, {}, clear=True):
                     result = _get_default_db_path()
                     # Should work without errors
-                    assert "apflow.duckdb" in result
+                    assert "apflow.db" in result
 
     def test_handles_multiple_project_markers(self, tmp_path, mock_home_dir):
         """Test behavior when both pyproject.toml and .git exist."""
@@ -298,7 +298,7 @@ class TestDatabasePathEdgeCases:
             with patch("pathlib.Path.home", return_value=mock_home_dir):
                 with patch.dict(os.environ, {}, clear=True):
                     result = _get_default_db_path()
-                    expected = str(project_dir / ".data" / "apflow.duckdb")
+                    expected = str(project_dir / ".data" / "apflow.db")
                     assert result == expected
 
     def test_empty_env_var_is_ignored(self, temp_project_with_pyproject, mock_home_dir):
@@ -308,5 +308,5 @@ class TestDatabasePathEdgeCases:
                 with patch.dict(os.environ, {"APFLOW_DB_PATH": ""}, clear=False):
                     result = _get_default_db_path()
                     # Empty string is falsy, so should use default logic
-                    expected = str(temp_project_with_pyproject / ".data" / "apflow.duckdb")
+                    expected = str(temp_project_with_pyproject / ".data" / "apflow.db")
                     assert result == expected or ".aiperceivable" in result

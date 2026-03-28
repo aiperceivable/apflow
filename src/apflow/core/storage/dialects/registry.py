@@ -3,7 +3,7 @@ Database dialect registry
 """
 
 from typing import Dict, Type, Protocol
-from apflow.core.storage.dialects.duckdb import DuckDBDialect
+from apflow.core.storage.dialects.sqlite import SQLiteDialect
 
 
 # Dialect protocol
@@ -42,8 +42,7 @@ def get_dialect_config(name: str):
 
 
 # Register built-in dialects
-register_dialect("duckdb", DuckDBDialect)
-register_dialect("duckdb", DuckDBDialect)  # Alias
+register_dialect("sqlite", SQLiteDialect)
 
 # Lazy register PostgreSQL (if available)
 try:

@@ -453,26 +453,26 @@ class TestTaskCreator:
         assert child_task.dependencies[0]["required"] is True
 
     @pytest.mark.asyncio
-    async def test_error_multiple_root(self, sync_db_session):
-        """Test error when multiple tasks"""
+    async def test_multiple_root_allowed(self, sync_db_session):
+        """Multi-root creation is now allowed in v2."""
         creator = TaskCreator(sync_db_session)
 
-        # Mixed mode: some tasks have id, some don't (not supported)
         tasks = [
             {
-                "id": "task_1",  # Has id
+                "id": "task_1",
                 "name": "Task 1",
                 "user_id": "user_123",
             },
             {
-                "id": "task_2",  # Has id
+                "id": "task_2",
                 "name": "Task 2",
                 "user_id": "user_123",
             },
         ]
 
-        with pytest.raises(ValueError, match="All tasks must be in a single task tree"):
-            await creator.create_task_tree_from_array(tasks)
+        result = await creator.create_task_tree_from_array(tasks)
+        assert result is not None
+        assert result.task.name == "Task 1"
 
     @pytest.mark.asyncio
     async def test_create_task_tree_multiple_levels(self, sync_db_session):
@@ -1127,8 +1127,8 @@ class TestTaskCreator:
         assert len(task_c.dependencies) == 2
 
     @pytest.mark.asyncio
-    async def test_error_multiple_root_tasks(self, sync_db_session):
-        """Test error when multiple root tasks are provided (tasks not in same tree)"""
+    async def test_multi_root_tasks_allowed(self, sync_db_session):
+        """Multi-root task forests are now allowed (v2 relaxation)."""
         creator = TaskCreator(sync_db_session)
 
         tasks = [
@@ -1142,7 +1142,7 @@ class TestTaskCreator:
                 "id": "task_b",
                 "name": "Task B",
                 "user_id": "user_123",
-                # Root task 2 - multiple roots!
+                # Root task 2
             },
             {
                 "id": "task_c",
@@ -1152,12 +1152,14 @@ class TestTaskCreator:
             },
         ]
 
-        with pytest.raises(ValueError, match="Multiple root tasks found"):
-            await creator.create_task_tree_from_array(tasks)
+        # Should succeed — returns first root's tree
+        result = await creator.create_task_tree_from_array(tasks)
+        assert result is not None
+        assert result.task.name == "Task A"
 
     @pytest.mark.asyncio
-    async def test_error_tasks_not_in_same_tree(self, sync_db_session):
-        """Test error when tasks are not all reachable from root task"""
+    async def test_multi_root_disconnected_trees_allowed(self, sync_db_session):
+        """Disconnected trees (multi-root) are now allowed."""
         creator = TaskCreator(sync_db_session)
 
         tasks = [
@@ -1165,41 +1167,38 @@ class TestTaskCreator:
                 "id": "task_a",
                 "name": "Task A",
                 "user_id": "user_123",
-                # Root task
             },
             {
                 "id": "task_b",
                 "name": "Task B",
                 "user_id": "user_123",
-                "parent_id": "task_a",  # Child of task_a - in the tree
+                "parent_id": "task_a",
             },
             {
                 "id": "task_c",
                 "name": "Task C",
                 "user_id": "user_123",
-                "parent_id": "task_d",  # Child of task_d
+                "parent_id": "task_d",
             },
             {
                 "id": "task_d",
                 "name": "Task D",
                 "user_id": "user_123",
-                "parent_id": "task_e",  # Child of task_e - forms a disconnected chain
+                "parent_id": "task_e",
             },
             {
                 "id": "task_e",
                 "name": "Task E",
                 "user_id": "user_123",
-                # This is also a root task - disconnected from task_a
-                # Chain: task_e -> task_d -> task_c (disconnected from task_a -> task_b)
             },
         ]
 
-        with pytest.raises(ValueError, match="Multiple root tasks found"):
-            await creator.create_task_tree_from_array(tasks)
+        result = await creator.create_task_tree_from_array(tasks)
+        assert result is not None
 
     @pytest.mark.asyncio
-    async def test_error_disconnected_subtree(self, sync_db_session):
-        """Test error when there are disconnected subtrees"""
+    async def test_disconnected_subtree_allowed(self, sync_db_session):
+        """Disconnected subtrees (multi-root) are now allowed."""
         creator = TaskCreator(sync_db_session)
 
         tasks = [
@@ -1207,34 +1206,32 @@ class TestTaskCreator:
                 "id": "task_a",
                 "name": "Task A",
                 "user_id": "user_123",
-                # Root task
             },
             {
                 "id": "task_b",
                 "name": "Task B",
                 "user_id": "user_123",
-                "parent_id": "task_a",  # In the tree
+                "parent_id": "task_a",
             },
             {
                 "id": "task_c",
                 "name": "Task C",
                 "user_id": "user_123",
-                "parent_id": "task_d",  # Disconnected subtree
+                "parent_id": "task_d",
             },
             {
                 "id": "task_d",
                 "name": "Task D",
                 "user_id": "user_123",
-                # Another root task - disconnected from task_a
             },
         ]
 
-        with pytest.raises(ValueError, match="Multiple root tasks found"):
-            await creator.create_task_tree_from_array(tasks)
+        result = await creator.create_task_tree_from_array(tasks)
+        assert result is not None
 
     @pytest.mark.asyncio
-    async def test_error_isolated_task_not_reachable_from_root(self, sync_db_session):
-        """Test error when a task is not reachable from root task via parent_id chain"""
+    async def test_isolated_task_multi_root_allowed(self, sync_db_session):
+        """Isolated tasks forming multi-root forests are now allowed."""
         creator = TaskCreator(sync_db_session)
 
         tasks = [
@@ -1242,35 +1239,31 @@ class TestTaskCreator:
                 "id": "task_a",
                 "name": "Task A",
                 "user_id": "user_123",
-                # Root task
             },
             {
                 "id": "task_b",
                 "name": "Task B",
                 "user_id": "user_123",
-                "parent_id": "task_a",  # In the tree
+                "parent_id": "task_a",
             },
             {
                 "id": "task_c",
                 "name": "Task C",
                 "user_id": "user_123",
-                "parent_id": "task_d",  # Child of task_d - disconnected chain
+                "parent_id": "task_d",
             },
             {
                 "id": "task_d",
                 "name": "Task D",
                 "user_id": "user_123",
-                "parent_id": "task_e",  # Child of task_e - forms a disconnected chain
+                "parent_id": "task_e",
             },
             {
                 "id": "task_e",
                 "name": "Task E",
                 "user_id": "user_123",
-                # This is also a root task - disconnected from task_a
-                # Chain: task_e -> task_d -> task_c (disconnected from task_a -> task_b)
             },
         ]
 
-        # Should be caught by "Multiple root tasks found" since task_e is also a root
-        with pytest.raises(ValueError, match="Multiple root tasks found"):
-            await creator.create_task_tree_from_array(tasks)
+        result = await creator.create_task_tree_from_array(tasks)
+        assert result is not None

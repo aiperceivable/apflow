@@ -5,7 +5,7 @@ This module contains all core framework components for task orchestration:
 - interfaces/: Core interfaces (ExecutableTask) - abstract contracts
 - base/: Base class implementations (BaseTask) - common functionality
 - execution/: Task orchestration (TaskManager, StreamingCallbacks)
-- storage/: Storage implementation (DuckDB default, PostgreSQL optional)
+- storage/: Storage implementation (SQLite default, PostgreSQL optional)
 - types.py: Core type definitions (TaskTreeNode, TaskStatus, hooks)
 - utils/: Utility functions
 
@@ -60,9 +60,6 @@ __all__ = [
     "get_default_session",
     "get_hook_session",
     "get_hook_repository",
-    # Backward compatibility (deprecated)
-    "create_storage",
-    "get_default_storage",
 ]
 
 
@@ -161,16 +158,12 @@ def __getattr__(name):
         "get_default_session",
         "get_hook_session",
         "get_hook_repository",
-        "create_storage",
-        "get_default_storage",
     ):
         from apflow.core.storage import (
             create_session,  # noqa: F401
             get_default_session,  # noqa: F401
             get_hook_session,  # noqa: F401
             get_hook_repository,  # noqa: F401
-            create_storage,  # noqa: F401
-            get_default_storage,  # noqa: F401
         )
 
         return locals()[name]

@@ -6,7 +6,7 @@ All task executors must implement this interface.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 from apflow.core.extensions.base import Extension
 from apflow.core.extensions.types import ExtensionCategory
 
@@ -80,6 +80,18 @@ class ExecutableTask(Extension, ABC):
         Returns:
             JSON Schema dictionary describing output result structure
         """
+        pass
+
+    def supports_checkpoint(self) -> bool:
+        """Whether this task supports checkpoint/resume. Default: False."""
+        return False
+
+    def get_checkpoint(self) -> Optional[Dict[str, Any]]:
+        """Serialize current execution state for checkpoint. Default: None."""
+        return None
+
+    async def resume_from_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        """Restore execution state from a checkpoint. Default: no-op."""
         pass
 
     async def cancel(self) -> Dict[str, Any]:

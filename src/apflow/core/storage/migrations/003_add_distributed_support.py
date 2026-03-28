@@ -10,13 +10,13 @@ This migration adds distributed task orchestration support:
    - apflow_cluster_leader: Leader election singleton
    - apflow_task_events: Audit log for task lifecycle events
 
-DuckDB: Only adds the 6 nullable columns (distributed tables are PostgreSQL-only).
+SQLite: Only adds the 6 nullable columns (distributed tables are PostgreSQL-only).
 
 File: 003_add_distributed_support.py
 ID: 003_add_distributed_support (auto-extracted from filename)
 """
 
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine, inspect as sa_inspect, text
 from apflow.core.storage.migrations import Migration
 from apflow.core.storage.sqlalchemy.models import TASK_TABLE_NAME
 from apflow.logger import get_logger
@@ -53,35 +53,17 @@ class AddDistributedSupport(Migration):
     def _get_existing_columns(self, engine: Engine, table: str) -> set[str]:
         """Get existing column names for a table."""
         try:
-            with engine.begin() as conn:
-                result = conn.execute(
-                    text(
-                        f"SELECT column_name FROM information_schema.columns "
-                        f"WHERE table_name = '{table}'"
-                    )
-                )
-                return {row[0] for row in result}
-        except Exception:
-            try:
-                from sqlalchemy import inspect as sa_inspect
-
-                inspector = sa_inspect(engine)
-                return {col["name"] for col in inspector.get_columns(table)}
-            except Exception as e:
-                logger.warning(f"Could not get columns for '{table}': {e}")
-                return set()
+            inspector = sa_inspect(engine)
+            return {col["name"] for col in inspector.get_columns(table)}
+        except Exception as e:
+            logger.warning(f"Could not get columns for '{table}': {e}")
+            return set()
 
     def _table_exists(self, engine: Engine, table: str) -> bool:
         """Check if a table exists."""
         try:
-            with engine.begin() as conn:
-                result = conn.execute(
-                    text(
-                        f"SELECT COUNT(*) FROM information_schema.tables "
-                        f"WHERE table_name = '{table}'"
-                    )
-                )
-                return result.scalar() != 0  # type: ignore[return-value]
+            inspector = sa_inspect(engine)
+            return table in inspector.get_table_names()
         except Exception:
             return False
 

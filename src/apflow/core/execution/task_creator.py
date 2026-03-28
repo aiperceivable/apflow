@@ -212,32 +212,32 @@ class TaskCreator:
 
     async def create_task_tree_from_array(self, tasks: List[Dict[str, Any]]) -> TaskTreeNode:
         """
-        Create a task tree from a list of task dicts.
-        Supports both id and name as input, but always generates a unique UUID id for each task internally.
-        All references (parent_id, dependencies) are mapped to id before creation, so downstream logic is unified.
-        If an id is provided and is not a valid UUID, check for existence in the database to avoid conflicts.
+        Create task tree(s) from a flat array of task dictionaries.
+
+        Supports both single-root and multi-root task forests.
+        For single-root, returns the root TaskTreeNode.
+        For multi-root, returns the first root TaskTreeNode
+        (use create_task_trees_from_array() for all roots).
 
         Args:
-            tasks: List of task dictionaries
+            tasks: List of task dictionaries. Tasks with parent_id=None are root tasks.
+                   Multiple roots are allowed.
 
         Returns:
-            TaskTreeNode: Root task node of the created task tree
+            TaskTreeNode: Root task node of the first task tree
         """
         if not tasks:
             raise ValueError("Tasks array cannot be empty")
 
         logger.info(f"Creating task tree from {len(tasks)} tasks")
 
-        # Step 1: Validate single root task
+        # Step 1: Validate at least one root task exists
         root_tasks = [task for task in tasks if task.get("parent_id") is None]
         if len(root_tasks) == 0:
             raise ValueError(
                 "No root task found (task with no parent_id). At least one task in the array must have parent_id=None or no parent_id field."
             )
-        if len(root_tasks) > 1:
-            raise ValueError(
-                "Multiple root tasks found. All tasks must be in a single task tree. Only one task should have parent_id=None or no parent_id field."
-            )
+        # Multi-root forests are allowed — no single-root constraint
 
         # Step 2: Convert dicts to tasks with validated references
         task_models = self.task_dicts_to_task_models(tasks)
@@ -251,10 +251,17 @@ class TaskCreator:
 
         # Step 5: Build task tree structure
         root_models: List[TaskModelType] = [task for task in task_models if task.parent_id is None]
-        root_task = root_models[0]
-        task_tree = self.build_task_tree_from_task_models(root_task, task_models)
-        logger.info(f"Created task tree: root task {task_tree.task.id}")
-        return task_tree
+        if len(root_models) == 1:
+            task_tree = self.build_task_tree_from_task_models(root_models[0], task_models)
+            logger.info(f"Created task tree: root task {task_tree.task.id}")
+            return task_tree
+        else:
+            task_trees = self.build_task_trees_from_task_models(task_models)
+            logger.info(
+                f"Created {len(task_trees)} task trees: "
+                f"{', '.join(t.task.id for t in task_trees)}"
+            )
+            return task_trees[0]  # Backward compatible: return first tree
 
     async def create_task_trees_from_array(self, tasks: List[Dict[str, Any]]) -> List[TaskTreeNode]:
         """

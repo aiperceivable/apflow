@@ -264,10 +264,10 @@ def storage_register(override: bool = False):
         from apflow.core.extensions.storage import StorageBackend
 
         @storage_register()
-        class DuckDBStorage(StorageBackend):
-            id = "duckdb"
-            name = "DuckDB Storage"
-            type = "duckdb"
+        class SQLiteStorage(StorageBackend):
+            id = "sqlite"
+            name = "SQLite Storage"
+            type = "sqlite"
             ...
     """
 
