@@ -120,7 +120,7 @@ def resolve_tool(tool_ref: Any) -> Any:
     - Already callable objects (functions, classes, instances) - returns as-is
     - Tool objects (has run/execute/call methods) - returns as-is
 
-    The function first checks the tool registry, then tries crewai_tools,
+    The function first checks the tool registry, then tries other sources,
     then searches in the calling frame's globals.
 
     Args:
@@ -139,7 +139,7 @@ def resolve_tool(tool_ref: Any) -> Any:
         register_tool("my_tool", MyTool)
         tool = resolve_tool("my_tool()")
 
-        # From crewai_tools
+        # From external tools
         tool = resolve_tool("SerperDevTool()")
 
         # Already a tool object
@@ -235,37 +235,7 @@ def resolve_tool(tool_ref: Any) -> Any:
                 )
                 return func(*args, **kwargs)
 
-            # Method 2: Try to get from crewai_tools (most common case)
-            try:
-                import crewai_tools
-
-                func = getattr(crewai_tools, func_name, None)
-                if func is not None:
-                    logger.info(
-                        f"resolve_tool: Method 2 (crewai_tools) - Found '{func_name}' in crewai_tools"
-                    )
-                    # Parse positional arguments
-                    args = []
-                    for arg in expr.args:
-                        args.append(ast.literal_eval(arg))
-
-                    # Parse keyword arguments
-                    kwargs = {}
-                    for kw in expr.keywords:
-                        key = kw.arg
-                        value = ast.literal_eval(kw.value)
-                        kwargs[key] = value
-
-                    # Return tool instance directly
-                    logger.debug(
-                        f"resolve_tool: Calling '{func_name}' from crewai_tools with args={args}, kwargs={kwargs}"
-                    )
-                    return func(*args, **kwargs)
-            except ImportError:
-                logger.debug("resolve_tool: Method 2 (crewai_tools) - crewai_tools not available")
-                pass
-
-            # Method 3: Try to get from current module globals
+            # Method 2: Try to get from current module globals
             # This requires the caller to have the function in their scope
             logger.debug(
                 f"resolve_tool: Method 3 (globals) - Searching for '{func_name}' in calling frame globals"
@@ -318,7 +288,7 @@ def resolve_tool(tool_ref: Any) -> Any:
                 frame = frame.f_back
 
             raise NameError(
-                f"Tool '{func_name}' not found in registry, crewai_tools, or current scope. "
+                f"Tool '{func_name}' not found in registry or current scope. "
                 f"Registered tools: {registry.list_tools()}"
             )
 

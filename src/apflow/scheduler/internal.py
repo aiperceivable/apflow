@@ -4,17 +4,17 @@ Internal Scheduler Implementation
 Built-in scheduler for apflow that polls for due tasks and executes them.
 Uses asyncio for lightweight scheduling without external dependencies.
 
-When an API server is running (apflow serve), the scheduler auto-detects it
-and routes all operations through the API to avoid SQLite single-writer
-conflicts. Falls back to direct DB access when the API is unavailable.
+When APFLOW_API_SERVER_URL is set, the scheduler routes operations through
+the API server (JSON-RPC over HTTP) for data consistency and distributed
+locking. Falls back to direct DB access when not configured.
 
-For production deployments requiring high availability, consider using
-external schedulers via the API gateway (tasks.scheduled.* endpoints).
+API mode uses httpx + JSON-RPC 2.0 — no dependency on a2a-sdk or CLI.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
 
@@ -249,110 +249,106 @@ class InternalScheduler(BaseScheduler):
 
     def _log_auth_identity(self) -> None:
         """Log the auth identity that will be used for API requests."""
-        from apflow.core.config_manager import get_config_manager
-
-        cm = get_config_manager()
-        if cm.admin_auth_token:
-            source = "config (admin_auth_token)"
-        else:
-            source = "auto-generated"
-
         token = self._get_auth_token()
         if token:
-            try:
-                from apflow.cli.jwt_token import get_token_info
-
-                info = get_token_info(token)
-                subject = info.get("subject", "unknown")
-                logger.info(f"Scheduler auth: subject={subject}, source={source}")
-            except Exception:
-                logger.info(f"Scheduler auth: token present, source={source}")
+            logger.info("Scheduler auth: JWT token present")
         else:
             logger.warning("Scheduler auth: no token (unauthenticated)")
 
     def _detect_api_mode(self) -> bool:
-        """Detect whether API server is configured.
+        """Detect whether API server is configured via environment variable.
 
-        Checks ConfigManager for api_server_url directly.  Unlike the CLI
-        helper ``should_use_api()`` this does **not** run a health-check
-        probe — a failed probe would permanently disable API mode for the
-        session.  Instead, the scheduler trusts the user's configuration
-        and lets actual API calls surface connection errors naturally.
+        Set APFLOW_API_SERVER_URL to enable API mode. When not set,
+        scheduler uses direct DB access.
         """
-        try:
-            from apflow.core.config_manager import get_config_manager
-
-            cm = get_config_manager()
-            if not cm.is_api_configured():
-                cm.load_cli_config()
-            return cm.is_api_configured()
-        except Exception as e:
-            logger.debug(f"API detection failed, using direct DB: {e}")
-            return False
+        server_url = os.environ.get("APFLOW_API_SERVER_URL", "")
+        if server_url:
+            logger.info(f"Scheduler API mode enabled: {server_url}")
+            return True
+        return False
 
     def _get_auth_token(self) -> Optional[str]:
         """Get auth token for API requests.
 
-        Uses admin_auth_token from config if available.
-        Otherwise, auto-generates a JWT admin token using the local jwt_secret
-        from config.cli.yaml. This allows the scheduler to authenticate as admin
-        without requiring explicit token configuration.
+        Priority:
+        1. APFLOW_AUTH_TOKEN env var (explicit token)
+        2. Auto-generate JWT from APFLOW_JWT_SECRET env var
 
         Returns:
-            JWT token string, or None if generation fails.
+            JWT token string, or None if not configured.
         """
-        from apflow.core.config_manager import get_config_manager
-
-        cm = get_config_manager()
-        token = cm.admin_auth_token
+        # Explicit token from env
+        token = os.environ.get("APFLOW_AUTH_TOKEN")
         if token:
             return token
 
-        # Auto-generate admin JWT from local jwt_secret (cached per session)
+        # Auto-generate from JWT secret (cached per session)
         if self._auto_auth_token is None:
-            try:
-                from apflow.cli.jwt_token import generate_token
+            jwt_secret = os.environ.get("APFLOW_JWT_SECRET")
+            if jwt_secret:
+                try:
+                    import jwt
 
-                self._auto_auth_token = generate_token(
-                    subject="apflow-scheduler",
-                    extra_claims={"roles": ["admin"]},
-                )
-                logger.debug("Auto-generated admin JWT for scheduler API access")
-            except Exception as e:
-                logger.warning(f"Failed to auto-generate admin JWT: {e}")
-                return None
+                    self._auto_auth_token = jwt.encode(
+                        {"sub": "apflow-scheduler", "roles": ["admin"]},
+                        jwt_secret,
+                        algorithm="HS256",
+                    )
+                    logger.debug("Auto-generated admin JWT for scheduler API access")
+                except ImportError:
+                    logger.warning("PyJWT not installed, cannot auto-generate auth token")
+                    return None
+                except Exception as e:
+                    logger.warning(f"Failed to auto-generate admin JWT: {e}")
+                    return None
 
         return self._auto_auth_token
 
-    def _create_api_client(self, timeout: Optional[float] = None) -> Any:
-        """Create an APIClient configured from ConfigManager.
+    async def _rpc_call(self, method: str, timeout: Optional[float] = None, **params: Any) -> Any:
+        """Make a JSON-RPC 2.0 call to the API server.
+
+        Uses httpx directly — no dependency on CLI or a2a-sdk.
+        Compatible with any JSON-RPC server (apcore-a2a, custom, etc.)
 
         Args:
-            timeout: Override timeout (e.g., task_timeout for execution calls).
-                     Defaults to the configured api_timeout.
+            method: RPC method name (e.g. "tasks.scheduled.due")
+            timeout: Request timeout in seconds
+            **params: Method parameters
 
         Returns:
-            Configured APIClient instance (use as async context manager).
-        """
-        try:
-            from apflow.cli.api_client import APIClient
-        except ImportError:
-            raise ImportError(
-                "API client requires the [cli] extra. "
-                "Scheduler API mode is not available in v2. "
-                "Use direct DB mode instead."
-            )
-        from apflow.core.config_manager import get_config_manager
+            Result from the RPC response.
 
-        cm = get_config_manager()
-        return APIClient(
-            server_url=cm.api_server_url or "http://localhost:8000",
-            auth_token=self._get_auth_token(),
-            timeout=timeout if timeout is not None else cm.api_timeout,
-            retry_attempts=cm.api_retry_attempts,
-            retry_backoff=cm.api_retry_backoff,
-            proxies=None,
-        )
+        Raises:
+            RuntimeError: If the RPC call returns an error.
+        """
+        import httpx
+
+        server_url = os.environ.get("APFLOW_API_SERVER_URL", "http://localhost:8000")
+        request_timeout = timeout or float(os.environ.get("APFLOW_API_TIMEOUT", "30"))
+
+        headers: Dict[str, str] = {"Content-Type": "application/json"}
+        token = self._get_auth_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+            "id": 1,
+        }
+
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
+            response = await client.post(server_url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+
+        if "error" in data:
+            error = data["error"]
+            msg = error.get("message", str(error)) if isinstance(error, dict) else str(error)
+            raise RuntimeError(f"RPC error ({method}): {msg}")
+
+        return data.get("result")
 
     async def _poll_loop(self) -> None:
         """
@@ -454,22 +450,19 @@ class InternalScheduler(BaseScheduler):
         return await self._get_due_tasks_via_db()
 
     async def _get_due_tasks_via_api(self) -> List[Dict[str, Any]]:
-        """Get due tasks via API server."""
+        """Get due tasks via API server (JSON-RPC over HTTP)."""
+        params: Dict[str, Any] = {
+            "limit": self.config.max_concurrent_tasks * 2,
+        }
+        if self.config.user_id:
+            params["user_id"] = self.config.user_id
 
-        client = self._create_api_client()
-        async with client:
-            params: Dict[str, Any] = {
-                "limit": self.config.max_concurrent_tasks * 2,
-            }
-            if self.config.user_id:
-                params["user_id"] = self.config.user_id
-
-            result = await client.call_method("tasks.scheduled.due", **params)
-            if isinstance(result, list):
-                return result
-            if isinstance(result, dict) and "tasks" in result:
-                return result["tasks"]
-            return []
+        result = await self._rpc_call("tasks.scheduled.due", **params)
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict) and "tasks" in result:
+            return result["tasks"]
+        return []
 
     async def _get_due_tasks_via_db(self) -> List[Dict[str, Any]]:
         """Get due tasks via direct database access."""
@@ -534,7 +527,7 @@ class InternalScheduler(BaseScheduler):
             self.stats.active_tasks = len(self._active_task_ids)
 
     async def _execute_task_via_api(self, task_id: str) -> None:
-        """Execute a task via the API server.
+        """Execute a task via the API server (JSON-RPC over HTTP).
 
         Uses tasks.webhook.trigger with async_execution=False, which handles the
         full execution cycle (mark_running + execute + complete_scheduled_run)
@@ -542,14 +535,12 @@ class InternalScheduler(BaseScheduler):
         """
         logger.debug(f"Executing scheduled task via API: {task_id}")
 
-        # Use task_timeout as the HTTP timeout since execution is synchronous
-        client = self._create_api_client(timeout=float(self.config.task_timeout))
-        async with client:
-            result = await client.call_method(
-                "tasks.webhook.trigger",
-                task_id=task_id,
-                async_execution=False,
-            )
+        result = await self._rpc_call(
+            "tasks.webhook.trigger",
+            timeout=float(self.config.task_timeout),
+            task_id=task_id,
+            async_execution=False,
+        )
 
         # Parse result and update stats
         success = False
