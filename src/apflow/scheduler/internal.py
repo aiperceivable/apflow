@@ -14,7 +14,6 @@ API mode uses httpx + JSON-RPC 2.0 — no dependency on a2a-sdk or CLI.
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
 
@@ -256,37 +255,33 @@ class InternalScheduler(BaseScheduler):
             logger.warning("Scheduler auth: no token (unauthenticated)")
 
     def _detect_api_mode(self) -> bool:
-        """Detect whether API server is configured via environment variable.
+        """Detect whether API server is configured via ConfigManager.
 
-        Set APFLOW_API_SERVER_URL to enable API mode. When not set,
-        scheduler uses direct DB access.
+        ConfigManager reads APFLOW_API_SERVER_URL from environment.
         """
-        server_url = os.environ.get("APFLOW_API_SERVER_URL", "")
-        if server_url:
-            logger.info(f"Scheduler API mode enabled: {server_url}")
-            return True
-        return False
+        try:
+            from apflow.core.config_manager import get_config_manager
+
+            return get_config_manager().is_api_configured()
+        except Exception as e:
+            logger.debug(f"API detection failed, using direct DB: {e}")
+            return False
 
     def _get_auth_token(self) -> Optional[str]:
         """Get auth token for API requests.
 
-        Priority:
-        1. APFLOW_AUTH_TOKEN env var (explicit token)
-        2. Auto-generate JWT from APFLOW_JWT_SECRET env var
+        Auto-generates JWT from ConfigManager.jwt_secret if available.
+        Cached per scheduler session.
 
         Returns:
             JWT token string, or None if not configured.
         """
-        # Explicit token from env
-        token = os.environ.get("APFLOW_AUTH_TOKEN")
-        if token:
-            return token
-
-        # Auto-generate from JWT secret (cached per session)
         if self._auto_auth_token is None:
-            jwt_secret = os.environ.get("APFLOW_JWT_SECRET")
-            if jwt_secret:
-                try:
+            try:
+                from apflow.core.config_manager import get_config_manager
+
+                jwt_secret = get_config_manager().jwt_secret
+                if jwt_secret:
                     import jwt
 
                     self._auto_auth_token = jwt.encode(
@@ -295,12 +290,12 @@ class InternalScheduler(BaseScheduler):
                         algorithm="HS256",
                     )
                     logger.debug("Auto-generated admin JWT for scheduler API access")
-                except ImportError:
-                    logger.warning("PyJWT not installed, cannot auto-generate auth token")
-                    return None
-                except Exception as e:
-                    logger.warning(f"Failed to auto-generate admin JWT: {e}")
-                    return None
+            except ImportError:
+                logger.warning("PyJWT not installed, cannot auto-generate auth token")
+                return None
+            except Exception as e:
+                logger.warning(f"Failed to auto-generate admin JWT: {e}")
+                return None
 
         return self._auto_auth_token
 
@@ -308,11 +303,11 @@ class InternalScheduler(BaseScheduler):
         """Make a JSON-RPC 2.0 call to the API server.
 
         Uses httpx directly — no dependency on CLI or a2a-sdk.
-        Compatible with any JSON-RPC server (apcore-a2a, custom, etc.)
+        Server URL and timeout from ConfigManager.
 
         Args:
             method: RPC method name (e.g. "tasks.scheduled.due")
-            timeout: Request timeout in seconds
+            timeout: Request timeout override in seconds
             **params: Method parameters
 
         Returns:
@@ -322,9 +317,11 @@ class InternalScheduler(BaseScheduler):
             RuntimeError: If the RPC call returns an error.
         """
         import httpx
+        from apflow.core.config_manager import get_config_manager
 
-        server_url = os.environ.get("APFLOW_API_SERVER_URL", "http://localhost:8000")
-        request_timeout = timeout or float(os.environ.get("APFLOW_API_TIMEOUT", "30"))
+        cm = get_config_manager()
+        server_url = cm.api_server_url or "http://localhost:8000"
+        request_timeout = timeout or cm.api_timeout
 
         headers: Dict[str, str] = {"Content-Type": "application/json"}
         token = self._get_auth_token()
