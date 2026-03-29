@@ -66,17 +66,7 @@ try:
 except ImportError:
     pass  # Extension not available, tests will handle this
 
-try:
-    from apflow.extensions.generate import GenerateExecutor  # noqa: F401
-except ImportError:
-    pass  # Extension not available, tests will handle this
-
-# DO NOT import LLM here - it starts OpenTelemetry background threads immediately
-# LLM extensions will be imported lazily when needed by tests
-# try:
-#     from apflow.extensions.llm import LLMExecutor  # noqa: F401
-# except ImportError:
-#     pass  # Extension not available, tests will handle this
+# LLM and generate extensions removed in v2
 
 from sqlalchemy import create_engine, text  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
@@ -644,12 +634,7 @@ def ensure_executors_registered():
     except ImportError:
         pass
 
-    try:
-        from apflow.extensions.generate import GenerateExecutor
-
-        ensure_registered(GenerateExecutor, "generate_executor")
-    except ImportError:
-        pass
+    # GenerateExecutor removed in v2
 
     # DO NOT import LLM here - it starts OpenTelemetry background threads immediately
     # LLM will be imported lazily when needed by specific tests
@@ -1125,12 +1110,7 @@ def _cleanup_all_global_state():
     complete isolation between tests.
     """
     # 1. Clean up CLI registry
-    try:
-        from apflow.cli.decorators import _cli_registry
-
-        _cli_registry.clear()
-    except (ImportError, AttributeError):
-        pass
+    # CLI registry removed in v2
 
     # 2. Clean up Config registry
     try:
