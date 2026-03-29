@@ -22,13 +22,12 @@ class ToolRegistry:
     """
 
     _instance: Optional["ToolRegistry"] = None
-    _tools: Dict[str, Any] = {}
 
     def __new__(cls):
         """Singleton pattern"""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._instance._tools = {}
+            cls._instance._tools: Dict[str, Any] = {}
         return cls._instance
 
     def register(self, name: str, tool: Any, override: bool = False) -> Any:
@@ -235,65 +234,16 @@ def resolve_tool(tool_ref: Any) -> Any:
                 )
                 return func(*args, **kwargs)
 
-            # Method 2: Try to get from current module globals
-            # This requires the caller to have the function in their scope
-            logger.debug(
-                f"resolve_tool: Method 3 (globals) - Searching for '{func_name}' in calling frame globals"
-            )
-            import inspect
-
-            frame = inspect.currentframe()
-            frame_depth = 0
-            while frame:
-                frame_depth += 1
-                if func_name in frame.f_globals:
-                    func = frame.f_globals[func_name]
-                    logger.info(
-                        f"resolve_tool: Method 3 (globals) - Found '{func_name}' in frame {frame_depth} globals"
-                    )
-
-                    # If no arguments, return the function object itself
-                    if not expr.args and not expr.keywords:
-                        # For tool classes, instantiate them
-                        if hasattr(func, "__bases__") and any(
-                            "BaseTool" in str(base) for base in func.__bases__
-                        ):
-                            logger.debug(
-                                f"resolve_tool: Instantiating tool class '{func_name}' from globals"
-                            )
-                            return func()
-                        logger.debug(
-                            f"resolve_tool: Returning tool class/function '{func_name}' from globals"
-                        )
-                        return func
-
-                    # If there are arguments, return the function call result
-                    # Parse positional arguments
-                    args = []
-                    for arg in expr.args:
-                        args.append(ast.literal_eval(arg))
-
-                    # Parse keyword arguments
-                    kwargs = {}
-                    for kw in expr.keywords:
-                        key = kw.arg
-                        value = ast.literal_eval(kw.value)
-                        kwargs[key] = value
-
-                    # Return tool instance directly
-                    logger.debug(
-                        f"resolve_tool: Calling '{func_name}' from globals with args={args}, kwargs={kwargs}"
-                    )
-                    return func(*args, **kwargs)
-                frame = frame.f_back
-
+            # Tool not found in registry
             raise NameError(
-                f"Tool '{func_name}' not found in registry or current scope. "
+                f"Tool '{func_name}' not found in registry. "
                 f"Registered tools: {registry.list_tools()}"
             )
 
+        except NameError:
+            raise
         except Exception as e:
-            raise NameError(f"Tool '{func_name}' not found: {str(e)}")
+            raise NameError(f"Failed to resolve tool '{func_name}': {e}") from e
 
     # Other types raise exception
     raise TypeError(

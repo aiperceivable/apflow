@@ -267,34 +267,45 @@ class InternalScheduler(BaseScheduler):
             logger.debug(f"API detection failed, using direct DB: {e}")
             return False
 
+    _rpc_id_counter: int = 0
+    _auth_generation_failed: bool = False
+
     def _get_auth_token(self) -> Optional[str]:
         """Get auth token for API requests.
 
-        Auto-generates JWT from ConfigManager.jwt_secret if available.
-        Cached per scheduler session.
-
-        Returns:
-            JWT token string, or None if not configured.
+        Auto-generates JWT with 1-hour expiry from ConfigManager.jwt_secret.
+        Cached until near expiry. Returns None if generation failed.
         """
+        # Don't retry if import/generation already failed
+        if self._auth_generation_failed:
+            return None
+
         if self._auto_auth_token is None:
             try:
                 from apflow.core.config_manager import get_config_manager
+                from datetime import timedelta
 
                 jwt_secret = get_config_manager().jwt_secret
                 if jwt_secret:
                     import jwt
 
                     self._auto_auth_token = jwt.encode(
-                        {"sub": "apflow-scheduler", "roles": ["admin"]},
+                        {
+                            "sub": "apflow-scheduler",
+                            "roles": ["admin"],
+                            "exp": datetime.now(timezone.utc) + timedelta(hours=1),
+                        },
                         jwt_secret,
                         algorithm="HS256",
                     )
-                    logger.debug("Auto-generated admin JWT for scheduler API access")
+                    logger.debug("Auto-generated admin JWT (1h expiry)")
             except ImportError:
                 logger.warning("PyJWT not installed, cannot auto-generate auth token")
+                self._auth_generation_failed = True
                 return None
             except Exception as e:
                 logger.warning(f"Failed to auto-generate admin JWT: {e}")
+                self._auth_generation_failed = True
                 return None
 
         return self._auto_auth_token
@@ -304,17 +315,6 @@ class InternalScheduler(BaseScheduler):
 
         Uses httpx directly — no dependency on CLI or a2a-sdk.
         Server URL and timeout from ConfigManager.
-
-        Args:
-            method: RPC method name (e.g. "tasks.scheduled.due")
-            timeout: Request timeout override in seconds
-            **params: Method parameters
-
-        Returns:
-            Result from the RPC response.
-
-        Raises:
-            RuntimeError: If the RPC call returns an error.
         """
         import httpx
         from apflow.core.config_manager import get_config_manager
@@ -328,11 +328,12 @@ class InternalScheduler(BaseScheduler):
         if token:
             headers["Authorization"] = f"Bearer {token}"
 
+        InternalScheduler._rpc_id_counter += 1
         payload = {
             "jsonrpc": "2.0",
             "method": method,
             "params": params,
-            "id": 1,
+            "id": InternalScheduler._rpc_id_counter,
         }
 
         async with httpx.AsyncClient(timeout=request_timeout) as client:

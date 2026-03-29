@@ -77,8 +77,26 @@ class _TextExtractor(HTMLParser):
         return "\n".join(self._text)
 
 
+def _validate_url(url: str) -> None:
+    """Validate URL scheme and block dangerous targets (SSRF protection)."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"URL scheme must be http or https, got '{parsed.scheme}'")
+    if not parsed.hostname:
+        raise ValueError("URL must have a hostname")
+    # Block common SSRF targets
+    hostname = parsed.hostname.lower()
+    blocked = ("localhost", "127.0.0.1", "0.0.0.0", "169.254.169.254", "[::1]")
+    if hostname in blocked or hostname.startswith("10.") or hostname.startswith("192.168."):
+        raise ValueError(f"URL hostname '{hostname}' is blocked (private/reserved)")
+
+
 def _fetch_and_extract(url: str, max_chars: int = 5000, extract_metadata: bool = True) -> str:
     """Fetch URL and extract text content using stdlib only."""
+    _validate_url(url)
+
     headers = {
         "User-Agent": ("Mozilla/5.0 (compatible; apflow/0.20; +https://aiperceivable.com)"),
     }
@@ -133,6 +151,8 @@ class ScrapeExecutor(BaseTask):
     outputs_schema: ClassVar[type[BaseModel]] = ScrapeOutputSchema
 
     async def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        import asyncio
+
         url = inputs.get("url")
         if not url:
             raise ValidationError("'url' is required for scraping.")
@@ -143,8 +163,11 @@ class ScrapeExecutor(BaseTask):
         logger.info(f"Scraping website: {url} (max_chars={max_chars})")
 
         try:
-            content = _fetch_and_extract(url, max_chars, extract_metadata)
+            # Run blocking I/O in thread to avoid blocking event loop
+            content = await asyncio.to_thread(_fetch_and_extract, url, max_chars, extract_metadata)
             return {"result": content}
+        except ValueError as e:
+            raise ValidationError(str(e)) from e
         except urllib.error.URLError as e:
             raise ValidationError(f"Failed to access {url}: {e}") from e
         except Exception as e:

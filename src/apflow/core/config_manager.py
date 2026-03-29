@@ -125,9 +125,9 @@ class ConfigManager:
             env_name = _key_to_env(key)
             env_value = os.environ.get(env_name)
             if env_value is not None:
-                self._data[key] = self._coerce(env_value, current_value)
+                self._data[key] = self._coerce(env_value, current_value, key)
 
-    def _coerce(self, env_value: str, current_value: Any) -> Any:
+    def _coerce(self, env_value: str, current_value: Any, key: str = "") -> Any:
         """Coerce env var string to the type of the current value."""
         if current_value is None:
             return env_value
@@ -137,11 +137,13 @@ class ConfigManager:
             try:
                 return int(env_value)
             except ValueError:
+                logger.warning(f"Cannot parse '{env_value}' as int for {key}, using default")
                 return current_value
         if isinstance(current_value, float):
             try:
                 return float(env_value)
             except ValueError:
+                logger.warning(f"Cannot parse '{env_value}' as float for {key}, using default")
                 return current_value
         if isinstance(current_value, list):
             return [s.strip() for s in env_value.split(",") if s.strip()]
