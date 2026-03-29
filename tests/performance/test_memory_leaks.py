@@ -225,17 +225,17 @@ class TestDatabaseGrowth:
     """Test database file size growth"""
 
     @pytest.mark.asyncio
-    async def test_duckdb_file_growth_reasonable(self, tmp_path, sync_db_session):
+    async def test_sqlite_file_growth_reasonable(self, tmp_path, sync_db_session):
         """
-        Test that DuckDB file size remains reasonable
+        Test that SQLite file size remains reasonable
 
         1000 simple tasks should not create a huge database file.
         """
         from apflow.core.storage.factory import get_session, create_all_tables
 
-        # Create temporary DuckDB file
-        db_path = tmp_path / "test.duckdb"
-        db_url = f"duckdb:///{db_path}"
+        # Create temporary SQLite file
+        db_path = tmp_path / "test.db"
+        db_url = f"sqlite:///{db_path}"
 
         # Create tables
         create_all_tables(db_url)
@@ -287,8 +287,8 @@ class TestDatabaseGrowth:
         """
         from apflow.core.storage.factory import get_session, create_all_tables
 
-        db_path = tmp_path / "test_cleanup.duckdb"
-        db_url = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test_cleanup.db"
+        db_url = f"sqlite:///{db_path}"
 
         create_all_tables(db_url)
         session = get_session(db_url)
@@ -323,7 +323,7 @@ class TestDatabaseGrowth:
         )
         session.commit()
 
-        # For DuckDB, file size may not shrink immediately without VACUUM
+        # For SQLite, file size may not shrink immediately without VACUUM
         # This test documents expected behavior
         size_after_delete = db_path.stat().st_size if db_path.exists() else 0
 

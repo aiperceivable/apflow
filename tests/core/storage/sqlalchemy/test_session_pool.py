@@ -41,9 +41,9 @@ class TestSessionPoolManager:
         assert manager.get_max_sessions() > 0
         assert manager.get_active_session_count() == 0
 
-    def test_session_pool_manager_initialize_with_duckdb(self, tmp_path):
-        """Test SessionPoolManager initialization with DuckDB"""
-        db_path = tmp_path / "test.duckdb"
+    def test_session_pool_manager_initialize_with_sqlite(self, tmp_path):
+        """Test SessionPoolManager initialization with SQLite"""
+        db_path = tmp_path / "test.db"
         manager = SessionPoolManager()
         manager.initialize(path=str(db_path))
 
@@ -54,8 +54,8 @@ class TestSessionPoolManager:
 
     def test_session_pool_manager_initialize_with_connection_string(self, tmp_path):
         """Test SessionPoolManager initialization with connection string"""
-        db_path = tmp_path / "test.duckdb"
-        connection_string = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test.db"
+        connection_string = f"sqlite:///{db_path}"
 
         manager = SessionPoolManager()
         manager.initialize(connection_string=connection_string)
@@ -65,7 +65,7 @@ class TestSessionPoolManager:
 
     def test_create_and_release_session(self, tmp_path):
         """Test creating and releasing a session"""
-        db_path = tmp_path / "test.duckdb"
+        db_path = tmp_path / "test.db"
         manager = SessionPoolManager()
         manager.initialize(path=str(db_path))
 
@@ -84,7 +84,7 @@ class TestSessionPoolManager:
         # Set a low limit for testing
         monkeypatch.setenv("APFLOW_MAX_SESSIONS", "2")
 
-        db_path = tmp_path / "test.duckdb"
+        db_path = tmp_path / "test.db"
         manager = SessionPoolManager()
         manager.initialize(path=str(db_path))
 
@@ -114,7 +114,7 @@ class TestSessionPoolManager:
         # Set a very short timeout for testing
         monkeypatch.setenv("APFLOW_SESSION_TIMEOUT", "1")
 
-        db_path = tmp_path / "test.duckdb"
+        db_path = tmp_path / "test.db"
         manager = SessionPoolManager()
         manager.initialize(path=str(db_path))
 
@@ -134,7 +134,7 @@ class TestSessionPoolManager:
 
     def test_concurrent_session_creation(self, tmp_path):
         """Test creating multiple sessions concurrently"""
-        db_path = tmp_path / "test.duckdb"
+        db_path = tmp_path / "test.db"
         manager = SessionPoolManager()
         manager.initialize(path=str(db_path))
 
@@ -170,7 +170,7 @@ class TestSessionPoolManager:
 
     def test_release_session_close_before_untrack(self, tmp_path):
         """Test that session is still tracked if close() raises an exception"""
-        db_path = tmp_path / "test.duckdb"
+        db_path = tmp_path / "test.db"
         manager = SessionPoolManager()
         manager.initialize(path=str(db_path))
 
@@ -207,8 +207,8 @@ class TestTaskTreeSession:
     @pytest.mark.asyncio
     async def test_task_tree_session_context_manager(self, tmp_path):
         """Test TaskTreeSession as context manager"""
-        db_path = tmp_path / "test.duckdb"
-        connection_string = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test.db"
+        connection_string = f"sqlite:///{db_path}"
 
         async with create_task_tree_session(connection_string=connection_string) as session:
             assert session is not None
@@ -226,7 +226,7 @@ class TestTaskTreeSession:
     async def test_task_tree_session_with_default_path(self, tmp_path, monkeypatch):
         """Test TaskTreeSession with default path"""
         # Set a test database path
-        test_db_path = tmp_path / "default.duckdb"
+        test_db_path = tmp_path / "default.db"
         monkeypatch.setenv("APFLOW_DB_PATH", str(test_db_path))
 
         async with create_task_tree_session() as session:
@@ -239,8 +239,8 @@ class TestTaskTreeSession:
         # Set a very low limit
         monkeypatch.setenv("APFLOW_MAX_SESSIONS", "1")
 
-        db_path = tmp_path / "test.duckdb"
-        connection_string = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test.db"
+        connection_string = f"sqlite:///{db_path}"
 
         # Create first session
         async with create_task_tree_session(connection_string=connection_string) as session1:
@@ -254,8 +254,8 @@ class TestTaskTreeSession:
     @pytest.mark.asyncio
     async def test_task_tree_session_exception_handling(self, tmp_path):
         """Test that TaskTreeSession properly releases session on exception"""
-        db_path = tmp_path / "test.duckdb"
-        connection_string = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test.db"
+        connection_string = f"sqlite:///{db_path}"
 
         try:
             async with create_task_tree_session(connection_string=connection_string) as session:
@@ -272,8 +272,8 @@ class TestTaskTreeSession:
     @pytest.mark.asyncio
     async def test_task_tree_session_database_operations(self, tmp_path):
         """Test that TaskTreeSession can perform database operations"""
-        db_path = tmp_path / "test.duckdb"
-        connection_string = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test.db"
+        connection_string = f"sqlite:///{db_path}"
 
         async with create_task_tree_session(connection_string=connection_string) as session:
             # Create tables
@@ -303,8 +303,8 @@ class TestSessionPoolWithTaskExecutor:
         from apflow.core.types import TaskTreeNode
         from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
 
-        db_path = tmp_path / "test.duckdb"
-        connection_string = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test.db"
+        connection_string = f"sqlite:///{db_path}"
         root_task_id = f"root-task-{uuid.uuid4().hex[:8]}"
 
         # Create tables and a task in the database
@@ -349,8 +349,8 @@ class TestSessionPoolWithTaskExecutor:
         from apflow.core.execution.task_executor import TaskExecutor
         from apflow.core.types import TaskTreeNode
 
-        db_path = tmp_path / "test.duckdb"
-        connection_string = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test.db"
+        connection_string = f"sqlite:///{db_path}"
 
         # Create unique task IDs
         task_ids = [f"root-task-{uuid.uuid4().hex[:8]}" for _ in range(3)]
@@ -407,8 +407,8 @@ class TestSessionPoolWithTaskExecutor:
         import uuid
         from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
 
-        db_path = tmp_path / "test.duckdb"
-        connection_string = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test.db"
+        connection_string = f"sqlite:///{db_path}"
         task1_id = f"task-1-{uuid.uuid4().hex[:8]}"
         task2_id = f"task-2-{uuid.uuid4().hex[:8]}"
 
@@ -451,8 +451,8 @@ class TestSessionPoolWithTaskExecutor:
         # Set a low session limit
         monkeypatch.setenv("APFLOW_MAX_SESSIONS", "2")
 
-        db_path = tmp_path / "test.duckdb"
-        connection_string = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test.db"
+        connection_string = f"sqlite:///{db_path}"
 
         # Create unique task IDs
         task_ids = [f"root-task-{uuid.uuid4().hex[:8]}" for _ in range(5)]
@@ -521,8 +521,8 @@ class TestSessionPoolWithTaskExecutor:
             Base as CleanBase,
         )
 
-        db_path = tmp_path / "test.duckdb"
-        connection_string = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test.db"
+        connection_string = f"sqlite:///{db_path}"
 
         # Create unique task IDs
         task_ids = [f"root-task-{uuid.uuid4().hex[:8]}" for _ in range(3)]
@@ -580,8 +580,8 @@ class TestSessionPoolWithTaskExecutor:
         from apflow.core.execution.task_executor import TaskExecutor
         from apflow.core.types import TaskTreeNode
 
-        db_path = tmp_path / "test.duckdb"
-        connection_string = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test.db"
+        connection_string = f"sqlite:///{db_path}"
         root_task_id = f"root-task-cleanup-{uuid.uuid4().hex[:8]}"
 
         manager = get_session_pool_manager()

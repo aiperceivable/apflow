@@ -20,17 +20,11 @@ if project_root not in sys.path:
 # Set DATABASE_URL to a unique SQLite file for the whole test session before any apflow or DB-related imports
 test_db_file = f"{project_root}/.data/apflow_{uuid.uuid4().hex[:8]}.test.db"
 os.environ["DATABASE_URL"] = f"sqlite:///{test_db_file}"
-print(f"set DATABASE_URL: {os.getenv('DATABASE_URL')}")
+# DATABASE_URL set for test session
 
-# IMPORTANT: Set other environment variables BEFORE any imports that might use them
-# This prevents CrewAI, LiteLLM, and OpenTelemetry from starting background threads
-os.environ.setdefault("CREWAI_TRACING_ENABLED", "false")
-os.environ.setdefault("CREWAI_DISABLE_EVENT_BUS", "true")
+# Disable OpenTelemetry background threads during tests
 os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 os.environ.setdefault("OTEL_PYTHON_DISABLED_INSTRUMENTATIONS", "all")
-os.environ.setdefault("LITELLM_LOG", "ERROR")
-os.environ.setdefault("LITELLM_TURN_OFF_MESSAGE_LOGGING", "true")
-os.environ.setdefault("LITELLM_TURN_OFF_LOGGING", "true")
 
 
 # Add src directory to path for imports
@@ -64,7 +58,6 @@ except ImportError:
 # DO NOT import CrewAI here - it starts EventBus background thread immediately
 # CrewAI extensions will be imported lazily when needed by tests
 # try:
-#     from apflow.extensions.crewai import CrewaiExecutor, BatchCrewaiExecutor  # noqa: F401
 # except ImportError:
 #     pass  # Extension not available, tests will handle this
 
@@ -133,11 +126,10 @@ def _get_test_database_url() -> Optional[str]:
 def cleanup_test_db_file():
     yield
     db_file = os.environ["DATABASE_URL"].replace("sqlite:///", "")
-    print("cleanup_test_db_file called")
-    print("db_file:", db_file, "exists:", os.path.exists(db_file))
+    # Clean up test database file
     if db_file.endswith(".test.db") and os.path.exists(db_file):
         try:
-            print("Removing test database file:", db_file)
+            pass  # Removing test database file
             os.remove(db_file)
         except Exception:
             pass  # Ignore errors
@@ -145,7 +137,7 @@ def cleanup_test_db_file():
 
 @pytest.fixture(scope="function")
 def temp_db_path(tmp_path):
-    """Create a temporary database file path (only used for DuckDB)"""
+    """Create a temporary database file path (only used for SQLite)"""
     test_db_url = _get_test_database_url()
 
     # If using PostgreSQL, don't create temp file
@@ -154,11 +146,11 @@ def temp_db_path(tmp_path):
         yield None
         return
 
-    # Use temporary file-based DuckDB instead of in-memory
+    # Use temporary file-based SQLite instead of in-memory
     # This ensures all code paths accessing the database see the same data
     # In-memory databases are isolated per connection, causing table creation issues
     db_file = tmp_path / f"test_{uuid.uuid4().hex[:8]}.db"
-    logger.info(f"Using temporary DuckDB file for testing: {db_file}")
+    logger.info(f"Using temporary SQLite file for testing: {db_file}")
     yield str(db_file)
 
 
@@ -167,7 +159,7 @@ def sync_db_session(temp_db_path):
     """
     Create a synchronous database session for testing
 
-    Supports both DuckDB (default) and PostgreSQL (via TEST_DATABASE_URL).
+    Supports both SQLite (default) and PostgreSQL (via TEST_DATABASE_URL).
     Each test gets a fresh database session with automatic cleanup:
     - Tables are created fresh for each test
     - Data is cleaned up after each test to ensure test isolation
@@ -186,7 +178,7 @@ def sync_db_session(temp_db_path):
         # For PostgreSQL, we need to drop and recreate tables to ensure schema matches
         # PostgreSQL is a shared database, so previous tests may have created tables
         # with custom fields (e.g., priority_level from custom TaskModel tests)
-        # Note: This is necessary for PostgreSQL but not for DuckDB (which uses new files each time)
+        # Note: This is necessary for PostgreSQL but not for SQLite (which uses new files each time)
         try:
             Base.metadata.drop_all(engine)
         except Exception as e:
@@ -247,8 +239,8 @@ def sync_db_session(temp_db_path):
             except Exception:
                 pass
     else:
-        # Use DuckDB (default behavior)
-        logger.info(f"Using DuckDB database for testing: {temp_db_path}")
+        # Use SQLite (default behavior)
+        logger.info(f"Using SQLite database for testing: {temp_db_path}")
         # Ensure file doesn't exist (cleanup from previous failed test)
         if temp_db_path and os.path.exists(temp_db_path):
             try:
@@ -256,10 +248,10 @@ def sync_db_session(temp_db_path):
             except Exception:
                 pass
 
-        # Create engine with DuckDB
+        # Create engine with SQLite
         engine = create_engine(f"sqlite:///{temp_db_path}", echo=False)
 
-        # For DuckDB, we don't need to drop tables because each test uses a new file
+        # For SQLite, we don't need to drop tables because each test uses a new file
         # The file is deleted after each test, so schema is always fresh
         Base.metadata.create_all(engine)
 
@@ -326,10 +318,10 @@ async def async_db_session(temp_db_path):
     """
     Create an async database session for testing
 
-    Supports both DuckDB (mock) and PostgreSQL (real async session via TEST_DATABASE_URL).
+    Supports both SQLite (mock) and PostgreSQL (real async session via TEST_DATABASE_URL).
 
-    Note: DuckDB doesn't support async drivers, so SQLAlchemy won't allow
-    creating AsyncEngine with DuckDB. When using DuckDB, this fixture creates a mock AsyncSession
+    Note: SQLite doesn't support async drivers, so SQLAlchemy won't allow
+    creating AsyncEngine with SQLite. When using SQLite, this fixture creates a mock AsyncSession
     that properly implements isinstance checks for testing TaskManager's is_async logic.
 
     When TEST_DATABASE_URL is set to PostgreSQL, this fixture creates a real AsyncSession
@@ -397,8 +389,8 @@ async def async_db_session(temp_db_path):
             except Exception:
                 pass
     else:
-        # Use mock AsyncSession for DuckDB (DuckDB doesn't support async)
-        logger.info("Using mock AsyncSession for DuckDB (DuckDB doesn't support async drivers)")
+        # Use mock AsyncSession for SQLite (SQLite doesn't support async)
+        logger.info("Using mock AsyncSession for SQLite (SQLite doesn't support async drivers)")
         from unittest.mock import AsyncMock, MagicMock
 
         # Note: AsyncSession is already imported at module level, don't re-import here
@@ -460,7 +452,7 @@ def sample_task_data():
         "inputs": {"url": "https://example.com"},
         "params": {},
         "schemas": {
-            "method": "crewai_executor",
+            "method": "rest_executor",
             "input_schema": {"properties": {"url": {"type": "string", "required": True}}},
         },
         "result": None,
@@ -497,7 +489,7 @@ def sample_task_tree_data():
                 "has_children": False,
                 "dependencies": [],
                 "schemas": {
-                    "method": "crewai_executor",
+                    "method": "rest_executor",
                     "input_schema": {"properties": {"url": {"type": "string", "required": True}}},
                 },
                 "inputs": {"url": "https://example.com"},
@@ -512,7 +504,7 @@ def sample_task_tree_data():
                 "has_children": False,
                 "dependencies": [{"id": "child-1", "required": True}],
                 "schemas": {
-                    "method": "crewai_executor",
+                    "method": "rest_executor",
                     "input_schema": {"properties": {"url": {"type": "string", "required": True}}},
                 },
                 "inputs": {"url": "https://example.com"},
@@ -642,9 +634,6 @@ def ensure_executors_registered():
     # CrewAI will be imported lazily when needed by specific tests
     # This prevents background threads from running in all tests
     # try:
-    #     from apflow.extensions.crewai import CrewaiExecutor, BatchCrewaiExecutor
-    #     ensure_registered(CrewaiExecutor, "crewai_executor")
-    #     ensure_registered(BatchCrewaiExecutor, "batch_crewai_executor")
     # except ImportError:
     #     pass
 
@@ -685,7 +674,7 @@ def use_test_db_session(sync_db_session, temp_db_path):
     This fixture ensures that all tests use the test database
     instead of the persistent database file, preventing data pollution.
 
-    For DuckDB: Uses a temporary file-based database (not in-memory) to ensure
+    For SQLite: Uses a temporary file-based database (not in-memory) to ensure
     all code paths see the same database with the same tables.
 
     For PostgreSQL: Uses the TEST_DATABASE_URL environment variable.
@@ -704,7 +693,7 @@ def use_test_db_session(sync_db_session, temp_db_path):
     set_default_session(sync_db_session)
 
     # Set database URL environment variable to ensure all code paths use the test database
-    # This is crucial for DuckDB file-based tests where multiple engine creations must point to the same file
+    # This is crucial for SQLite file-based tests where multiple engine creations must point to the same file
     old_test_db_url = os.environ.get("TEST_DATABASE_URL")
     old_apflow_db_url = os.environ.get("APFLOW_DATABASE_URL")
     old_db_url = os.environ.get("DATABASE_URL")
@@ -714,10 +703,10 @@ def use_test_db_session(sync_db_session, temp_db_path):
         # PostgreSQL - use TEST_DATABASE_URL
         os.environ["DATABASE_URL"] = test_db_url
     elif temp_db_path:
-        # DuckDB file - set DATABASE_URL to point to the temp file
-        duckdb_url = f"sqlite:///{temp_db_path}"
-        os.environ["DATABASE_URL"] = duckdb_url
-        logger.debug(f"Set test DATABASE_URL to: {duckdb_url}")
+        # SQLite file - set DATABASE_URL to point to the temp file
+        sqlite_url = f"sqlite:///{temp_db_path}"
+        os.environ["DATABASE_URL"] = sqlite_url
+        logger.debug(f"Set test DATABASE_URL to: {sqlite_url}")
 
     # Patch create_pooled_session to return the test session
     # This ensures that code using create_pooled_session() gets the test session
@@ -830,8 +819,8 @@ def fresh_db_session(temp_db_path):
             except Exception:
                 pass
     else:
-        # Use DuckDB (default behavior)
-        logger.info(f"Using DuckDB database with fresh tables: {temp_db_path}")
+        # Use SQLite (default behavior)
+        logger.info(f"Using SQLite database with fresh tables: {temp_db_path}")
         if temp_db_path and os.path.exists(temp_db_path):
             try:
                 os.unlink(temp_db_path)

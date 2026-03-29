@@ -1,42 +1,12 @@
 # apflow Docker Compose
 #
-# Mode is controlled entirely by environment variables (or .env file).
-# Use APFLOW_CONTAINER_NAME and COMPOSE_PROJECT_NAME to run multiple
-# instances on the same machine.
-#
-# Standalone (default):
+# Standalone (default — SQLite storage):
 #   docker compose up -d
 #
-# Cluster – run leader + workers on one machine:
-#   # Leader
-#   COMPOSE_PROJECT_NAME=apflow-leader \
-#   APFLOW_CONTAINER_NAME=apflow-leader \
-#   APFLOW_API_PORT=8000 \
-#   APFLOW_CLUSTER_ENABLED=true \
-#   APFLOW_NODE_ROLE=auto \
-#   APFLOW_NODE_ID=leader-1 \
+# With PostgreSQL (distributed/production):
 #   APFLOW_DATABASE_URL=postgresql+asyncpg://user:pass@db-host/apflow \
 #   docker compose up -d
 #
-#   # Worker 1
-#   COMPOSE_PROJECT_NAME=apflow-worker-1 \
-#   APFLOW_CONTAINER_NAME=apflow-worker-1 \
-#   APFLOW_API_PORT=8001 \
-#   APFLOW_CLUSTER_ENABLED=true \
-#   APFLOW_NODE_ROLE=worker \
-#   APFLOW_NODE_ID=worker-1 \
-#   APFLOW_DATABASE_URL=postgresql+asyncpg://user:pass@db-host/apflow \
-#   docker compose up -d
-#
-#   # Worker 2
-#   COMPOSE_PROJECT_NAME=apflow-worker-2 \
-#   APFLOW_CONTAINER_NAME=apflow-worker-2 \
-#   APFLOW_API_PORT=8002 \
-#   APFLOW_CLUSTER_ENABLED=true \
-#   APFLOW_NODE_ROLE=worker \
-#   APFLOW_NODE_ID=worker-2 \
-#   APFLOW_DATABASE_URL=postgresql+asyncpg://user:pass@db-host/apflow \
-#   docker compose up -d
 services:
   apflow:
     container_name: ${APFLOW_CONTAINER_NAME:-apflow}
@@ -51,19 +21,12 @@ services:
     volumes:
       - apflow-data:/app/.data
     environment:
-      # Server
       - APFLOW_LOG_LEVEL=${APFLOW_LOG_LEVEL:-INFO}
-      - APFLOW_JWT_SECRET=${APFLOW_JWT_SECRET:-input_your_apflow_secret}
-      - APFLOW_API_PROTOCOL=${APFLOW_API_PROTOCOL:-a2a}
-      - APFLOW_API_HOST=0.0.0.0
-      - APFLOW_API_PORT=${APFLOW_API_PORT:-8000}
-      - APFLOW_CORS_ORIGINS=${APFLOW_CORS_ORIGINS:-}
-      # Cluster (disabled by default = standalone with DuckDB)
+      # Cluster (disabled by default = standalone with SQLite)
       - APFLOW_CLUSTER_ENABLED=${APFLOW_CLUSTER_ENABLED:-false}
       - APFLOW_NODE_ROLE=${APFLOW_NODE_ROLE:-auto}
       - APFLOW_NODE_ID=${APFLOW_NODE_ID:-}
       - APFLOW_DATABASE_URL=${APFLOW_DATABASE_URL:-}
-      - APFLOW_MAX_PARALLEL_TASKS=${APFLOW_MAX_PARALLEL_TASKS:-4}
       # LLM keys
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}

@@ -1,12 +1,12 @@
 site_name: apflow Documentation
-site_description: Task Orchestration and Execution Framework Documentation
+site_description: AI Agent Production Middleware
 site_url: https://aiperceivable.github.io/apflow/
 repo_url: https://github.com/aiperceivable/apflow
 repo_name: aiperceivable/apflow
 edit_uri: edit/main/docs/
 
 # Copyright
-copyright: Copyright &copy; 2025 aiperceivable
+copyright: Copyright &copy; 2026 aiperceivable
 
 # Theme
 theme:
@@ -14,14 +14,12 @@ theme:
   logo: assets/logo.svg
   favicon: assets/favicon.ico
   palette:
-    # Light mode
     - scheme: default
       primary: indigo
       accent: indigo
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
-    # Dark mode
     - scheme: slate
       primary: indigo
       accent: indigo
@@ -43,74 +41,22 @@ theme:
 
 # Navigation
 nav:
-  - Home: index.md
-  - Getting Started:
-    - Overview: getting-started/index.md
-    - Quick Start: getting-started/quick-start.md
-    - Installation: getting-started/installation.md
-    - Core Concepts: getting-started/concepts.md
-    - Examples: getting-started/examples.md
-    - Tutorials:
-      - First Steps: getting-started/tutorials/tutorial-01-first-steps.md
-      - Task Trees: getting-started/tutorials/tutorial-02-task-trees.md
-      - Dependencies: getting-started/tutorials/tutorial-03-dependencies.md
-  - Guides:
-    - Task Orchestration: guides/task-orchestration.md
-    - Executor Selection: guides/executor-selection.md
-    - Custom Tasks: guides/custom-tasks.md
-    - Best Practices: guides/best-practices.md
-    - CLI: guides/cli.md
-    - API Server: guides/api-server.md
-    - Distributed Cluster: guides/distributed-cluster.md
-    - Library Usage: guides/library-usage.md
-    - Scheduler: guides/scheduler.md
-    - Extensions: guides/extensions.md
-    - Environment Variables: guides/environment-variables.md
-    - FAQ: guides/faq.md
-  - CLI:
-    - Overview: cli/index.md
-    - Commands: cli/commands.md
-    - Configuration: cli/configuration.md
-    - Examples: cli/examples.md
-    - API Gateway: cli/api-gateway.md
-  - API Reference:
-    - Python API: api/python.md
-    - HTTP API: api/http.md
-    - GraphQL API: api/graphql.md
-    - Quick Reference: api/quick-reference.md
-  - Examples:
-    - Basic Tasks: examples/basic_task.md
-    - Task Trees: examples/task-tree.md
-    - Real World: examples/real-world.md
-    - Email Executor: examples/email-executor.md
-    - Generate Executor: examples/generate-executor.md
+  - Home: apflow-v2/prd.md
+  - Design:
+    - PRD: apflow-v2/prd.md
+    - Tech Design: apflow-v2/tech-design.md
+  - Features:
+    - Overview: features/overview.md
+    - Storage Migration: features/storage-migration.md
+    - Project Slimming: features/project-slimming.md
+    - apcore Bridge: features/apcore-bridge.md
+    - Durable Execution: features/durable-execution.md
+    - Cost Governance: features/cost-governance.md
+    - TaskCreator Relaxation: features/task-creator-relaxation.md
   - Architecture:
-    - Overview: architecture/overview.md
-    - Diagrams: architecture/diagrams.md
-    - Directory Structure: architecture/directory-structure.md
     - Extension Registry: architecture/extension-registry-design.md
-    - Task Manager: architecture/task-manager.md
     - Exception Handling: architecture/exception-handling.md
     - Configuration: architecture/configuration.md
-    - Task Tree Lifecycle: architecture/task-tree-lifecycle.md
-  - Protocol:
-    - Overview: protocol/index.md
-    - Introduction: protocol/01-overview.md
-    - Core Concepts: protocol/02-core-concepts.md
-    - Data Model: protocol/03-data-model.md
-    - Execution Lifecycle: protocol/04-execution-lifecycle.md
-    - Examples: protocol/05-examples.md
-    - Interfaces: protocol/06-interfaces.md
-    - Conformance: protocol/07-conformance.md
-    - Errors: protocol/08-errors.md
-    - Validation: protocol/09-validation.md
-  - Development:
-    - Setup: development/setup.md
-    - Contributing: development/contributing.md
-    - Roadmap: development/roadmap.md
-    - Design:
-      - CLI Design: development/design/cli-design.md
-      - Aggregate Results: development/design/aggregate-results-design.md
 
 # Plugins
 plugins:

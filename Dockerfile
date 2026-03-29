@@ -11,11 +11,11 @@ RUN apt-get update && apt-get install -y \
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
-# Install Python dependencies (standard includes a2a, cli, crewai, llm, tools, scheduling)
+# Install apflow with all optional executors
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir ".[standard]"
+    pip install --no-cache-dir ".[all]"
 
-# Create data directory for DuckDB storage (standalone mode)
+# Create data directory for SQLite storage (standalone mode)
 RUN mkdir -p /app/.data
 
 # Create non-root user
@@ -24,8 +24,8 @@ RUN useradd -m -u 1000 appuser && \
 
 USER appuser
 
-# Expose port
+# Expose port for A2A server
 EXPOSE 8000
 
-# Run application via registered entry point
-CMD ["apflow-server"]
+# Default: start Python (users provide their own entry script)
+CMD ["python"]

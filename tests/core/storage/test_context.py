@@ -58,8 +58,8 @@ class TestWithDbSessionContext:
     @pytest.mark.asyncio
     async def test_with_db_session_context_use_pool_true(self, tmp_path):
         """Test with_db_session_context with use_pool=True uses create_pooled_session"""
-        db_path = tmp_path / "test.duckdb"
-        connection_string = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test.db"
+        connection_string = f"sqlite:///{db_path}"
 
         # Create tables first
         from apflow.core.storage.factory import create_session
@@ -133,8 +133,8 @@ class TestWithDbSessionContext:
         """Test with_db_session_context with auto_commit=True calls rollback on error"""
         import uuid
 
-        db_path = tmp_path / "test-rollback.duckdb"
-        connection_string = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test-rollback.db"
+        connection_string = f"sqlite:///{db_path}"
 
         # Create tables first
         from apflow.core.storage.factory import create_session
@@ -186,8 +186,8 @@ class TestWithDbSessionContext:
     @pytest.mark.asyncio
     async def test_with_db_session_context_preserves_old_session(self, tmp_path):
         """Test that with_db_session_context preserves and restores old session"""
-        db_path = tmp_path / "test.duckdb"
-        connection_string = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test.db"
+        connection_string = f"sqlite:///{db_path}"
 
         # Create tables first
         from apflow.core.storage.factory import create_session
@@ -230,8 +230,8 @@ class TestWithDbSessionContext:
         """Test that with_db_session_context works correctly in async event loop"""
         import uuid
 
-        db_path = tmp_path / "test-loop.duckdb"
-        connection_string = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test-loop.db"
+        connection_string = f"sqlite:///{db_path}"
         task_id = f"test-task-loop-{uuid.uuid4().hex[:8]}"
 
         # Create tables first
@@ -268,8 +268,8 @@ class TestWithDbSessionContext:
         """Test that with_db_session_context works correctly with concurrent usage"""
         import uuid
 
-        db_path = tmp_path / "test-concurrent.duckdb"
-        connection_string = f"duckdb:///{db_path}"
+        db_path = tmp_path / "test-concurrent.db"
+        connection_string = f"sqlite:///{db_path}"
 
         # Create tables first
         from apflow.core.storage.factory import create_session
