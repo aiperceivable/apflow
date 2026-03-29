@@ -30,6 +30,8 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "sqlalchemy-session-proxy>=0.1.0",
     "alembic>=1.13.0",
+    # Configuration
+    "pyyaml>=6.0",
     # apcore ecosystem (MCP + A2A + CLI standard)
     "apcore>=0.14.0",
     "apcore-mcp>=0.11.0",
