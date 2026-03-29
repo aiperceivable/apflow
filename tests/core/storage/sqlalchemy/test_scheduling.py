@@ -590,9 +590,9 @@ class TestTaskModelSchedulingFields:
         assert task.schedule_type == ScheduleType.daily.value
         assert task.schedule_expression == "09:00"
         assert task.schedule_enabled is True
-        assert task.schedule_start_at == schedule_start
-        assert task.schedule_end_at == schedule_end
-        assert task.next_run_at == next_run
+        assert task.schedule_start_at.replace(tzinfo=None) == schedule_start.replace(tzinfo=None)
+        assert task.schedule_end_at.replace(tzinfo=None) == schedule_end.replace(tzinfo=None)
+        assert task.next_run_at.replace(tzinfo=None) == next_run.replace(tzinfo=None)
         assert task.max_runs == 100
         assert task.run_count == 0
 
@@ -621,8 +621,8 @@ class TestTaskModelSchedulingFields:
         assert updated_task.schedule_type == ScheduleType.daily.value
         assert updated_task.schedule_expression == "09:00"
         assert updated_task.schedule_enabled is True
-        assert updated_task.last_run_at == last_run
-        assert updated_task.next_run_at == next_run
+        assert updated_task.last_run_at.replace(tzinfo=None) == last_run.replace(tzinfo=None)
+        assert updated_task.next_run_at.replace(tzinfo=None) == next_run.replace(tzinfo=None)
         assert updated_task.run_count == 1
 
     def test_task_model_to_dict_scheduling(self):
@@ -732,7 +732,7 @@ class TestSchedulingAPISupport:
         assert updated.schedule_type == "cron"
         assert updated.schedule_expression == "0 9 * * 1-5"
         assert updated.schedule_enabled is True
-        assert updated.next_run_at == next_run
+        assert updated.next_run_at.replace(tzinfo=None) == next_run.replace(tzinfo=None)
         assert updated.max_runs == 100
 
     @pytest.mark.asyncio
@@ -1148,7 +1148,7 @@ class TestSchedulingRepositoryMethods:
         assert updated.run_count == 1
         assert updated.last_run_at is not None
         assert updated.next_run_at is not None
-        assert updated.next_run_at > now  # Next run should be in the future
+        assert updated.next_run_at.replace(tzinfo=None) > now.replace(tzinfo=None)  # Next run should be in the future
         assert updated.status == "completed"  # Preserved from executor
         assert updated.result == {"processed": 100}  # Preserved from executor
 

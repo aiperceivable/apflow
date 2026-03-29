@@ -12,7 +12,7 @@ import asyncio
 
 import pytest
 from datetime import datetime, timezone, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from apflow.scheduler.base import (
     SchedulerConfig,
@@ -983,34 +983,31 @@ class TestSchedulerAPIDetection:
     def _reset_config(self):
         """Reset ConfigManager between tests.
 
-        Patches load_cli_config to prevent re-loading from the developer's
-        local config file (.data/config.cli.yaml), which would re-establish
-        a real api_server_url and defeat the purpose of cm.clear().
+        Clears config and env to ensure clean state.
         """
         from apflow.core.config_manager import get_config_manager
 
         cm = get_config_manager()
         cm.clear()
-        with patch.object(cm, "load_cli_config"):
-            yield
+        yield
         cm.clear()
 
-    def test_detect_api_mode_true_when_url_configured(self):
-        """Detection returns True when api_server_url is configured."""
+    def test_detect_api_mode_true_when_url_configured(self, monkeypatch):
+        """Detection returns True when APFLOW_API_SERVER_URL is set."""
+        monkeypatch.setenv("APFLOW_API_SERVER_URL", "http://localhost:8000")
         from apflow.core.config_manager import get_config_manager
 
-        cm = get_config_manager()
-        cm.set_api_server_url("http://localhost:8000")
+        get_config_manager().reload()
 
         scheduler = InternalScheduler()
         assert scheduler._detect_api_mode() is True
 
     def test_detect_api_mode_false_when_no_url_configured(self):
-        """Detection returns False when no api_server_url is configured."""
+        """Detection returns False when no APFLOW_API_SERVER_URL is set."""
         scheduler = InternalScheduler()
         assert scheduler._detect_api_mode() is False
 
-    def test_detect_api_mode_reflects_config_changes(self):
+    def test_detect_api_mode_reflects_config_changes(self, monkeypatch):
         """Detection re-reads ConfigManager on every call (no stale cache)."""
         from apflow.core.config_manager import get_config_manager
 
@@ -1019,19 +1016,21 @@ class TestSchedulerAPIDetection:
 
         assert scheduler._detect_api_mode() is False
 
-        cm.set_api_server_url("http://localhost:8000")
+        monkeypatch.setenv("APFLOW_API_SERVER_URL", "http://localhost:8000")
+        cm.reload()
         assert scheduler._detect_api_mode() is True
 
-        cm.set_api_server_url(None)
+        monkeypatch.delenv("APFLOW_API_SERVER_URL")
+        cm.reload()
         assert scheduler._detect_api_mode() is False
 
     @pytest.mark.asyncio
-    async def test_start_enables_api_mode_when_url_configured(self):
+    async def test_start_enables_api_mode_when_url_configured(self, monkeypatch):
         """start() detects API and sets _use_api=True when URL configured."""
         from apflow.core.config_manager import get_config_manager
 
-        cm = get_config_manager()
-        cm.set_api_server_url("http://localhost:8000")
+        monkeypatch.setenv("APFLOW_API_SERVER_URL", "http://localhost:8000")
+        get_config_manager().reload()
 
         scheduler = InternalScheduler()
         scheduler._get_due_tasks = AsyncMock(return_value=[])
