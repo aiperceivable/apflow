@@ -54,8 +54,7 @@ from apflow.core.extensions.decorators import (
     hook_register,
 )
 
-# Re-export tool decorator
-from apflow.core.tools.decorators import tool_register
+# tool_register removed in v2 (core/tools deleted)
 
 __all__ = [
     # Hook decorators
@@ -81,6 +80,4 @@ __all__ = [
     "executor_register",
     "storage_register",
     "hook_register",
-    # Tool registration
-    "tool_register",
 ]

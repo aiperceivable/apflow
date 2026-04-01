@@ -324,14 +324,7 @@ class ExtensionScanner:
             ['httpx']
         """
         dependency_map = {
-            "crewai": ["crewai"],
             "http": ["httpx"],
-            "ssh": ["asyncssh"],
-            "docker": ["docker"],
-            "grpc": ["grpclib"],
-            "websocket": ["websockets"],
-            "scrape": ["bs4", "trafilatura", "requests"],
-            "llm": ["litellm"],
         }
 
         for key, deps in dependency_map.items():
@@ -514,7 +507,7 @@ class ExtensionScanner:
         Get all executor IDs belonging to a specific extension (by directory name)
 
         Args:
-            extension_name: Extension directory name (e.g., "stdio", "http", "crewai")
+            extension_name: Extension directory name (e.g., "http", "core", "apflow")
 
         Returns:
             List of executor IDs belonging to the extension

@@ -28,7 +28,7 @@ class TestTaskReexecution:
             status="pending",
             priority=1,
             inputs={"resource": "cpu"},
-            schemas={"method": "system_info_executor"},
+            schemas={"method": "rest_executor"},
         )
 
         # Execute the task first time - should succeed
@@ -76,7 +76,7 @@ class TestTaskReexecution:
             status="pending",
             priority=1,
             inputs={"resource": "cpu"},
-            schemas={"method": "system_info_executor"},
+            schemas={"method": "rest_executor"},
         )
 
         # Create parent task that depends on child
@@ -167,7 +167,7 @@ class TestTaskReexecution:
             status="pending",
             priority=1,
             inputs={"resource": "cpu"},
-            schemas={"method": "system_info_executor"},
+            schemas={"method": "rest_executor"},
         )
 
         # Execute the task - should execute normally (not as re-execution)
@@ -195,7 +195,7 @@ class TestTaskReexecution:
             status="pending",
             priority=1,
             inputs={"resource": "cpu"},
-            schemas={"method": "system_info_executor"},
+            schemas={"method": "rest_executor"},
         )
 
         # Execute the task first time

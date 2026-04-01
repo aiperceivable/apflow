@@ -11,13 +11,13 @@ class TestDiscoverExecutorModules:
 
     def test_has_rest_executor(self):
         adapters = discover_executor_modules()
-        ids = [a._executor_id for a in adapters]
+        ids = [a.executor_id for a in adapters]
         assert "rest_executor" in ids
 
-    def test_has_system_info_executor(self):
+    def test_has_aggregate_results_executor(self):
         adapters = discover_executor_modules()
-        ids = [a._executor_id for a in adapters]
-        assert "system_info_executor" in ids
+        ids = [a.executor_id for a in adapters]
+        assert "aggregate_results_executor" in ids
 
     def test_adapters_have_schemas(self):
         adapters = discover_executor_modules()

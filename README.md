@@ -152,15 +152,11 @@ Agent Frameworks (bring your own)
 | Executor | Purpose | Extra |
 |----------|---------|-------|
 | RestExecutor | HTTP/REST API calls | core |
-| CommandExecutor | Shell command execution | core |
-| SystemInfoExecutor | System information collection | core |
-| ScrapeExecutor | Web page scraping | core |
-| WebSocketExecutor | WebSocket communication | core |
-| McpExecutor | MCP tool/resource access | core |
-| AggregateResultsExecutor | Combine results from multiple tasks | core |
-| SshExecutor | Remote SSH execution | [ssh] |
-| DockerExecutor | Containerized execution | [docker] |
+| AggregateResultsExecutor | Combine results from dependency tasks | core |
+| ApFlowApiExecutor | Inter-instance API calls (cluster) | core |
 | SendEmailExecutor | Email via SMTP or Resend | [email] |
+
+These are examples. The real executors are your AI agents, business logic, or any `ExecutableTask` implementation.
 
 ## Documentation
 

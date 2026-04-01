@@ -60,7 +60,7 @@ class TestAggregateResultsIntegration:
                 "priority": 1,
                 "has_children": False,
                 "dependencies": [],
-                "schemas": {"method": "system_info_executor"},
+                "schemas": {"method": "rest_executor"},
                 "inputs": {"resource": "cpu"},
             },
             # Child task 2: Get Memory information
@@ -73,7 +73,7 @@ class TestAggregateResultsIntegration:
                 "priority": 1,
                 "has_children": False,
                 "dependencies": [],
-                "schemas": {"method": "system_info_executor"},
+                "schemas": {"method": "rest_executor"},
                 "inputs": {"resource": "memory"},
             },
             # Child task 3: Get Disk information
@@ -86,7 +86,7 @@ class TestAggregateResultsIntegration:
                 "priority": 1,
                 "has_children": False,
                 "dependencies": [],
-                "schemas": {"method": "system_info_executor"},
+                "schemas": {"method": "rest_executor"},
                 "inputs": {"resource": "disk"},
             },
         ]
@@ -200,7 +200,7 @@ class TestAggregateResultsIntegration:
                 "priority": 1,
                 "has_children": False,
                 "dependencies": [],
-                "schemas": {"method": "system_info_executor"},
+                "schemas": {"method": "rest_executor"},
                 "inputs": {"resource": "cpu"},
             },
             {
@@ -212,7 +212,7 @@ class TestAggregateResultsIntegration:
                 "priority": 1,
                 "has_children": False,
                 "dependencies": [],
-                "schemas": {"method": "system_info_executor"},
+                "schemas": {"method": "rest_executor"},
                 "inputs": {"resource": "memory"},
             },
             {
@@ -224,7 +224,7 @@ class TestAggregateResultsIntegration:
                 "priority": 1,
                 "has_children": False,
                 "dependencies": [],
-                "schemas": {"method": "system_info_executor"},
+                "schemas": {"method": "rest_executor"},
                 "inputs": {"resource": "disk"},
             },
         ]

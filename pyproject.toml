@@ -66,12 +66,10 @@ scheduling = ["croniter>=1.0.0"]
 
 # Tool executors (optional)
 email = ["aiosmtplib>=3.0.0"]
-ssh = ["asyncssh>=2.14.0"]
-docker = ["docker>=7.0.0"]
 
 # All optional features
 all = [
-    "apflow[postgres,scheduling,email,ssh,docker]",
+    "apflow[postgres,scheduling,email]",
 ]
 
 # Development dependencies

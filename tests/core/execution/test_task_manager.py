@@ -58,12 +58,12 @@ class TestTaskManager:
         assert len(task_manager.post_hooks) == 1
 
         # Create and execute a task to test hooks
-        # Use system_info_executor which doesn't require additional params
+        # Use rest_executor which doesn't require additional params
         task = await task_manager.task_repository.create_task(
             name="Test Task",
             user_id="test-user",
             inputs={"resource": "cpu"},
-            schemas={"method": "system_info_executor"},
+            schemas={"method": "rest_executor"},
         )
 
         # Create a simple task tree
@@ -77,7 +77,7 @@ class TestTaskManager:
         assert pre_hook_called[0][0] == task.id
         # Verify inputs was modified by pre-hook
         # Note: The actual inputs modification happens in the hook
-        # Note: system_info_executor doesn't modify inputs, so we just verify hook was called
+        # Note: rest_executor doesn't modify inputs, so we just verify hook was called
 
         # Verify post-hook was called
         assert len(post_hook_called) == 1
@@ -99,12 +99,12 @@ class TestTaskManager:
             sync_db_session, pre_hooks=[sync_pre_hook], post_hooks=[sync_post_hook]
         )
 
-        # Use system_info_executor which doesn't require additional params
+        # Use rest_executor which doesn't require additional params
         task = await task_manager.task_repository.create_task(
             name="Test Task",
             user_id="test-user",
             inputs={"resource": "cpu"},
-            schemas={"method": "system_info_executor"},
+            schemas={"method": "rest_executor"},
         )
 
         task_tree = TaskTreeNode(task)
@@ -132,12 +132,12 @@ class TestTaskManager:
             sync_db_session, pre_hooks=[failing_pre_hook], post_hooks=[failing_post_hook]
         )
 
-        # Use system_info_executor which doesn't require additional params
+        # Use rest_executor which doesn't require additional params
         task = await task_manager.task_repository.create_task(
             name="Test Task",
             user_id="test-user",
             inputs={"resource": "cpu"},
-            schemas={"method": "system_info_executor"},
+            schemas={"method": "rest_executor"},
         )
 
         task_tree = TaskTreeNode(task)

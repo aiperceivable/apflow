@@ -19,7 +19,6 @@ Protocol integration via apcore ecosystem:
 - apcore-cli: Command-line interface [cli-gen]
 """
 
-
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _get_version
 
@@ -58,7 +57,6 @@ __all__ = [
     "executor_register",
     "storage_register",
     "hook_register",
-    "tool_register",
     # Extension utilities
     "add_executor_hook",
     # Version
@@ -112,7 +110,6 @@ def __getattr__(name):
         "executor_register",
         "storage_register",
         "hook_register",
-        "tool_register",
     ):
         from apflow.core.decorators import (
             register_pre_hook,  # noqa: F401
@@ -132,7 +129,6 @@ def __getattr__(name):
             executor_register,  # noqa: F401
             storage_register,  # noqa: F401
             hook_register,  # noqa: F401
-            tool_register,  # noqa: F401
         )
 
         return locals()[name]
