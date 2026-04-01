@@ -63,7 +63,7 @@ class TestTaskManager:
             name="Test Task",
             user_id="test-user",
             inputs={"resource": "cpu"},
-            schemas={"method": "rest_executor"},
+            schemas={"method": "aggregate_results_executor"},
         )
 
         # Create a simple task tree
@@ -104,7 +104,7 @@ class TestTaskManager:
             name="Test Task",
             user_id="test-user",
             inputs={"resource": "cpu"},
-            schemas={"method": "rest_executor"},
+            schemas={"method": "aggregate_results_executor"},
         )
 
         task_tree = TaskTreeNode(task)
@@ -137,7 +137,7 @@ class TestTaskManager:
             name="Test Task",
             user_id="test-user",
             inputs={"resource": "cpu"},
-            schemas={"method": "rest_executor"},
+            schemas={"method": "aggregate_results_executor"},
         )
 
         task_tree = TaskTreeNode(task)

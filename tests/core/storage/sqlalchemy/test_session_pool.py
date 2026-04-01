@@ -319,7 +319,7 @@ class TestSessionPoolWithTaskExecutor:
                 name="Root Task",
                 status="pending",
                 user_id="test-user",
-                schemas={"method": "system_info_executor"},
+                schemas={"method": "aggregate_results_executor"},
                 inputs={"resource": "cpu"},
             )
             session.commit()
@@ -365,7 +365,7 @@ class TestSessionPoolWithTaskExecutor:
                     name=f"Root Task {i}",
                     status="pending",
                     user_id="test-user",
-                    schemas={"method": "system_info_executor"},
+                    schemas={"method": "aggregate_results_executor"},
                     inputs={"resource": "cpu"},
                 )
             session.commit()
@@ -467,7 +467,7 @@ class TestSessionPoolWithTaskExecutor:
                     name=f"Root Task {i}",
                     status="pending",
                     user_id="test-user",
-                    schemas={"method": "system_info_executor"},
+                    schemas={"method": "aggregate_results_executor"},
                     inputs={"resource": "cpu"},
                 )
             session.commit()
@@ -537,7 +537,7 @@ class TestSessionPoolWithTaskExecutor:
                     name=f"Root Task {i}",
                     status="pending",
                     user_id=f"user-{i}",
-                    schemas={"method": "system_info_executor"},
+                    schemas={"method": "aggregate_results_executor"},
                     inputs={"resource": "cpu"},
                 )
             session.commit()
@@ -599,7 +599,7 @@ class TestSessionPoolWithTaskExecutor:
                 name="Root Task",
                 status="pending",
                 user_id="test-user",
-                schemas={"method": "system_info_executor"},
+                schemas={"method": "aggregate_results_executor"},
                 inputs={"resource": "cpu"},
             )
             session.commit()

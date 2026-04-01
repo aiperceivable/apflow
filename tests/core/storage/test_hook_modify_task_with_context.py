@@ -160,7 +160,7 @@ async def test_post_hook_modifies_task_after_execution(sync_db_session):
         task = await repo.create_task(
             name="Test Task",
             user_id="test-user",
-            params={"resource": "cpu", "executor_id": "rest_executor"},
+            params={"resource": "cpu", "executor_id": "aggregate_results_executor"},
         )
         task_id = task.id
 
