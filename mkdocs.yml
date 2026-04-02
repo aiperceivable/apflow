@@ -41,10 +41,10 @@ theme:
 
 # Navigation
 nav:
-  - Home: apflow-v2/prd.md
+  - Home: prd.md
   - Design:
-    - PRD: apflow-v2/prd.md
-    - Tech Design: apflow-v2/tech-design.md
+    - PRD: prd.md
+    - Tech Design: tech-design.md
   - Features:
     - Overview: features/overview.md
     - Storage Migration: features/storage-migration.md

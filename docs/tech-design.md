@@ -8,7 +8,7 @@
 **Author:** apflow team
 **Date:** 2026-03-28
 **Status:** Draft
-**PRD Reference:** `docs/apflow-v2/prd.md`
+**PRD Reference:** `docs/prd.md`
 
 ---
 

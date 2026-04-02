@@ -2,8 +2,8 @@
 
 **Version:** 0.20.0 (MVP)
 **Date:** 2026-03-28
-**Tech Design:** `docs/apflow-v2/tech-design.md`
-**PRD:** `docs/apflow-v2/prd.md`
+**Tech Design:** `docs/tech-design.md`
+**PRD:** `docs/prd.md`
 
 ---
 

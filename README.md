@@ -129,8 +129,8 @@ These are examples and utilities. The real executors are your AI agents, busines
 
 ## Documentation
 
-- [PRD](docs/apflow-v2/prd.md) — Product requirements
-- [Tech Design](docs/apflow-v2/tech-design.md) — Architecture and design
+- [PRD](docs/prd.md) — Product requirements
+- [Tech Design](docs/tech-design.md) — Architecture and design
 - [Feature Specs](docs/features/) — Implementation specifications
 
 ## Contributing
