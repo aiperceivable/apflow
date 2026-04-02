@@ -45,6 +45,7 @@ class ApflowApp:
 def create_app(
     connection_string: Optional[str] = None,
     namespace: str = "apflow",
+    cluster: bool = False,
 ) -> ApflowApp:
     """Create and initialize the full apflow application stack.
 
@@ -113,6 +114,18 @@ def create_app(
         namespace=namespace,
     )
     logger.info(f"apcore Registry populated ({len(list(registry.list()))} modules)")
+
+    # Start distributed runtime if cluster mode
+    if cluster:
+        try:
+            from apflow.core.distributed.config import DistributedConfig
+            from apflow.core.distributed.runtime import DistributedRuntime
+
+            dist_config = DistributedConfig.from_env()
+            DistributedRuntime(dist_config)  # Starts background tasks
+            logger.info(f"Distributed runtime enabled (node: {dist_config.node_id})")
+        except Exception as e:
+            logger.warning(f"Distributed runtime failed to initialize: {e}")
 
     return ApflowApp(
         session=session,

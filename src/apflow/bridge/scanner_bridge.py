@@ -49,6 +49,28 @@ def discover_executor_modules() -> list[ExecutableTaskModuleAdapter]:
     except ImportError:
         pass
 
+    # Discover executors from entry points (third-party packages)
+    try:
+        from importlib.metadata import entry_points
+
+        eps = entry_points(group="apflow.executors")
+        seen_ids = {a.executor_id for a in adapters}
+        for ep in eps:
+            try:
+                register_fn = ep.load()
+                register_fn()  # Expected to call @function_executor or @executor_register
+                # Re-scan function executors after registration
+                for eid, ecls in get_function_executor_classes().items():
+                    if eid not in seen_ids:
+                        adapter = _create_adapter_from_class(eid, ecls)
+                        if adapter is not None:
+                            adapters.append(adapter)
+                            seen_ids.add(eid)
+            except Exception as e:
+                logger.warning(f"Failed to load executor entry point '{ep.name}': {e}")
+    except Exception:
+        pass
+
     logger.info(f"Discovered {len(adapters)} executor modules for apcore registration")
     return adapters
 

@@ -62,6 +62,8 @@ serve(app.registry, name="apflow")
 # Or from the command line
 apflow serve              # A2A HTTP server
 apflow serve --explorer   # With Explorer UI
+apflow serve --cluster    # Distributed cluster mode
+apflow worker --db ...    # Start worker node
 apflow mcp                # MCP server (for Claude/Cursor)
 apflow info               # Show registered modules
 ```
@@ -70,14 +72,25 @@ apflow info               # Show registered modules
 
 ### Task Orchestration
 
-Dependency graph execution with priority scheduling, parallel execution, and result aggregation.
+Dependency graph execution with priority scheduling, parallel execution, and result aggregation. Supports both tree structure (`parent_id`) and DAG patterns (`dependencies` for fan-in).
 
 ```python
+# Tree: sequential pipeline
 tasks = [
     {"id": "fetch", "name": "Fetch Data", "priority": 1},
     {"id": "process", "name": "Process", "parent_id": "fetch", "priority": 2},
     {"id": "notify", "name": "Notify", "parent_id": "process", "priority": 3},
 ]
+
+# DAG: fan-in pattern (task depends on multiple predecessors)
+tasks = [
+    {"id": "a", "name": "Step A", "priority": 1},
+    {"id": "b", "name": "Step B", "priority": 1},
+    {"id": "merge", "name": "Merge Results", "priority": 2,
+     "parent_id": "a",
+     "dependencies": [{"id": "a", "required": True}, {"id": "b", "required": True}]},
+]
+
 tree = await task_creator.create_task_tree_from_array(tasks)
 await task_manager.distribute_task_tree(tree)
 ```

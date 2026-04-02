@@ -24,6 +24,7 @@ from apflow.bridge.task_modules import (
     TaskCreateModule,
     TaskDeleteModule,
     TaskExecuteModule,
+    TaskCreateTreeModule,
     TaskGetModule,
     TaskListModule,
 )
@@ -76,6 +77,7 @@ def create_apflow_registry(
     # 2. Register task management modules
     task_modules = {
         "task.create": TaskCreateModule(task_creator, task_repository),
+        "task.create_tree": TaskCreateTreeModule(task_creator, task_repository),
         "task.execute": TaskExecuteModule(task_manager),
         "task.list": TaskListModule(task_repository),
         "task.get": TaskGetModule(task_repository),

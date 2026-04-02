@@ -43,6 +43,10 @@ dependencies = [
 [project.scripts]
 apflow = "apflow.cli:main"
 
+[project.entry-points."apflow.executors"]
+# Third-party packages register executors here:
+# my_executor = "my_package.executors:register"
+
 # Optional dependencies
 [project.optional-dependencies]
 # Documentation (MkDocs with Material theme)

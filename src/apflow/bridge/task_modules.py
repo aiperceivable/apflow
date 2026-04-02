@@ -244,3 +244,98 @@ class TaskDeleteModule:
 
         await self._repo.delete_task(task_id)
         return {"task_id": task_id, "deleted": True}
+
+
+_TASK_CREATE_TREE_INPUT = {
+    "type": "object",
+    "properties": {
+        "tasks": {
+            "type": "array",
+            "minItems": 1,
+            "description": "Array of task definitions. Use parent_id to build tree, dependencies for DAG ordering.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Optional task ID (auto-generated if omitted)"},
+                    "name": {"type": "string", "minLength": 1, "description": "Task name (required)"},
+                    "parent_id": {"type": "string", "description": "Parent task ID for tree structure"},
+                    "priority": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 3,
+                        "default": 2,
+                        "description": "0=urgent, 1=high, 2=normal, 3=low",
+                    },
+                    "inputs": {"type": "object", "description": "Task input parameters"},
+                    "params": {"type": "object", "description": "Executor init parameters"},
+                    "dependencies": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "Task dependencies for DAG ordering [{id: 'task_id', required: true}]",
+                    },
+                    "token_budget": {"type": "integer", "minimum": 0},
+                    "cost_policy": {"type": "string"},
+                    "max_attempts": {"type": "integer", "minimum": 1, "maximum": 100, "default": 3},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    "required": ["tasks"],
+}
+
+_TASK_CREATE_TREE_OUTPUT = {
+    "type": "object",
+    "properties": {
+        "root_task_id": {"type": "string", "description": "ID of the first root task"},
+        "task_count": {"type": "integer", "description": "Total tasks created"},
+        "task_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "All created task IDs",
+        },
+    },
+}
+
+
+class TaskCreateTreeModule:
+    """Create a complete task tree from an array of task definitions in one call."""
+
+    description = (
+        "Create a multi-step task workflow from an array of task definitions. "
+        "Use parent_id for tree structure and dependencies for execution ordering. "
+        "Tasks without parent_id are root tasks. Multiple roots are allowed."
+    )
+
+    def __init__(self, task_creator: Any, task_repository: Any) -> None:
+        self._creator = task_creator
+        self._repo = task_repository
+        self.input_schema = _make_schema(_TASK_CREATE_TREE_INPUT)
+        self.output_schema = _make_schema(_TASK_CREATE_TREE_OUTPUT)
+
+    async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        tasks = inputs.get("tasks", [])
+        if not tasks:
+            raise ValueError("tasks array must be non-empty")
+
+        for t in tasks:
+            if not t.get("name"):
+                raise ValueError("Each task must have a non-empty 'name'")
+
+        tree = await self._creator.create_task_tree_from_array(tasks)
+
+        # Collect all task IDs from the tree
+        task_ids: list[str] = []
+
+        def _collect_ids(node: Any) -> None:
+            task_ids.append(node.task.id)
+            for child in node.children:
+                _collect_ids(child)
+
+        _collect_ids(tree)
+
+        return {
+            "root_task_id": tree.task.id,
+            "task_count": len(task_ids),
+            "task_ids": task_ids,
+        }

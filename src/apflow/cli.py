@@ -32,6 +32,9 @@ def cli() -> None:
 @click.option("--metrics", is_flag=True, help="Enable /metrics endpoint")
 @click.option("--cors", default=None, help="CORS origins (comma-separated)")
 @click.option("--db", default=None, help="Database connection string")
+@click.option(
+    "--cluster", is_flag=True, help="Enable distributed cluster mode (requires PostgreSQL)"
+)
 @click.option("--log-level", default=None, help="Log level (DEBUG/INFO/WARNING/ERROR)")
 def serve(
     host: str,
@@ -41,12 +44,13 @@ def serve(
     metrics: bool,
     cors: Optional[str],
     db: Optional[str],
+    cluster: bool,
     log_level: Optional[str],
 ) -> None:
     """Start A2A HTTP server (internal network service)."""
     from apflow.app import create_app
 
-    app = create_app(connection_string=db)
+    app = create_app(connection_string=db, cluster=cluster)
 
     cors_origins = [s.strip() for s in cors.split(",")] if cors else None
 
@@ -146,6 +150,37 @@ def info() -> None:
             click.echo(f"  {m}")
     except Exception as e:
         click.echo(f"Registry: error ({e})")
+
+
+@cli.command()
+@click.option("--db", required=True, help="PostgreSQL connection string (required for cluster)")
+@click.option("--node-id", default=None, help="Worker node ID (auto-generated if omitted)")
+@click.option("--log-level", default=None, help="Log level")
+def worker(db: str, node_id: Optional[str], log_level: Optional[str]) -> None:
+    """Start a distributed worker node (requires PostgreSQL)."""
+    import asyncio
+
+    click.echo(f"Starting worker node: {node_id or 'auto'}")
+
+    from apflow.app import create_app
+
+    create_app(connection_string=db, cluster=True)
+
+    try:
+        from apflow.core.distributed.config import DistributedConfig
+        from apflow.core.distributed.worker import WorkerRuntime
+
+        config = DistributedConfig.from_env()
+        if node_id:
+            config.node_id = node_id
+
+        worker_rt = WorkerRuntime(config)
+        click.echo(f"Worker {config.node_id} running (Ctrl+C to stop)")
+        asyncio.run(worker_rt.start())
+    except ImportError:
+        click.echo("Error: distributed module not available", err=True)
+    except KeyboardInterrupt:
+        click.echo("Worker stopped")
 
 
 def main() -> None:
