@@ -36,6 +36,19 @@ def discover_executor_modules() -> list[ExecutableTaskModuleAdapter]:
         if adapter is not None:
             adapters.append(adapter)
 
+    # Append runtime-registered function executors (invisible to AST scanner)
+    try:
+        from apflow.adapters.function_executor import get_function_executor_classes
+
+        seen_ids = {a.executor_id for a in adapters}
+        for executor_id, executor_class in get_function_executor_classes().items():
+            if executor_id not in seen_ids:
+                adapter = _create_adapter_from_class(executor_id, executor_class)
+                if adapter is not None:
+                    adapters.append(adapter)
+    except ImportError:
+        pass
+
     logger.info(f"Discovered {len(adapters)} executor modules for apcore registration")
     return adapters
 
@@ -101,3 +114,28 @@ def _extract_schema(executor_class: type, method_name: str) -> Dict[str, Any]:
     import copy
 
     return copy.deepcopy(_FALLBACK_SCHEMA)
+
+
+def _create_adapter_from_class(
+    executor_id: str, executor_class: type
+) -> ExecutableTaskModuleAdapter | None:
+    """Create adapter directly from a class (no AST metadata needed).
+
+    Used for runtime-registered function executors.
+    """
+    try:
+        input_schema = _extract_schema(executor_class, "get_input_schema")
+        output_schema = _extract_schema(executor_class, "get_output_schema")
+
+        return ExecutableTaskModuleAdapter(
+            executor_class=executor_class,
+            executor_id=executor_id,
+            executor_name=getattr(executor_class, "name", executor_id),
+            executor_description=getattr(executor_class, "description", ""),
+            input_schema=input_schema,
+            output_schema=output_schema,
+            tags=getattr(executor_class, "tags", []),
+        )
+    except Exception as e:
+        logger.warning(f"Cannot create adapter for function executor {executor_id}: {e}")
+        return None

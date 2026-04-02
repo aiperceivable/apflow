@@ -37,6 +37,8 @@ __all__ = [
     "get_default_session",
     "get_hook_session",
     "get_hook_repository",
+    # Adapters
+    "function_executor",
     # Unified decorators
     "register_pre_hook",
     "register_post_hook",
@@ -132,6 +134,12 @@ def __getattr__(name):
         )
 
         return locals()[name]
+
+    # Adapters
+    if name == "function_executor":
+        from apflow.adapters.function_executor import function_executor
+
+        return function_executor
 
     # Core types
     if name in ("WebhookVerifyContext", "WebhookVerifyResult"):
