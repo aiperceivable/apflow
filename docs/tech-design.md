@@ -528,14 +528,14 @@ dependencies = [
     "sqlalchemy-session-proxy>=0.1.0",
     "alembic>=1.13.0",
     # SQLite is Python stdlib -- no additional dependency
-    "apcore>=0.14.0",
+    # apcore ecosystem is core (MCP/A2A/CLI are standard apflow features, not extras).
+    # apcore-a2a 0.4.0 implements A2A protocol 1.0; apcore 0.22.0 is its required floor.
+    "apcore>=0.22.0",
+    "apcore-toolkit>=0.8.0",
+    "apcore-mcp>=0.15.0",
+    "apcore-a2a>=0.4.0",
+    "apcore-cli>=0.10.0",
 ]
-
-[project.optional-dependencies]
-# Protocol exposure (all via apcore ecosystem)
-mcp-server = ["apcore-mcp>=0.10.1"]
-a2a-server = ["apcore-a2a"]
-cli-gen = ["apcore-cli>=0.3.0"]
 
 # Storage
 postgres = [

@@ -527,10 +527,11 @@ Layer 1: Agent Frameworks (USER'S CHOICE — not built by apflow)
 - `grpclib`, `protobuf` (from grpc extra)
 
 **Added to `pyproject.toml`:**
-- `apcore>=0.14.0` (core dependency)
-- `apcore-mcp>=0.10.1` (optional: MCP exposure)
-- `apcore-a2a` (optional: A2A exposure)
-- `apcore-cli>=0.3.0` (optional: CLI generation)
+- `apcore>=0.22.0` (core dependency)
+- `apcore-toolkit>=0.8.0` (shared scanner/schema floor required by mcp + cli)
+- `apcore-mcp>=0.15.0` (MCP exposure)
+- `apcore-a2a>=0.4.0` (A2A exposure — A2A protocol 1.0)
+- `apcore-cli>=0.10.0` (CLI generation)
 
 ---
 

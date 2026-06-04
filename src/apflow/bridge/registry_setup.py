@@ -11,8 +11,8 @@ Example:
     registry = create_apflow_registry(task_manager, task_creator, task_repository)
 
     # Expose via MCP
-    from apcore_mcp import serve_mcp
-    serve_mcp(registry, transport="streamable-http")
+    from apcore_mcp import serve
+    serve(registry, transport="streamable-http")
 """
 
 from typing import Any

@@ -27,21 +27,17 @@ def _build_cli() -> click.Group:
 
     from apcore_cli import create_cli
 
+    from apflow import __version__
+
+    # apcore-cli >= 0.10 registers --version and applies the help/description itself
+    # when given version=/description=, so the old click.params surgery is no longer
+    # needed (it also no longer leaks the SDK's own version — see apcore-cli Issue #18).
     cli = create_cli(
         registry=app.registry,
         prog_name="apflow",
+        version=__version__,
+        description="apflow — AI-Perceivable Distributed Orchestration",
     )
-
-    # Override help text and version for apflow branding
-    cli.help = "apflow — AI-Perceivable Distributed Orchestration"
-
-    from apflow import __version__
-
-    # Replace apcore-cli's version option with apflow's version
-    cli.params = [
-        p for p in cli.params if not (isinstance(p, click.Option) and p.name == "version")
-    ]
-    cli = click.version_option(version=__version__, prog_name="apflow")(cli)
 
     # Register apflow-specific commands
     cli.add_command(serve)
@@ -58,6 +54,11 @@ def _build_cli() -> click.Group:
 @click.option("--name", default="apflow", help="Agent name in A2A Agent Card")
 @click.option("--explorer", is_flag=True, help="Enable A2A Explorer UI")
 @click.option("--metrics", is_flag=True, help="Enable /metrics endpoint")
+@click.option(
+    "--sys-modules",
+    is_flag=True,
+    help="Expose apcore system modules (sys.*) as A2A skills",
+)
 @click.option("--cors", default=None, help="CORS origins (comma-separated)")
 @click.option("--db", default=None, help="Database connection string")
 @click.option(
@@ -70,12 +71,14 @@ def serve(
     name: str,
     explorer: bool,
     metrics: bool,
+    sys_modules: bool,
     cors: Optional[str],
     db: Optional[str],
     cluster: bool,
     log_level: Optional[str],
 ) -> None:
     """Start A2A HTTP server (internal network service)."""
+    from apflow import __version__
     from apflow.app import create_app
 
     app = create_app(connection_string=db, cluster=cluster)
@@ -89,15 +92,19 @@ def serve(
 
     from apcore_a2a import serve as a2a_serve
 
+    # A2A protocol 1.0: the Agent Card now carries a version; apcore-a2a resolves
+    # execution_timeout from the APCORE_A2A Config Bus when omitted.
     a2a_serve(
         app.registry,
         host=host,
         port=port,
         name=name,
+        version=__version__,
         description="apflow AI-Perceivable Distributed Orchestration",
         url=f"http://{host}:{port}",
         explorer=explorer,
         metrics=metrics,
+        sys_modules=sys_modules,
         cors_origins=cors_origins,
         log_level=log_level,
     )
@@ -113,6 +120,11 @@ def serve(
 @click.option("--host", default="127.0.0.1", help="Bind host (HTTP modes)")
 @click.option("--port", default=8001, type=int, help="Bind port (HTTP modes)")
 @click.option("--explorer", is_flag=True, help="Enable MCP Tool Explorer UI")
+@click.option(
+    "--metrics",
+    is_flag=True,
+    help="Enable observability (metrics + usage endpoints under /api/usage)",
+)
 @click.option("--db", default=None, help="Database connection string")
 @click.option("--log-level", default=None, help="Log level")
 def mcp(
@@ -120,6 +132,7 @@ def mcp(
     host: str,
     port: int,
     explorer: bool,
+    metrics: bool,
     db: Optional[str],
     log_level: Optional[str],
 ) -> None:
@@ -146,6 +159,7 @@ def mcp(
         port=port,
         name="apflow",
         explorer=explorer,
+        observability=metrics,
         log_level=log_level,
     )
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "apflow"
-version = "0.20.0"
+version = "0.21.0"
 description = "AI-Perceivable Distributed Orchestration"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -34,10 +34,14 @@ dependencies = [
     "pyyaml>=6.0",
     "click>=8.0",
     # apcore ecosystem (MCP + A2A + CLI standard)
-    "apcore>=0.14.0",
-    "apcore-mcp>=0.11.0",
-    "apcore-a2a>=0.3.0",
-    "apcore-cli>=0.3.0",
+    # apcore-a2a 0.4.0 implements A2A protocol 1.0; apcore 0.22.0 is its required
+    # floor (Config Bus, observability middleware). mcp 0.15.0 and cli 0.10.0 both
+    # hard-require apcore-toolkit>=0.8.0, pinned here to make the shared floor explicit.
+    "apcore>=0.22.0",
+    "apcore-toolkit>=0.8.0",
+    "apcore-mcp>=0.15.0",
+    "apcore-a2a>=0.4.0",
+    "apcore-cli>=0.10.0",
 ]
 
 [project.scripts]
