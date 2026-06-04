@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy.orm import Session
 
+    from apflow.core.distributed.runtime import DistributedRuntime
     from apflow.core.execution.task_creator import TaskCreator
     from apflow.core.execution.task_manager import TaskManager
     from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
@@ -34,12 +35,15 @@ class ApflowApp:
         task_creator: "TaskCreator",
         task_repository: "TaskRepository",
         registry: "Registry",
+        distributed_runtime: "Optional[DistributedRuntime]" = None,
     ) -> None:
         self.session = session
         self.task_manager = task_manager
         self.task_creator = task_creator
         self.task_repository = task_repository
         self.registry = registry
+        # Set only in cluster mode; the caller's event loop awaits its start().
+        self.distributed_runtime = distributed_runtime
 
 
 def create_app(
@@ -115,15 +119,20 @@ def create_app(
     )
     logger.info(f"apcore Registry populated ({len(list(registry.list()))} modules)")
 
-    # Start distributed runtime if cluster mode
+    # Construct the distributed runtime if cluster mode. create_app() is
+    # synchronous and cannot await runtime.start(); the caller's event loop
+    # (the `apflow worker` command, or a future serve-loop hook) is responsible
+    # for awaiting start(). We construct it here with the correct contract via
+    # DistributedRuntime.from_session() and expose it on the app.
+    distributed_runtime = None
     if cluster:
         try:
             from apflow.core.distributed.config import DistributedConfig
             from apflow.core.distributed.runtime import DistributedRuntime
 
             dist_config = DistributedConfig.from_env()
-            DistributedRuntime(dist_config)  # Starts background tasks
-            logger.info(f"Distributed runtime enabled (node: {dist_config.node_id})")
+            distributed_runtime = DistributedRuntime.from_session(session, dist_config)
+            logger.info(f"Distributed runtime initialized (node: {dist_config.node_id})")
         except Exception as e:
             logger.warning(f"Distributed runtime failed to initialize: {e}")
 
@@ -133,4 +142,5 @@ def create_app(
         task_creator=task_creator,
         task_repository=task_repository,
         registry=registry,
+        distributed_runtime=distributed_runtime,
     )

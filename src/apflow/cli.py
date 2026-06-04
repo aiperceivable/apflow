@@ -10,7 +10,7 @@ plus apflow-specific commands:
 """
 
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 import click
 
@@ -202,25 +202,44 @@ def worker(db: str, node_id: Optional[str], log_level: Optional[str]) -> None:
     """Start a distributed worker node (requires PostgreSQL)."""
     import asyncio
 
-    click.echo(f"Starting worker node: {node_id or 'auto'}")
-
     from apflow.app import create_app
 
-    create_app(connection_string=db, cluster=True)
+    click.echo(f"Starting worker node: {node_id or 'auto'}")
+
+    # The worker owns the distributed runtime lifecycle, so build the app without
+    # cluster auto-init (which only constructs, never starts, the runtime).
+    app = create_app(connection_string=db, cluster=False)
 
     try:
         from apflow.core.distributed.config import DistributedConfig
-        from apflow.core.distributed.worker import WorkerRuntime
-
-        config = DistributedConfig.from_env()
-        if node_id:
-            config.node_id = node_id
-
-        worker_rt = WorkerRuntime(config)
-        click.echo(f"Worker {config.node_id} running (Ctrl+C to stop)")
-        asyncio.run(worker_rt.start())
+        from apflow.core.distributed.runtime import DistributedRuntime
+        from apflow.core.execution.task_executor import TaskExecutor
     except ImportError:
         click.echo("Error: distributed module not available", err=True)
+        return
+
+    config = DistributedConfig.from_env()
+    if node_id:
+        config.node_id = node_id
+
+    async def execute_one(task: Any) -> dict:
+        """Execute a single claimed task via the shared TaskExecutor singleton."""
+        return await TaskExecutor().execute_tasks(
+            [{"id": task.id}],
+            require_existing_tasks=True,
+        )
+
+    runtime = DistributedRuntime.from_session(app.session, config, task_executor=execute_one)
+
+    async def run() -> None:
+        try:
+            await runtime.start()
+        finally:
+            await runtime.shutdown()
+
+    click.echo(f"Worker {config.node_id} running (Ctrl+C to stop)")
+    try:
+        asyncio.run(run())
     except KeyboardInterrupt:
         click.echo("Worker stopped")
 

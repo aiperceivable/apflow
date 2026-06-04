@@ -9,8 +9,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import sessionmaker
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.orm import Session
 
 from apflow.core.distributed.config import DistributedConfig, utcnow as _utcnow
 from apflow.core.distributed.idempotency import IdempotencyManager
@@ -57,6 +62,36 @@ class DistributedRuntime:
         self._worker_runtime: WorkerRuntime | None = None
         self._background_tasks: list[asyncio.Task[None]] = []
         self._shutdown_event = asyncio.Event()
+
+    @classmethod
+    def from_session(
+        cls,
+        session: Session | AsyncSession,
+        config: DistributedConfig,
+        task_executor: TaskExecutorFn | None = None,
+    ) -> "DistributedRuntime":
+        """Build a runtime from an existing ORM session's bound engine.
+
+        The distributed managers (registry, leasing, idempotency) each open their
+        own short-lived sessions, so they need a ``sessionmaker`` bound to the same
+        engine as ``session`` rather than the single session instance. This is the
+        single construction seam callers (CLI worker, cluster bootstrap) should use
+        instead of building the multi-argument constructor by hand.
+
+        Distributed mode is synchronous (PostgreSQL via psycopg2); ``session`` is
+        expected to be a sync ``Session``. The union is accepted only to match the
+        app's session type.
+
+        Args:
+            session: An initialized SQLAlchemy session; its bound engine is reused.
+            config: Distributed configuration.
+            task_executor: Optional single-task executor. When omitted, the node
+                runs as a coordinator only (leader election + lease/health loops)
+                and does not execute tasks.
+        """
+        engine = session.get_bind()
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        return cls(config, session_factory, task_executor=task_executor)
 
     @property
     def is_leader(self) -> bool:

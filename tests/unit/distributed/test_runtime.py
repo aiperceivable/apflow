@@ -394,3 +394,64 @@ class TestWorkerRuntimeStart:
 
         assert runtime_no_executor._worker_runtime is None
         assert "no task_executor configured" in caplog.text
+
+
+class TestDistributedRuntimeFromSession:
+    """Construction-seam tests for ``DistributedRuntime.from_session``.
+
+    These exercise the REAL ``__init__`` contract (not ``__new__``), which is the
+    contract the ``apflow worker`` command and cluster bootstrap must satisfy.
+    A regression here is exactly what made ``WorkerRuntime(config)`` /
+    ``DistributedRuntime(dist_config)`` raise ``TypeError`` at the call sites.
+
+    They build their own SQLite session so they do not depend on the (optionally
+    PostgreSQL-bound) shared ``session`` fixture — construction never touches the DB.
+    """
+
+    @pytest.fixture
+    def sqlite_session(self):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        engine = create_engine("sqlite:///:memory:")
+        sess = sessionmaker(bind=engine)()
+        try:
+            yield sess
+        finally:
+            sess.close()
+            engine.dispose()
+
+    def test_from_session_builds_runtime_with_full_contract(self, sqlite_session):
+        """from_session wires every collaborator via a real constructor call."""
+        config = _make_config()
+        runtime = DistributedRuntime.from_session(sqlite_session, config)
+
+        assert runtime._config is config
+        assert runtime._task_executor is None
+        # All managers wired — proves __init__ (not __new__) ran successfully.
+        assert runtime._node_registry is not None
+        assert runtime._leader_election is not None
+        assert runtime._lease_manager is not None
+        assert runtime._idempotency is not None
+        assert runtime._role == "initializing"
+
+    def test_from_session_reuses_source_engine(self, sqlite_session):
+        """The derived session_factory is bound to the source session's engine."""
+        runtime = DistributedRuntime.from_session(sqlite_session, _make_config())
+
+        derived = runtime._session_factory()
+        try:
+            assert derived.get_bind() is sqlite_session.get_bind()
+        finally:
+            derived.close()
+
+    def test_from_session_passes_task_executor(self, sqlite_session):
+        """A provided task_executor is forwarded to the runtime."""
+
+        async def executor(_task: Any) -> dict[str, Any]:
+            return {"status": "completed"}
+
+        runtime = DistributedRuntime.from_session(
+            sqlite_session, _make_config(), task_executor=executor
+        )
+        assert runtime._task_executor is executor
