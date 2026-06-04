@@ -17,6 +17,42 @@ def _make_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return copy.deepcopy(schema)
 
 
+def _coerce_int(
+    value: Any,
+    default: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    """Coerce an external input value to a clamped integer.
+
+    Task-module inputs arrive from external agents (MCP/A2A) and are NOT
+    schema-validated before ``execute()`` runs (apcore-mcp ``validate_inputs``
+    defaults to ``False``), so numeric arguments must be defended here. A
+    missing/null value falls back to ``default``; an int (or integral float, or
+    digit string) is used directly; anything else raises a clean ``ValueError``
+    instead of crashing later with a ``TypeError`` from ``min()``/``max()``.
+    """
+    if value is None:
+        result = default
+    elif isinstance(value, bool):
+        # bool is an int subclass; reject it explicitly as a non-integer.
+        raise ValueError("expected an integer, got a boolean")
+    elif isinstance(value, int):
+        result = value
+    elif isinstance(value, float) and value.is_integer():
+        result = int(value)
+    elif isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        result = int(value.strip())
+    else:
+        raise ValueError(f"expected an integer, got {type(value).__name__}")
+    if minimum is not None:
+        result = max(minimum, result)
+    if maximum is not None:
+        result = min(maximum, result)
+    return result
+
+
 _TASK_CREATE_INPUT = {
     "type": "object",
     "properties": {
@@ -168,8 +204,8 @@ class TaskListModule:
         )
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
-        limit = max(1, min(1000, inputs.get("limit", 50)))
-        offset = max(0, inputs.get("offset", 0))
+        limit = _coerce_int(inputs.get("limit"), 50, minimum=1, maximum=1000)
+        offset = _coerce_int(inputs.get("offset"), 0, minimum=0)
 
         # Use query_tasks which is the actual async repository method
         tasks = await self._repo.query_tasks(
@@ -325,10 +361,14 @@ class TaskCreateTreeModule:
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         tasks = inputs.get("tasks", [])
+        if not isinstance(tasks, list):
+            raise ValueError("tasks must be an array")
         if not tasks:
             raise ValueError("tasks array must be non-empty")
 
-        for t in tasks:
+        for index, t in enumerate(tasks):
+            if not isinstance(t, dict):
+                raise ValueError(f"tasks[{index}] must be an object")
             if not t.get("name"):
                 raise ValueError("Each task must have a non-empty 'name'")
 
@@ -563,6 +603,21 @@ class TaskCloneMixedModule:
 class TaskUpdateModule:
     """Update fields on an existing task."""
 
+    # Only these schema-advertised fields may be written. External inputs are not
+    # schema-validated by default (apcore-mcp validate_inputs=False), so the
+    # writable surface must be enforced here rather than splatting arbitrary keys
+    # into update_task() (which would let an agent set e.g. user_id). (Review W1)
+    _UPDATABLE_FIELDS = (
+        "name",
+        "status",
+        "priority",
+        "inputs",
+        "params",
+        "error",
+        "result",
+        "progress",
+    )
+
     description = (
         "Update one or more fields on an existing task. Can update name, status, priority, "
         "inputs, params, error, result, and scheduling fields."
@@ -593,7 +648,7 @@ class TaskUpdateModule:
         self.output_schema = _make_schema({"type": "object"})
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
-        task_id = inputs.pop("task_id", "")
+        task_id = inputs.get("task_id", "")
         if not task_id:
             raise ValueError("task_id must be non-empty")
 
@@ -601,7 +656,11 @@ class TaskUpdateModule:
         if task is None:
             raise KeyError(f"Task '{task_id}' not found")
 
-        update_fields = {k: v for k, v in inputs.items() if v is not None}
+        update_fields = {
+            field: inputs[field]
+            for field in self._UPDATABLE_FIELDS
+            if inputs.get(field) is not None
+        }
         if update_fields:
             await self._repo.update_task(task_id=task_id, **update_fields)
 
@@ -745,7 +804,7 @@ class TaskRunningListModule:
         tasks = await self._repo.query_tasks(
             status="in_progress",
             user_id=inputs.get("user_id"),
-            limit=inputs.get("limit", 20),
+            limit=_coerce_int(inputs.get("limit"), 20, minimum=1, maximum=1000),
         )
         return {
             "tasks": [{"id": t.id, "name": t.name, "status": t.status} for t in tasks],
@@ -781,7 +840,7 @@ class TaskScheduledListModule:
         )
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
-        limit = inputs.get("limit", 20)
+        limit = _coerce_int(inputs.get("limit"), 20, minimum=1, maximum=1000)
         tasks = await self._repo.query_tasks(limit=limit)
         # Filter for tasks with scheduling
         scheduled = [

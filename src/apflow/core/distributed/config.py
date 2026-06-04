@@ -129,6 +129,15 @@ class DistributedConfig:
             if value <= 0:
                 raise ValueError(f"{field_name} must be positive, got {value}")
 
+        # Cross-field invariant: the renewal must fire before the lease expires,
+        # otherwise the leader silently loses and re-acquires leadership every
+        # cycle (flapping), repeatedly restarting the worker runtime.
+        if self.leader_renew_seconds >= self.leader_lease_seconds:
+            raise ValueError(
+                "leader_renew_seconds must be less than leader_lease_seconds "
+                f"(got renew={self.leader_renew_seconds}, lease={self.leader_lease_seconds})"
+            )
+
         # Auto-generate node_id if enabled and not set
         if self.enabled and self.node_id is None:
             self.node_id = f"node-{uuid.uuid4().hex[:12]}"

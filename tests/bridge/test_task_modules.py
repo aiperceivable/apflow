@@ -5,10 +5,12 @@ from unittest.mock import MagicMock, AsyncMock
 
 from apflow.bridge.task_modules import (
     TaskCreateModule,
+    TaskCreateTreeModule,
     TaskDeleteModule,
     TaskExecuteModule,
     TaskGetModule,
     TaskListModule,
+    TaskUpdateModule,
 )
 
 
@@ -139,3 +141,81 @@ class TestTaskDeleteModule:
         module = TaskDeleteModule(repo)
         with pytest.raises(KeyError, match="not found"):
             await module.execute({"task_id": "nonexistent"})
+
+
+class TestTaskListInputValidation:
+    """Regression: external (MCP/A2A) inputs are not schema-validated by default
+    (apcore-mcp validate_inputs=False), so malformed limit/offset must not crash
+    with a TypeError. (Review C1)
+    """
+
+    @pytest.mark.asyncio
+    async def test_list_non_numeric_limit_raises_valueerror_not_typeerror(self):
+        module = TaskListModule(_mock_repo())
+        with pytest.raises(ValueError, match="integer"):
+            await module.execute({"limit": "abc"})
+
+    @pytest.mark.asyncio
+    async def test_list_null_limit_falls_back_to_default(self):
+        repo = _mock_repo()
+        module = TaskListModule(repo)
+        await module.execute({"limit": None, "offset": None})
+        # Defaults applied (limit=50, offset=0) — no TypeError from min()/max().
+        _, kwargs = repo.query_tasks.call_args
+        assert kwargs["limit"] == 50
+        assert kwargs["offset"] == 0
+
+    @pytest.mark.asyncio
+    async def test_list_limit_clamped(self):
+        repo = _mock_repo()
+        module = TaskListModule(repo)
+        await module.execute({"limit": 99999})
+        _, kwargs = repo.query_tasks.call_args
+        assert kwargs["limit"] == 1000
+
+
+class TestTaskCreateTreeInputValidation:
+    """Regression: a non-object element in the tasks[] array must raise a clean
+    ValueError, not an AttributeError from t.get(). (Review C2)
+    """
+
+    @pytest.mark.asyncio
+    async def test_create_tree_non_dict_element_raises_valueerror(self):
+        module = TaskCreateTreeModule(MagicMock(), MagicMock())
+        with pytest.raises(ValueError, match="object"):
+            await module.execute({"tasks": ["build", "test"]})
+
+    @pytest.mark.asyncio
+    async def test_create_tree_non_list_raises_valueerror(self):
+        module = TaskCreateTreeModule(MagicMock(), MagicMock())
+        with pytest.raises(ValueError, match="array"):
+            await module.execute({"tasks": "not-a-list"})
+
+
+class TestTaskUpdateFieldWhitelist:
+    """Regression: only schema-advertised fields may be written; an arbitrary key
+    (e.g. user_id) from an external agent must NOT reach update_task. (Review W1)
+    """
+
+    @pytest.mark.asyncio
+    async def test_update_ignores_unlisted_fields(self):
+        repo = _mock_repo(task=_mock_task())
+        repo.update_task = AsyncMock(return_value=None)
+
+        module = TaskUpdateModule(repo)
+        await module.execute({"task_id": "t1", "name": "new", "user_id": "attacker"})
+
+        _, kwargs = repo.update_task.call_args
+        assert kwargs["name"] == "new"
+        assert "user_id" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_update_does_not_mutate_caller_inputs(self):
+        repo = _mock_repo(task=_mock_task())
+        repo.update_task = AsyncMock(return_value=None)
+
+        module = TaskUpdateModule(repo)
+        inputs = {"task_id": "t1", "name": "new"}
+        await module.execute(inputs)
+        # task_id must remain in the caller's dict (no .pop mutation).
+        assert inputs["task_id"] == "t1"

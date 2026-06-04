@@ -181,3 +181,44 @@ class TestIsPostgresql:
         session = MagicMock()
         session.get_bind.return_value.dialect.name = "sqlite"
         assert is_postgresql(session) is False
+
+
+class TestLeaderTimingValidation:
+    """Regression: leader_renew_seconds must be < leader_lease_seconds, else the
+    lease expires before renewal fires and the leader flaps silently. (Review W3)
+    """
+
+    def test_renew_not_less_than_lease_raises(self) -> None:
+        from apflow.core.distributed.config import DistributedConfig
+
+        config = DistributedConfig(
+            enabled=True,
+            node_id="n1",
+            leader_lease_seconds=30,
+            leader_renew_seconds=40,
+        )
+        with pytest.raises(ValueError, match="leader_renew_seconds"):
+            config.validate_and_initialize()
+
+    def test_renew_equal_to_lease_raises(self) -> None:
+        from apflow.core.distributed.config import DistributedConfig
+
+        config = DistributedConfig(
+            enabled=True,
+            node_id="n1",
+            leader_lease_seconds=30,
+            leader_renew_seconds=30,
+        )
+        with pytest.raises(ValueError, match="leader_renew_seconds"):
+            config.validate_and_initialize()
+
+    def test_renew_less_than_lease_ok(self) -> None:
+        from apflow.core.distributed.config import DistributedConfig
+
+        config = DistributedConfig(
+            enabled=True,
+            node_id="n1",
+            leader_lease_seconds=30,
+            leader_renew_seconds=10,
+        )
+        config.validate_and_initialize()  # must not raise
