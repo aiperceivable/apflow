@@ -168,3 +168,23 @@ class TestNodeRegistry:
         assert "worker-a2a" in node_ids
         assert "worker-both" in node_ids
         assert "worker-mcp" not in node_ids
+
+
+class TestNodeRegistryDetaches:
+    """Returned nodes are detached (expunged) so reads survive session close."""
+
+    def test_get_healthy_nodes_expunges(self):
+        from unittest.mock import MagicMock
+
+        from apflow.core.distributed.config import DistributedConfig
+
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=False)
+        session.query.return_value.filter.return_value.all.return_value = []
+        factory = MagicMock(return_value=session)
+
+        registry = NodeRegistry(factory, DistributedConfig(node_id="n"))
+        registry.get_healthy_nodes()
+
+        session.expunge_all.assert_called_once()

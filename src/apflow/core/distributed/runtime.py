@@ -134,19 +134,17 @@ class DistributedRuntime:
 
     @property
     def is_leader(self) -> bool:
-        """Check if this node is currently the leader.
+        """Check if this node is currently the leader (pure read, no side effects).
 
-        Also checks the in-memory lease expiry timestamp so that a
-        stale leader is immediately rejected without waiting for the
-        next renewal loop iteration (fencing).
+        Also checks the in-memory lease expiry timestamp so a stale leader is
+        immediately rejected without waiting for the next renewal loop iteration
+        (fencing). Demotion and the corresponding worker startup are owned solely by
+        :meth:`_leader_renewal_loop`; this getter never mutates state, so reading it
+        (from a status endpoint, log line, or test) cannot silently change the role.
         """
         if self._role != "leader":
             return False
         if self._lease_expires_at is not None and _utcnow().timestamp() >= self._lease_expires_at:
-            logger.warning("Leader lease expired for node %s, demoting", self._node_id)
-            self._role = "worker"
-            self._lease_token = None
-            self._lease_expires_at = None
             return False
         return True
 

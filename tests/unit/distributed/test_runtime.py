@@ -391,8 +391,9 @@ class TestProperties:
         assert runtime.is_leader is False
 
     @pytest.mark.asyncio
-    async def test_is_leader_expired_lease_demotes(self) -> None:
-        """is_leader returns False and demotes to worker when lease is expired."""
+    async def test_is_leader_expired_lease_fences_without_mutating(self) -> None:
+        """is_leader returns False on an expired lease (fencing) but is a pure read:
+        demotion + worker startup are owned by the renewal loop, not this getter."""
         runtime = _make_runtime()
         past = (_utcnow() - timedelta(seconds=10)).timestamp()
 
@@ -401,9 +402,10 @@ class TestProperties:
         runtime._lease_expires_at = past
 
         assert runtime.is_leader is False
-        assert runtime.current_role == "worker"
-        assert runtime._lease_token is None
-        assert runtime._lease_expires_at is None
+        # State is left untouched — the renewal loop performs the real transition.
+        assert runtime.current_role == "leader"
+        assert runtime._lease_token == "token"
+        assert runtime._lease_expires_at == past
 
     @pytest.mark.asyncio
     async def test_current_role_property(self) -> None:
@@ -512,3 +514,24 @@ class TestDistributedRuntimeFromSession:
             sqlite_session, _make_config(), task_executor=executor
         )
         assert runtime._task_executor is executor
+
+
+class TestIsLeaderIsPure:
+    """is_leader is a pure read: it never mutates role/lease state."""
+
+    def test_expired_lease_reports_not_leader_without_mutating(self) -> None:
+        runtime = _make_runtime(config=_make_config())
+        runtime._role = "leader"
+        runtime._lease_token = "tok"
+        runtime._lease_expires_at = _utcnow().timestamp() - 1.0  # already expired
+
+        assert runtime.is_leader is False
+        # Reading the property must not demote the node or clear the lease.
+        assert runtime._role == "leader"
+        assert runtime._lease_token == "tok"
+
+    def test_valid_lease_reports_leader(self) -> None:
+        runtime = _make_runtime(config=_make_config())
+        runtime._role = "leader"
+        runtime._lease_expires_at = _utcnow().timestamp() + 100.0
+        assert runtime.is_leader is True

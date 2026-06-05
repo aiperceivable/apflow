@@ -106,6 +106,9 @@ class NodeRegistry:
                 logger.info("Node marked stale: %s", node.node_id)
 
             session.commit()
+            # Detach while attributes are loaded so callers can read the returned
+            # nodes after the session closes (no DetachedInstanceError).
+            session.expunge_all()
             return stale_nodes
 
     def detect_dead_nodes(self) -> list[DistributedNode]:
@@ -131,6 +134,7 @@ class NodeRegistry:
                 logger.info("Node marked dead: %s", node.node_id)
 
             session.commit()
+            session.expunge_all()
             return dead_nodes
 
     def get_healthy_nodes(
@@ -144,6 +148,8 @@ class NodeRegistry:
                 DistributedNode.status == "healthy",
             )
             nodes = query.all()
+            # Detach before filtering/returning so reads survive session close.
+            session.expunge_all()
 
             if executor_types is not None:
                 nodes = _filter_by_executor_types(nodes, executor_types)
