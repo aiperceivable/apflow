@@ -4,12 +4,16 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock
 
 from apflow.bridge.task_modules import (
+    TaskCancelModule,
+    TaskCopyModule,
     TaskCreateModule,
     TaskCreateTreeModule,
     TaskDeleteModule,
     TaskExecuteModule,
     TaskGetModule,
     TaskListModule,
+    TaskRunningListModule,
+    TaskScheduledListModule,
     TaskUpdateModule,
 )
 
@@ -219,3 +223,82 @@ class TestTaskUpdateFieldWhitelist:
         await module.execute(inputs)
         # task_id must remain in the caller's dict (no .pop mutation).
         assert inputs["task_id"] == "t1"
+
+
+class TestTaskCancelModuleGuards:
+    @pytest.mark.asyncio
+    async def test_string_task_ids_raises(self):
+        """A non-list task_ids (e.g. a bare string) must raise, not iterate char-by-char."""
+        module = TaskCancelModule(MagicMock())
+        with pytest.raises(ValueError, match="array"):
+            await module.execute({"task_ids": "abc123"})
+
+    @pytest.mark.asyncio
+    async def test_empty_task_ids_raises(self):
+        module = TaskCancelModule(MagicMock())
+        with pytest.raises(ValueError, match="non-empty"):
+            await module.execute({"task_ids": []})
+
+
+class TestTaskReuseOverrideAllowlist:
+    @pytest.mark.asyncio
+    async def test_copy_strips_disallowed_override_fields(self):
+        """Only content fields pass through; tenancy/structural keys are dropped."""
+        tree = MagicMock()
+        tree.task.id = "new-root"
+        tree.to_list.return_value = [tree.task]
+        creator = MagicMock()
+        creator.from_copy = AsyncMock(return_value=tree)
+        repo = _mock_repo(task=_mock_task())
+
+        module = TaskCopyModule(creator, repo)
+        await module.execute(
+            {
+                "task_id": "t1",
+                "overrides": {
+                    "name": "variant",
+                    "user_id": "attacker",
+                    "task_tree_id": "evil-tree",
+                    "origin_type": "link",
+                },
+            }
+        )
+
+        _, kwargs = creator.from_copy.call_args
+        assert kwargs["name"] == "variant"
+        assert "user_id" not in kwargs
+        assert "task_tree_id" not in kwargs
+        assert "origin_type" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_non_dict_overrides_raises(self):
+        creator = MagicMock()
+        repo = _mock_repo(task=_mock_task())
+        module = TaskCopyModule(creator, repo)
+        with pytest.raises(ValueError, match="overrides must be an object"):
+            await module.execute({"task_id": "t1", "overrides": "nope"})
+
+
+class TestTaskRunningListModuleClamp:
+    @pytest.mark.asyncio
+    async def test_clamps_limit_to_schema_maximum(self):
+        repo = _mock_repo(tasks=[])
+        module = TaskRunningListModule(repo)
+        await module.execute({"limit": 5000})
+        _, kwargs = repo.query_tasks.call_args
+        assert kwargs["limit"] == 100
+
+
+class TestTaskScheduledListModule:
+    @pytest.mark.asyncio
+    async def test_uses_db_filter_with_user_id_scoping(self):
+        """Scheduled listing filters + scopes by user_id at the DB layer."""
+        repo = MagicMock()
+        repo.get_scheduled_tasks = AsyncMock(return_value=[])
+        repo.query_tasks = AsyncMock(return_value=[])
+
+        module = TaskScheduledListModule(repo)
+        await module.execute({"user_id": "u1", "limit": 5, "enabled_only": True})
+
+        repo.get_scheduled_tasks.assert_called_once_with(enabled_only=True, user_id="u1", limit=5)
+        repo.query_tasks.assert_not_called()

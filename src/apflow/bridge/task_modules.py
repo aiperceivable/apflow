@@ -53,6 +53,23 @@ def _coerce_int(
     return result
 
 
+# Fields an external agent may override when cloning/linking a task tree. Excludes
+# identity/structural columns (user_id, id, task_tree_id, original_task_id, parent_id,
+# dependencies, origin_type, status, schedule_*) — splatting those into the creator
+# would let an agent reassign tenancy or corrupt tree/lineage invariants. Mirrors the
+# TaskUpdateModule._UPDATABLE_FIELDS allowlist for the reuse path.
+_OVERRIDABLE_REUSE_FIELDS = ("name", "inputs", "params", "priority")
+
+
+def _filter_reuse_overrides(overrides: Any) -> dict[str, Any]:
+    """Restrict external clone overrides to the safe, content-only allowlist."""
+    if overrides is None:
+        return {}
+    if not isinstance(overrides, dict):
+        raise ValueError("overrides must be an object")
+    return {k: v for k, v in overrides.items() if k in _OVERRIDABLE_REUSE_FIELDS}
+
+
 _TASK_CREATE_INPUT = {
     "type": "object",
     "properties": {
@@ -451,7 +468,7 @@ class TaskLinkModule:
         if task is None:
             raise KeyError(f"Task '{task_id}' not found")
 
-        overrides = inputs.get("overrides", {})
+        overrides = _filter_reuse_overrides(inputs.get("overrides"))
         tree = await self._creator.from_link(
             task,
             _recursive=inputs.get("recursive", True),
@@ -490,7 +507,7 @@ class TaskCopyModule:
         if task is None:
             raise KeyError(f"Task '{task_id}' not found")
 
-        overrides = inputs.get("overrides", {})
+        overrides = _filter_reuse_overrides(inputs.get("overrides"))
         tree = await self._creator.from_copy(
             task,
             _recursive=inputs.get("recursive", True),
@@ -585,7 +602,7 @@ class TaskCloneMixedModule:
         if task is None:
             raise KeyError(f"Task '{task_id}' not found")
 
-        overrides = inputs.get("overrides", {})
+        overrides = _filter_reuse_overrides(inputs.get("overrides"))
         tree = await self._creator.from_mixed(
             task,
             _recursive=inputs.get("recursive", True),
@@ -707,6 +724,8 @@ class TaskCancelModule:
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         task_ids = inputs.get("task_ids", [])
+        if not isinstance(task_ids, list):
+            raise ValueError("task_ids must be an array")
         if not task_ids:
             raise ValueError("task_ids must be non-empty")
 
@@ -804,7 +823,7 @@ class TaskRunningListModule:
         tasks = await self._repo.query_tasks(
             status="in_progress",
             user_id=inputs.get("user_id"),
-            limit=_coerce_int(inputs.get("limit"), 20, minimum=1, maximum=1000),
+            limit=_coerce_int(inputs.get("limit"), 20, minimum=1, maximum=100),
         )
         return {
             "tasks": [{"id": t.id, "name": t.name, "status": t.status} for t in tasks],
@@ -823,6 +842,7 @@ class TaskScheduledListModule:
             {
                 "type": "object",
                 "properties": {
+                    "user_id": {"type": "string"},
                     "enabled_only": {
                         "type": "boolean",
                         "default": True,
@@ -840,15 +860,15 @@ class TaskScheduledListModule:
         )
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
-        limit = _coerce_int(inputs.get("limit"), 20, minimum=1, maximum=1000)
-        tasks = await self._repo.query_tasks(limit=limit)
-        # Filter for tasks with scheduling
-        scheduled = [
-            t
-            for t in tasks
-            if getattr(t, "schedule_type", None) is not None
-            and (not inputs.get("enabled_only", True) or getattr(t, "schedule_enabled", False))
-        ]
+        # Filter scheduled tasks (and scope by user_id) at the DB layer so `limit`
+        # bounds the scheduled result set rather than an unscheduled pre-filter page,
+        # matching the user_id scoping applied by the sibling list modules.
+        limit = _coerce_int(inputs.get("limit"), 20, minimum=1, maximum=100)
+        scheduled = await self._repo.get_scheduled_tasks(
+            enabled_only=bool(inputs.get("enabled_only", True)),
+            user_id=inputs.get("user_id"),
+            limit=limit,
+        )
         return {
             "tasks": [
                 {
