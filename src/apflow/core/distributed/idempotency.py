@@ -31,7 +31,10 @@ class IdempotencyManager:
         """Generate deterministic idempotency key from task_id + attempt_id + inputs.
 
         Uses SHA-256 hash of canonical JSON (sorted keys, no whitespace)
-        to produce a consistent key regardless of dict ordering.
+        to produce a consistent key regardless of dict ordering. ``inputs`` is an
+        optional discriminator: pass the task's inputs so two executions with the
+        same (task_id, attempt_id) but different inputs key differently; pass None
+        to key purely on (task_id, attempt_id).
         """
         canonical = json.dumps(
             {"task_id": task_id, "attempt_id": attempt_id, "inputs": inputs},
@@ -79,11 +82,36 @@ class IdempotencyManager:
                 session.commit()
             except IntegrityError:
                 session.rollback()
+                existing = (
+                    session.query(ExecutionIdempotency)
+                    .filter(ExecutionIdempotency.idempotency_key == idempotency_key)
+                    .first()
+                )
+                existing_status = cast(str, existing.status) if existing is not None else "unknown"
+                # Reconcile a stale failure: if a prior row recorded failure but this
+                # attempt completed, upgrade it so the cache reflects the real success
+                # instead of permanently returning the earlier failure.
+                if (
+                    existing is not None
+                    and status == "completed"
+                    and existing_status != "completed"
+                ):
+                    existing.status = status  # type: ignore[assignment]
+                    existing.result = result  # type: ignore[assignment]
+                    session.commit()
+                    logger.info(
+                        "Reconciled idempotency row for task=%s attempt=%d: %s -> completed",
+                        task_id,
+                        attempt_id,
+                        existing_status,
+                    )
+                    return
                 logger.info(
                     "Idempotency result already stored for task=%s attempt=%d "
-                    "(concurrent write, treating as success)",
+                    "(concurrent write, existing status=%s)",
                     task_id,
                     attempt_id,
+                    existing_status,
                 )
                 return
             logger.info(

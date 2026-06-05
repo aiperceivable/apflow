@@ -101,6 +101,12 @@ class WorkerRuntime:
                 tasks = self._find_executable_tasks()
                 for task in tasks:
                     task_id = cast(str, task.id)
+                    # Skip tasks already in flight: a still-pending row can be
+                    # re-selected on the next poll before its status changes, and
+                    # re-spawning would overwrite the live entry in _running_tasks
+                    # (making _renew_lease_loop cancel the wrong coroutine).
+                    if task_id in self._running_tasks:
+                        continue
                     exec_task = asyncio.create_task(self._execute_task(task))
                     self._running_tasks[task_id] = exec_task
             except Exception:
@@ -159,10 +165,16 @@ class WorkerRuntime:
             self._active_leases[task_id] = token
             emit_task_event(self._session_factory, task_id, "task_assigned", self._node_id)
 
+            # Compute the idempotency key once (incorporating the task inputs, per
+            # the documented contract) so the cache-check, success-store, and
+            # failure-store paths all key on the same value.
+            key = IdempotencyManager.generate_key(
+                task_id, attempt_id, cast("dict[str, Any] | None", task.inputs)
+            )
+
             renewal_task = asyncio.create_task(self._renew_lease_loop(task_id, token))
 
             try:
-                key = IdempotencyManager.generate_key(task_id, attempt_id, None)
                 is_cached, cached_result = self._idempotency.check_cached_result(key)
 
                 if is_cached and cached_result is not None:
@@ -175,9 +187,13 @@ class WorkerRuntime:
                 self._report_completion(task_id, token, result)
             except asyncio.CancelledError:
                 logger.warning("Task %s cancelled", task_id)
+                # Release the lease here: the finally block pops _active_leases, so
+                # shutdown()'s release loop would otherwise miss this still-held lease
+                # and leave the DB row to linger until expiry.
+                self._lease_manager.release_lease(task_id, token)
                 raise
             except Exception as exc:
-                self._report_failure(task_id, attempt_id, token, str(exc))
+                self._report_failure(task_id, attempt_id, token, str(exc), key)
             finally:
                 renewal_task.cancel()
                 try:
@@ -204,17 +220,31 @@ class WorkerRuntime:
                 return
 
     def _finalize_task(self, task_id: str, lease_token: str, new_status: str) -> None:
-        """Update task status and release lease atomically."""
+        """Update task status and release lease atomically, guarded by lease ownership.
+
+        The status write is gated on the token-scoped lease DELETE matching a row: if
+        the lease expired and the task was reassigned to (and possibly re-run by)
+        another node, this node must not clobber the new owner's status.
+        """
         with self._session_factory() as session:
-            task = session.get(TaskModel, task_id)
-            if task is not None:
-                task.status = new_status
-            session.execute(
+            deleted = session.execute(
                 text(
                     "DELETE FROM apflow_task_leases " "WHERE task_id = :tid AND lease_token = :tok"
                 ),
                 {"tid": task_id, "tok": lease_token},
             )
+            if deleted.rowcount == 0:
+                # Lease no longer held (expired / reassigned) — skip the status write.
+                session.commit()
+                logger.warning(
+                    "Skipped finalizing task %s: lease no longer held by this node",
+                    task_id,
+                )
+                return
+
+            task = session.get(TaskModel, task_id)
+            if task is not None:
+                task.status = new_status
             session.commit()
 
     def _report_completion(self, task_id: str, lease_token: str, result: dict[str, Any]) -> None:
@@ -223,13 +253,15 @@ class WorkerRuntime:
         emit_task_event(self._session_factory, task_id, "task_completed", self._node_id)
         logger.info("Task %s completed", task_id)
 
-    def _report_failure(self, task_id: str, attempt_id: int, lease_token: str, error: str) -> None:
+    def _report_failure(
+        self, task_id: str, attempt_id: int, lease_token: str, error: str, key: str
+    ) -> None:
         """Mark task as failed, release lease, store failure, and emit event."""
         self._finalize_task(task_id, lease_token, "failed")
         self._idempotency.store_failure(
             task_id,
             attempt_id,
-            IdempotencyManager.generate_key(task_id, attempt_id, None),
+            key,
             {"error": error},
         )
         emit_task_event(

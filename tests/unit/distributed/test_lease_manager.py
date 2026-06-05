@@ -247,3 +247,32 @@ class TestLeaseManagerValidation:
         manager = LeaseManager(session_factory, config)
         with pytest.raises(ValueError, match="must not be empty"):
             manager.release_lease("task-1", "")
+
+
+class TestCleanupBumpsAttemptId:
+    """cleanup_expired_leases must bump attempt_id when reverting a task so the
+    reassigned execution gets a fresh idempotency key (mock-based; no DB)."""
+
+    def test_revert_in_progress_bumps_attempt_id(self):
+        from unittest.mock import MagicMock
+
+        from apflow.core.distributed.config import DistributedConfig
+
+        lease = MagicMock()
+        lease.task_id = "t1"
+        task = MagicMock()
+        task.status = "in_progress"
+        task.attempt_id = 0
+
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=False)
+        session.query.return_value.filter.return_value.all.return_value = [lease]
+        session.get.return_value = task
+        factory = MagicMock(return_value=session)
+
+        manager = LeaseManager(factory, DistributedConfig(node_id="n"))
+        manager.cleanup_expired_leases()
+
+        assert task.status == "pending"
+        assert task.attempt_id == 1

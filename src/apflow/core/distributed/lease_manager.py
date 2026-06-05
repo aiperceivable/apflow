@@ -210,6 +210,10 @@ class LeaseManager:
                 task = session.get(TaskModel, lease.task_id)
                 if task is not None and task.status == "in_progress":
                     task.status = "pending"
+                    # Bump attempt_id so the reassigned execution computes a fresh
+                    # idempotency key rather than colliding with the timed-out
+                    # attempt's stored (and possibly failed) result.
+                    task.attempt_id = (task.attempt_id or 0) + 1
                 session.delete(lease)
                 cleaned_task_ids.append(lease.task_id)
                 logger.info("Cleaned up expired lease for task %s", lease.task_id)

@@ -143,3 +143,46 @@ class TestIdempotencyManager:
         is_cached, result = manager.check_cached_result(key)
         assert is_cached is False
         assert result is None
+
+
+class TestStoreResultReconcile:
+    """store_result reconciles a stale failure to success on key conflict."""
+
+    def test_reconciles_failed_to_completed_on_conflict(self) -> None:
+        from unittest.mock import MagicMock
+        from sqlalchemy.exc import IntegrityError
+
+        existing = MagicMock()
+        existing.status = "failed"
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=False)
+        # First commit (insert) conflicts; second commit (reconcile) succeeds.
+        session.commit.side_effect = [IntegrityError("stmt", {}, Exception("dup")), None]
+        session.query.return_value.filter.return_value.first.return_value = existing
+        factory = MagicMock(return_value=session)
+
+        mgr = IdempotencyManager(factory)
+        mgr.store_result("t1", 0, "key", {"ok": True}, status="completed")
+
+        assert existing.status == "completed"
+        assert existing.result == {"ok": True}
+
+    def test_does_not_downgrade_existing_completed(self) -> None:
+        from unittest.mock import MagicMock
+        from sqlalchemy.exc import IntegrityError
+
+        existing = MagicMock()
+        existing.status = "completed"
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=False)
+        session.commit.side_effect = [IntegrityError("stmt", {}, Exception("dup"))]
+        session.query.return_value.filter.return_value.first.return_value = existing
+        factory = MagicMock(return_value=session)
+
+        mgr = IdempotencyManager(factory)
+        # A losing failed-writer must not overwrite an existing completed row.
+        mgr.store_result("t1", 0, "key", {"error": "x"}, status="failed")
+
+        assert existing.status == "completed"

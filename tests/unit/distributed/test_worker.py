@@ -10,6 +10,7 @@ import pytest
 
 from apflow.core.distributed.worker import WorkerRuntime
 from apflow.core.distributed.config import DistributedConfig
+from apflow.core.distributed.idempotency import IdempotencyManager
 
 
 def _make_config(**overrides: Any) -> DistributedConfig:
@@ -39,6 +40,7 @@ def _make_task_model(
     task.status = status
     task.attempt_id = attempt_id
     task.placement_constraints = None
+    task.inputs = None
     return task
 
 
@@ -503,3 +505,98 @@ class TestGracefulShutdown:
         exec_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await exec_task
+
+
+class TestFinalizeLeaseOwnership:
+    """_finalize_task must not clobber a task whose lease was lost/reassigned."""
+
+    @staticmethod
+    def _factory(rowcount: int, task: MagicMock):
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=False)
+        session.execute.return_value = MagicMock(rowcount=rowcount)
+        session.get.return_value = task
+        return MagicMock(return_value=session), session
+
+    def test_writes_status_when_lease_held(self) -> None:
+        task = _make_task_model(status="in_progress")
+        factory, _ = self._factory(1, task)
+        worker = _make_worker(session_factory=factory)
+        worker._finalize_task("task-1", "tok", "completed")
+        assert task.status == "completed"
+
+    def test_skips_status_when_lease_lost(self) -> None:
+        task = _make_task_model(status="in_progress")
+        factory, session = self._factory(0, task)
+        worker = _make_worker(session_factory=factory)
+        worker._finalize_task("task-1", "tok", "completed")
+        # Lease DELETE matched nothing → do not read/overwrite the (reassigned) task.
+        session.get.assert_not_called()
+        assert task.status == "in_progress"
+
+
+class TestExecuteTaskCancellation:
+    @pytest.mark.asyncio
+    async def test_cancellation_releases_lease(self) -> None:
+        lease_mgr = MagicMock()
+        lease_mgr.acquire_lease.return_value = _make_lease()
+        idem = MagicMock()
+        idem.check_cached_result.return_value = (False, None)
+
+        async def cancel_executor(_task: Any) -> dict[str, Any]:
+            raise asyncio.CancelledError()
+
+        worker = _make_worker(
+            lease_manager=lease_mgr, idempotency_manager=idem, task_executor=cancel_executor
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await worker._execute_task(_make_task_model())
+
+        lease_mgr.release_lease.assert_called_once_with("task-1", "abc123")
+
+
+class TestPollSkipsInFlight:
+    @pytest.mark.asyncio
+    async def test_poll_does_not_respawn_running_task(self) -> None:
+        lease_mgr = MagicMock()
+        lease_mgr.acquire_lease.return_value = _make_lease()
+        task_model = _make_task_model()
+        session = MagicMock()
+        session.query.return_value.filter.return_value.limit.return_value.all.return_value = [
+            task_model
+        ]
+        session.get_bind.return_value.dialect.name = "sqlite"
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=False)
+        factory = MagicMock(return_value=session)
+
+        worker = _make_worker(session_factory=factory, lease_manager=lease_mgr)
+        sleeper = asyncio.create_task(asyncio.sleep(5))
+        worker._running_tasks["task-1"] = sleeper  # already in flight
+
+        poll = asyncio.create_task(worker._poll_loop())
+        await asyncio.sleep(0.15)
+        worker._shutdown_event.set()
+        await poll
+        sleeper.cancel()
+
+        # The only pending task is already running → it must not be re-spawned.
+        lease_mgr.acquire_lease.assert_not_called()
+
+
+class TestIdempotencyKeyIncorporatesInputs:
+    @pytest.mark.asyncio
+    async def test_key_derived_from_task_inputs(self) -> None:
+        lease_mgr = MagicMock()
+        lease_mgr.acquire_lease.return_value = _make_lease()
+        idem = MagicMock()
+        idem.check_cached_result.return_value = (False, None)
+
+        worker = _make_worker(lease_manager=lease_mgr, idempotency_manager=idem)
+        task = _make_task_model()
+        task.inputs = {"a": 1}
+        await worker._execute_task(task)
+
+        expected = IdempotencyManager.generate_key("task-1", 0, {"a": 1})
+        assert idem.check_cached_result.call_args.args[0] == expected
