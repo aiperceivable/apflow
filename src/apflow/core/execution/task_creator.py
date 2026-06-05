@@ -1063,6 +1063,12 @@ class TaskCreator:
             TaskTreeNode
         """
         task_tree = await self.task_repository.build_task_tree(_original_task)
+        # NOTE: from_copy intentionally permits a user_id override (reassigning the
+        # clone to a new owner) — copies are independent, modifiable trees, unlike
+        # from_link's read-only references which must stay same-owner. So there is no
+        # ownership guard here by design (see test_from_copy_single_task_and_overrides).
+        # External-agent ownership reassignment is blocked at the bridge layer, which
+        # strips user_id from the overrides allowlist.
         reset_kwargs = dict(reset_kwargs)
         reset_kwargs["origin_type"] = TaskOriginType.copy
 
@@ -1108,10 +1114,12 @@ class TaskCreator:
         """
         Create frozen archive(s) from existing task(s) (read-only, immutable)
 
-        Creates frozen archives of the original task and optionally its entire subtree.
-        Snapshot tasks cannot be modified after creation. If the original task is not
-        a root task and _recursive=True, validates no external dependencies and
-        automatically promotes the archive subtree to an independent tree.
+        Freezes the original task (and, when _recursive=True, its subtree) in place
+        by stamping origin_type=archive on the existing rows — the archived tasks
+        keep their original ids rather than becoming a new independent tree. This is
+        the intended snapshot contract (see test_from_archive_recursive_tree, which
+        asserts the archive retains the source id); archiving therefore mutates the
+        source tasks' origin_type rather than cloning them.
 
         Args:
             _original_task: Original task to archive
@@ -1413,15 +1421,20 @@ class TaskCreator:
             reset_kwargs: Dict[str, Any],
         ) -> TaskTreeNode:
             """Recursively clone a task node and its children"""
-            # Clone the task with overrides
+            # Clone the task with overrides. Build a fresh per-node dict so a link
+            # node's origin_type does not leak onto later copy nodes (mixed mode):
+            # only tasks explicitly in tasks_origin_type get that override; all
+            # others keep the base origin_type from reset_kwargs.
             old_task_id = str(task_node.task.id)
+            node_kwargs = dict(reset_kwargs)
             if tasks_origin_type and old_task_id in tasks_origin_type:
-                reset_kwargs["origin_type"] = tasks_origin_type[old_task_id]
-            cloned_task = await self._clone_task(task_node.task, reset_kwargs, False)
+                node_kwargs["origin_type"] = tasks_origin_type[old_task_id]
+            cloned_task = await self._clone_task(task_node.task, node_kwargs, False)
             task_node.task = cloned_task
             # Update id mapping
             id_mapping[old_task_id] = str(cloned_task.id)
-            # Recursively clone children
+            # Recursively clone children — pass the clean base reset_kwargs, not
+            # node_kwargs, so each node derives its own overrides from scratch.
             for child in task_node.children:
                 child.task.parent_id = task_node.task.id
                 await _reset_task_recursive(child, reset_kwargs)
@@ -1475,18 +1488,22 @@ class TaskCreator:
         Returns:
             TaskModelType
         """
-        reset_kwargs["id"] = str(uuid.uuid4())
-        reset_kwargs["has_references"] = False
+        # Work on a per-call copy: the same reset_kwargs dict is shared across an
+        # entire tree clone, so mutating it here (id / lineage) would leak this
+        # task's identity onto sibling/descendant clones.
+        fields = dict(reset_kwargs)
+        fields["id"] = str(uuid.uuid4())
+        fields["has_references"] = False
 
         most_original_task = await self._get_original_task_for_link(original_task)
-        reset_kwargs["original_task_id"] = most_original_task.id
+        fields["original_task_id"] = most_original_task.id
 
         if is_copy:
-            task = original_task.copy(reset_kwargs)
+            task = original_task.copy(fields)
         else:
-            task = original_task.update_from_dict(reset_kwargs)
+            task = original_task.update_from_dict(fields)
 
-        if reset_kwargs.get("origin_type") == TaskOriginType.link:
+        if fields.get("origin_type") == TaskOriginType.link:
             task = task.convert_to_link()
 
         return task

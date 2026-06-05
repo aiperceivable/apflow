@@ -366,6 +366,41 @@ class TestTaskCreatorOriginTypes:
                 _link_task_ids=[root.id],
             )
 
+    @pytest.mark.asyncio
+    async def test_from_mixed_copy_node_not_contaminated_by_link(self, sync_db_session):
+        """Regression: a linked node must not leak origin_type='link' onto a sibling
+        copied node via the shared reset_kwargs dict (visited-after-link ordering)."""
+        repo = TaskRepository(sync_db_session)
+        creator = TaskCreator(sync_db_session)
+        root = await repo.create_task(name="Root", user_id="u", status="completed")
+        await repo.create_task(
+            name="LinkedChild", user_id="u", parent_id=root.id, status="completed"
+        )
+        await repo.create_task(
+            name="CopiedChild", user_id="u", parent_id=root.id, status="completed"
+        )
+        root.has_children = True
+        sync_db_session.commit()
+        sync_db_session.refresh(root)
+
+        linked_child_id = next(
+            c.id
+            for c in await repo.get_child_tasks_by_parent_id(root.id)
+            if c.name == "LinkedChild"
+        )
+        mixed_tree = await creator.from_mixed(
+            _original_task=root,
+            _save=True,
+            _recursive=True,
+            _link_task_ids=[root.id, linked_child_id],
+        )
+
+        by_name = {n.task.name: n.task for n in [mixed_tree, *mixed_tree.children]}
+        assert by_name["Root"].origin_type == TaskOriginType.link
+        assert by_name["LinkedChild"].origin_type == TaskOriginType.link
+        # The copied sibling must remain a copy, not be contaminated to link.
+        assert by_name["CopiedChild"].origin_type == TaskOriginType.copy
+
 
 """
 Test TaskCreator functionality
