@@ -10,8 +10,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from sqlalchemy import create_engine, make_url
+from sqlalchemy.orm import sessionmaker
+
 from apflow.core.distributed.config import DistributedConfig, utcnow as _utcnow
-from apflow.core.distributed.runtime import DistributedRuntime
+from apflow.core.distributed.runtime import (
+    DistributedRuntime,
+    _ensure_sync_engine,
+    _sync_drivername,
+)
 
 
 def _make_config(**overrides: Any) -> DistributedConfig:
@@ -59,6 +66,56 @@ def _make_runtime(
     runtime._background_tasks = []
     runtime._shutdown_event = asyncio.Event()
     return runtime
+
+
+class TestFromSessionEngineCoercion:
+    """from_session must hand the sync distributed managers a sync engine.
+
+    apflow defaults ``postgresql://`` to the async asyncpg driver, so a cluster
+    app's bound engine is async; wrapping it in a sync sessionmaker would raise
+    MissingGreenlet at the first commit.
+    """
+
+    def test_sync_drivername_maps_async_to_sync(self) -> None:
+        assert _sync_drivername("postgresql+asyncpg") == "postgresql+psycopg2"
+        assert _sync_drivername("sqlite+aiosqlite") == "sqlite"
+
+    def test_sync_drivername_leaves_sync_unchanged(self) -> None:
+        assert _sync_drivername("postgresql+psycopg2") == "postgresql+psycopg2"
+        assert _sync_drivername("sqlite") == "sqlite"
+
+    def test_ensure_sync_engine_passes_through_sync_engine(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        assert _ensure_sync_engine(engine) is engine
+
+    def test_ensure_sync_engine_rebinds_async_engine_to_sync(self) -> None:
+        # Build a stand-in for an async-bound engine without requiring the async
+        # driver: a stub whose dialect reports is_async and whose url carries an
+        # async drivername (sqlite+aiosqlite -> sqlite keeps the test driver-free).
+        class _StubDialect:
+            is_async = True
+
+        class _StubAsyncEngine:
+            dialect = _StubDialect()
+            url = make_url("sqlite+aiosqlite:///:memory:")
+
+        result = _ensure_sync_engine(_StubAsyncEngine())  # type: ignore[arg-type]
+
+        assert result.dialect.is_async is False
+        assert "aiosqlite" not in result.url.drivername
+
+    def test_from_session_builds_sync_factory(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        session = sessionmaker(bind=engine)()
+        try:
+            runtime = DistributedRuntime.from_session(session, _make_config())
+            produced = runtime._session_factory()
+            try:
+                assert produced.get_bind().dialect.is_async is False
+            finally:
+                produced.close()
+        finally:
+            session.close()
 
 
 class TestRoleSelection:

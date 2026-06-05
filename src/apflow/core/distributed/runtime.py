@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy.orm import sessionmaker
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import Connection, Engine
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy.orm import Session
 
@@ -27,6 +28,42 @@ from apflow.core.distributed.worker import WorkerRuntime
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Async drivers apflow may bind a session to, mapped to their synchronous
+# equivalents. The distributed managers run synchronously (PostgreSQL via
+# psycopg2), so an async-bound engine must be rebound to a sync driver.
+_SYNC_DRIVERS = {
+    "postgresql+asyncpg": "postgresql+psycopg2",
+    "sqlite+aiosqlite": "sqlite",
+}
+
+
+def _sync_drivername(drivername: str) -> str:
+    """Map an async SQLAlchemy drivername to its synchronous equivalent."""
+    return _SYNC_DRIVERS.get(drivername, drivername)
+
+
+def _ensure_sync_engine(bind: "Engine | Connection") -> "Engine":
+    """Return a synchronous Engine for the distributed managers.
+
+    The distributed managers use synchronous sessions (``with sf() as s: s.commit()``).
+    apflow defaults ``postgresql://`` connections to the async ``asyncpg`` driver, so a
+    cluster app's bound engine is typically async. Wrapping an async engine in a plain
+    ``sessionmaker`` and committing synchronously raises ``MissingGreenlet``; instead we
+    build a sync (psycopg2) engine over the same database. A sync engine is returned
+    unchanged.
+    """
+    from sqlalchemy.engine import Connection as _Connection
+
+    # session.get_bind() may return an Engine or a Connection; normalize to Engine.
+    engine = bind.engine if isinstance(bind, _Connection) else bind
+    if not getattr(engine.dialect, "is_async", False):
+        return engine
+
+    from sqlalchemy import create_engine
+
+    sync_url = engine.url.set(drivername=_sync_drivername(engine.url.drivername))
+    return create_engine(sync_url)
 
 
 class DistributedRuntime:
@@ -78,18 +115,20 @@ class DistributedRuntime:
         single construction seam callers (CLI worker, cluster bootstrap) should use
         instead of building the multi-argument constructor by hand.
 
-        Distributed mode is synchronous (PostgreSQL via psycopg2); ``session`` is
-        expected to be a sync ``Session``. The union is accepted only to match the
-        app's session type.
+        Distributed mode is synchronous (PostgreSQL via psycopg2). The app's session
+        may be bound to an async engine (apflow defaults ``postgresql://`` to asyncpg),
+        so the bound engine is coerced to a synchronous one via
+        :func:`_ensure_sync_engine` before the managers' ``sessionmaker`` is built.
 
         Args:
-            session: An initialized SQLAlchemy session; its bound engine is reused.
+            session: An initialized SQLAlchemy session; its bound engine is reused
+                (and rebound to a sync driver if it is async).
             config: Distributed configuration.
             task_executor: Optional single-task executor. When omitted, the node
                 runs as a coordinator only (leader election + lease/health loops)
                 and does not execute tasks.
         """
-        engine = session.get_bind()
+        engine = _ensure_sync_engine(session.get_bind())
         session_factory = sessionmaker(bind=engine, expire_on_commit=False)
         return cls(config, session_factory, task_executor=task_executor)
 

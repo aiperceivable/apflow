@@ -121,20 +121,27 @@ def create_app(
 
     # Construct the distributed runtime if cluster mode. create_app() is
     # synchronous and cannot await runtime.start(); the caller's event loop
-    # (the `apflow worker` command, or a future serve-loop hook) is responsible
-    # for awaiting start(). We construct it here with the correct contract via
-    # DistributedRuntime.from_session() and expose it on the app.
+    # (the `apflow worker` command) is responsible for awaiting start(). We
+    # construct it here with the correct contract via
+    # DistributedRuntime.from_session() and expose it on the app. Because cluster
+    # mode was explicitly requested, failures here propagate rather than being
+    # swallowed into a silently degraded single-node app.
     distributed_runtime = None
     if cluster:
-        try:
-            from apflow.core.distributed.config import DistributedConfig
-            from apflow.core.distributed.runtime import DistributedRuntime
+        from apflow.core.distributed.config import DistributedConfig, is_postgresql
+        from apflow.core.distributed.runtime import DistributedRuntime
 
-            dist_config = DistributedConfig.from_env()
-            distributed_runtime = DistributedRuntime.from_session(session, dist_config)
-            logger.info(f"Distributed runtime initialized (node: {dist_config.node_id})")
-        except Exception as e:
-            logger.warning(f"Distributed runtime failed to initialize: {e}")
+        if not is_postgresql(session):
+            raise ValueError(
+                "Cluster mode requires a PostgreSQL database, but the configured "
+                "connection is not PostgreSQL. Use a postgresql:// connection string."
+            )
+
+        dist_config = DistributedConfig.from_env()
+        dist_config.enabled = True
+        dist_config.validate_and_initialize()
+        distributed_runtime = DistributedRuntime.from_session(session, dist_config)
+        logger.info(f"Distributed runtime initialized (node: {dist_config.node_id})")
 
     return ApflowApp(
         session=session,

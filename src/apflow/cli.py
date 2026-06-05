@@ -62,7 +62,9 @@ def _build_cli() -> click.Group:
 @click.option("--cors", default=None, help="CORS origins (comma-separated)")
 @click.option("--db", default=None, help="Database connection string")
 @click.option(
-    "--cluster", is_flag=True, help="Enable distributed cluster mode (requires PostgreSQL)"
+    "--cluster",
+    is_flag=True,
+    help="Unsupported: serve does not run the cluster runtime — use `apflow worker`",
 )
 @click.option("--log-level", default=None, help="Log level (DEBUG/INFO/WARNING/ERROR)")
 def serve(
@@ -81,7 +83,18 @@ def serve(
     from apflow import __version__
     from apflow.app import create_app
 
-    app = create_app(connection_string=db, cluster=cluster)
+    # `serve` runs a single A2A process and has no event loop hook to drive the
+    # distributed runtime's leader election / lease loops. Constructing the runtime
+    # without starting it (as before) silently bypassed leader gating, so every
+    # `serve --cluster` node executed tasks uncoordinated. Fail loudly instead and
+    # direct operators to the dedicated worker command.
+    if cluster:
+        raise click.ClickException(
+            "`serve` does not run the distributed cluster runtime. "
+            "Start distributed nodes with `apflow worker --db <postgres-url>` instead."
+        )
+
+    app = create_app(connection_string=db, cluster=False)
 
     cors_origins = [s.strip() for s in cors.split(",")] if cors else None
 
@@ -211,16 +224,31 @@ def worker(db: str, node_id: Optional[str], log_level: Optional[str]) -> None:
     app = create_app(connection_string=db, cluster=False)
 
     try:
-        from apflow.core.distributed.config import DistributedConfig
+        from apflow.core.distributed.config import DistributedConfig, is_postgresql
         from apflow.core.distributed.runtime import DistributedRuntime
         from apflow.core.execution.task_executor import TaskExecutor
     except ImportError:
         click.echo("Error: distributed module not available", err=True)
         return
 
+    # Distributed coordination needs PostgreSQL's atomic guarantees; reject other
+    # backends loudly rather than silently degrading to the non-atomic SQLite path.
+    if not is_postgresql(app.session):
+        raise click.ClickException(
+            "Worker mode requires a PostgreSQL --db connection (got a non-PostgreSQL "
+            "database). Provide a postgresql:// connection string."
+        )
+
     config = DistributedConfig.from_env()
+    config.enabled = True
     if node_id:
         config.node_id = node_id
+    # Validate timing invariants (renew < lease, positive intervals) and auto-generate
+    # node_id when omitted, instead of constructing a misconfigured runtime.
+    try:
+        config.validate_and_initialize()
+    except ValueError as exc:
+        raise click.ClickException(f"Invalid distributed configuration: {exc}")
 
     async def execute_one(task: Any) -> dict:
         """Execute a single claimed task via the shared TaskExecutor singleton."""

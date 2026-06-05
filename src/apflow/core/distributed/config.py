@@ -11,8 +11,12 @@ import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Union
 
 from sqlalchemy.orm import Session
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 VALID_NODE_ROLES = ("auto", "leader", "worker", "observer")
 
@@ -51,7 +55,7 @@ def as_utc(dt: datetime) -> datetime:
     return dt
 
 
-def is_postgresql(session: Session) -> bool:
+def is_postgresql(session: Union[Session, AsyncSession]) -> bool:
     """Check if the session is bound to a PostgreSQL database."""
     bind = session.get_bind()
     return bind.dialect.name == "postgresql"
