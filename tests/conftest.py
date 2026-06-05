@@ -1131,21 +1131,7 @@ def _cleanup_all_global_state():
     except (ImportError, AttributeError):
         pass
 
-    # 4. Clean up Executor registry (both singleton and global instance)
-    try:
-        from apflow.core.execution.executor_registry import ExecutorRegistry, _registry
-
-        # Reset singleton
-        ExecutorRegistry._instance = None
-        # Clear global instance state
-        if hasattr(_registry, "_executors"):
-            _registry._executors.clear()
-        if hasattr(_registry, "_factory_functions"):
-            _registry._factory_functions.clear()
-    except (ImportError, AttributeError):
-        pass
-
-    # 5. Clean up TaskExecutor singleton
+    # 4. Clean up TaskExecutor singleton
     try:
         from apflow.core.execution.task_executor import TaskExecutor
 

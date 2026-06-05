@@ -10,9 +10,6 @@ __all__ = [
     "StreamingCallbacks",
     "TaskTracker",
     "TaskExecutor",
-    "ExecutorRegistry",
-    "get_registry",
-    "register_executor",
 ]
 
 
@@ -38,16 +35,4 @@ def __getattr__(name):
         from apflow.core.execution.task_executor import TaskExecutor
 
         return TaskExecutor
-    elif name == "ExecutorRegistry":
-        from apflow.core.execution.executor_registry import ExecutorRegistry
-
-        return ExecutorRegistry
-    elif name == "get_registry":
-        from apflow.core.execution.executor_registry import get_registry
-
-        return get_registry
-    elif name == "register_executor":
-        from apflow.core.execution.executor_registry import register_executor
-
-        return register_executor
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

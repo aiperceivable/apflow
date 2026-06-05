@@ -23,6 +23,10 @@ class StreamingCallbacks:
         self.root_task_id = root_task_id
         self.event_queue = None
         self.context = None
+        # Strong references to in-flight fire-and-forget progress tasks. The event
+        # loop only holds weak references to bare tasks, so without this a progress
+        # update can be garbage-collected mid-flight and silently dropped.
+        self._pending_tasks: set[asyncio.Task] = set()
 
     def set_streaming_context(self, event_queue, context):
         """
@@ -105,8 +109,11 @@ class StreamingCallbacks:
             # Check if we're already in an event loop
             try:
                 asyncio.get_running_loop()
-                # We're in an event loop, create a task
-                asyncio.create_task(self._send_progress_update(progress_data))
+                # We're in an event loop, create a task and retain a strong reference
+                # until it completes so it cannot be garbage-collected mid-flight.
+                task = asyncio.create_task(self._send_progress_update(progress_data))
+                self._pending_tasks.add(task)
+                task.add_done_callback(self._pending_tasks.discard)
             except RuntimeError:
                 # No event loop running, use asyncio.run()
                 asyncio.run(self._send_progress_update(progress_data))

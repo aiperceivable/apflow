@@ -108,6 +108,11 @@ class ExtensionScanner:
             if cls._load_from_cache():
                 return cls._metadata_cache
 
+        # Rebuild from scratch: drop any stale in-memory entries (executors that were
+        # deleted or had their id renamed) so they don't linger and get re-serialized
+        # to the on-disk cache.
+        cls._metadata_cache = {}
+
         logger.debug("Scanning executors using AST (no imports)...")
 
         extensions_dir = Path(__file__).parent.parent.parent / "extensions"
@@ -132,6 +137,13 @@ class ExtensionScanner:
             # Extract metadata using AST (no import)
             metadata_list = cls._extract_metadata_from_file(py_file)
             for metadata in metadata_list:
+                if metadata.id in cls._metadata_cache:
+                    logger.warning(
+                        "Duplicate executor id '%s' found in %s; it overrides a "
+                        "previously discovered executor. Executor ids must be unique.",
+                        metadata.id,
+                        py_file.name,
+                    )
                 cls._metadata_cache[metadata.id] = metadata
                 logger.debug(f"Discovered: {metadata.id} in {py_file.name}")
 

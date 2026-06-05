@@ -6,6 +6,5 @@ This package contains tests for all execution-related components:
 - TaskManager: Task execution and dependency management
 - TaskCreator: Task tree creation from task definitions
 - TaskTracker: Task status tracking
-- ExecutorRegistry: Executor registration and lookup
 - StreamingCallbacks: Streaming execution callbacks
 """

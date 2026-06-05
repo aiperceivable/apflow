@@ -8,7 +8,6 @@ from pathlib import Path
 
 from apflow.core.extensions.scanner import ExtensionScanner, ExecutorMetadata
 
-
 # The 4 core executors in v2
 CORE_EXECUTORS = [
     "rest_executor",
@@ -218,3 +217,15 @@ class TestExtensionScanner:
         result = ExtensionScanner.scan_builtin_executors()
 
         assert isinstance(result, dict)
+
+    def test_rescan_drops_stale_cache_entries(self) -> None:
+        """A stale executor id (deleted/renamed) must not survive a rescan."""
+        from types import SimpleNamespace
+
+        # Inject a ghost that no longer exists on disk.
+        ExtensionScanner._metadata_cache["ghost_executor"] = SimpleNamespace(id="ghost_executor")
+
+        metadata = ExtensionScanner.scan_builtin_executors(force_rescan=True)
+
+        assert "ghost_executor" not in metadata
+        assert "rest_executor" in metadata  # real executors still discovered

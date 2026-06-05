@@ -77,8 +77,10 @@ class ExtensionRegistry:
                      If provided, this will be used instead of executor_class.
             override: If True, always override any previous registration. If False and exists, registration is skipped.
 
+        On an id conflict with override=False, registration is skipped with a warning
+        (the existing registration is kept) rather than raising.
+
         Raises:
-            ValueError: If extension.id is already registered and override=False
             ValueError: If extension.id is empty
             ValueError: If extension.category is invalid
 
@@ -111,7 +113,9 @@ class ExtensionRegistry:
                 f"{existing.__class__.__name__} (category: {existing.category.value}). "
                 f"Use override=True to replace it, or use a different ID."
             )
-            return existing
+            # Skip registration; the `-> None` contract means callers must not depend
+            # on a returned value here.
+            return
 
         # Register to primary index
         self._by_id[extension.id] = extension

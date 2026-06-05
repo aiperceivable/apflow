@@ -68,8 +68,10 @@ def discover_executor_modules() -> list[ExecutableTaskModuleAdapter]:
                             seen_ids.add(eid)
             except Exception as e:
                 logger.warning(f"Failed to load executor entry point '{ep.name}': {e}")
-    except Exception:
-        pass
+    except Exception as e:
+        # Surface group-level discovery failures (e.g. broken distribution metadata)
+        # rather than silently dropping all entry-point executors.
+        logger.warning(f"Failed to enumerate 'apflow.executors' entry points: {e}")
 
     logger.info(f"Discovered {len(adapters)} executor modules for apcore registration")
     return adapters
