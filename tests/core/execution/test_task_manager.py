@@ -509,3 +509,37 @@ class TestTaskManagerExecutorLock:
 
         assert errors == [], f"Race condition detected: {errors}"
         assert task_manager._executor_instances == {}
+
+
+class TestResultErrorClassification:
+    """A result is a failure only when it carries a *truthy* error value (Review #24)."""
+
+    @pytest.mark.asyncio
+    async def test_error_none_is_treated_as_success(self, sync_db_session):
+        from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
+
+        repo = TaskRepository(sync_db_session)
+        task = await repo.create_task(name="t", user_id="u", status="in_progress")
+        sync_db_session.commit()
+        sync_db_session.refresh(task)
+
+        manager = TaskManager(sync_db_session)
+        await manager._handle_task_execution_result(task, task.id, {"error": None, "value": 42})
+
+        refreshed = await repo.get_task_by_id(task.id)
+        assert refreshed.status == "completed"
+
+    @pytest.mark.asyncio
+    async def test_truthy_error_is_treated_as_failure(self, sync_db_session):
+        from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
+
+        repo = TaskRepository(sync_db_session)
+        task = await repo.create_task(name="t", user_id="u", status="in_progress")
+        sync_db_session.commit()
+        sync_db_session.refresh(task)
+
+        manager = TaskManager(sync_db_session)
+        await manager._handle_task_execution_result(task, task.id, {"error": "boom"})
+
+        refreshed = await repo.get_task_by_id(task.id)
+        assert refreshed.status == "failed"

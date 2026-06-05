@@ -115,7 +115,8 @@ class TaskManager:
                 Example:
                     async def my_post_hook(task, inputs, result):
                         # Custom result processing or logging
-                        logger.info(f"Task {task.id} completed with result: {result}")
+                        # Raw result may contain credentials/PII — keep at DEBUG.
+                        logger.debug(f"Task {task.id} completed with result: {result}")
                     task_manager = TaskManager(db, post_hooks=[my_post_hook])
             executor_instances: Optional shared dictionary for storing executor instances (task_id -> executor)
                 Used for cancellation support. If provided, executors created during execution are stored here
@@ -639,8 +640,20 @@ class TaskManager:
                     execute_child_and_descendants(child_node) for child_node in ready_tasks
                 ]
 
-                await asyncio.gather(*parallel_tasks)
+                # return_exceptions=True so one branch's failure does not cancel the
+                # other in-flight sibling branches (which would leave them stuck
+                # in_progress). After all branches settle, preserve the original
+                # fail-the-tree contract by re-raising the first real failure.
+                results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
+                failures = [r for r in results if isinstance(r, Exception)]
+                for err in failures:
+                    logger.error(
+                        f"Parallel branch failed at priority {priority}: {err}",
+                        exc_info=err,
+                    )
                 logger.debug(f"Completed parallel execution of {len(ready_tasks)} ready tasks")
+                if failures:
+                    raise failures[0]
 
         # Log waiting tasks for later execution
         if waiting_tasks:
@@ -649,7 +662,17 @@ class TaskManager:
     def _add_children_to_priority_groups(
         self, node: TaskTreeNode, priority_groups: Dict[int, List[TaskTreeNode]]
     ):
-        """Recursively add all children to priority groups"""
+        """Recursively add all children to priority groups.
+
+        Note: this flattens the whole subtree into priority groups, and
+        _execute_priority_group ALSO recurses via _execute_task_tree_recursive, so a
+        descendant can be dispatched at multiple levels. This is intentional and safe
+        — duplicate dispatch collapses to a single execution via the atomic
+        compare-and-swap claim in try_claim_for_execution (a second claim of an
+        already-claimed task is rejected). It is a known efficiency tradeoff; do not
+        "fix" it by dropping one traversal without re-validating cross-level priority
+        ordering and fan-in against the full integration suite.
+        """
         for child_node in node.children:
             priority = child_node.task.priority or 999
             if priority not in priority_groups:
@@ -903,8 +926,10 @@ class TaskManager:
             executor.clear_task_context()
             logger.debug(f"Cleared task context for task {task_id} after successful execution")
 
-        # Check if the result indicates an error (e.g., executor creation failed)
-        if isinstance(task_result, dict) and "error" in task_result:
+        # Check if the result indicates an error (e.g., executor creation failed).
+        # Require a truthy error value: a successful payload that merely carries an
+        # "error": None / "" field must not be misclassified as a failure.
+        if isinstance(task_result, dict) and task_result.get("error"):
             # Task failed - update status to failed
             error_message = task_result["error"]
             await self.task_repository.update_task(
@@ -1851,7 +1876,8 @@ class TaskManager:
         logger.info(
             f"🔍 [Dependency Resolution] Available completed tasks: {list(completed_tasks_by_id.keys())}"
         )
-        logger.info(f"🔍 [Dependency Resolution] Initial inputs: {inputs}")
+        # Raw inputs may contain credentials/PII — keep at DEBUG.
+        logger.debug(f"🔍 [Dependency Resolution] Initial inputs: {inputs}")
 
         # Resolve dependencies based on id
         for dep in task_dependencies:
