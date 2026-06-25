@@ -1,5 +1,7 @@
 """Tests for task management modules"""
 
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -87,6 +89,26 @@ class _FakeTaskExecutor:
         return self._result
 
 
+class _DetachedTaskExecutor:
+    """Mirrors the real engine: progress events are enqueued via DETACHED
+    fire-and-forget tasks (like StreamingCallbacks), NOT inline — so the puts can
+    land just after execute returns. Exercises the stream() drain race directly."""
+
+    def __init__(self, events):
+        self._events = events
+        self._pending: set = set()
+
+    async def execute_task_by_id(
+        self, task_id, use_streaming=False, streaming_callbacks_context=None, **_kw
+    ):
+        if use_streaming and streaming_callbacks_context is not None:
+            for event in self._events:
+                t = asyncio.create_task(streaming_callbacks_context.put(event))
+                self._pending.add(t)
+                t.add_done_callback(self._pending.discard)
+        return {"status": "completed", "root_task_id": task_id}
+
+
 class TestTaskExecuteModule:
     @pytest.mark.asyncio
     async def test_execute_runs_via_task_executor(self):
@@ -127,6 +149,60 @@ class TestTaskExecuteModule:
         with pytest.raises(ValueError):
             async for _event in module.stream({"task_id": ""}, None):
                 pass
+
+    @pytest.mark.asyncio
+    async def test_stream_delivers_events_from_detached_producer(self):
+        # Regression for the drain race: when progress events are enqueued via
+        # detached fire-and-forget tasks (the real StreamingCallbacks path), the
+        # late terminal event must NOT be dropped. The old one-shot empty() drain
+        # missed these; the grace-window drain delivers them.
+        events = [
+            {"type": "task_start", "task_id": "abc"},
+            {"type": "progress", "task_id": "abc", "progress": 0.5},
+            {"type": "task_completed", "task_id": "abc"},
+        ]
+        fake = _DetachedTaskExecutor(events)
+        with patch("apflow.core.execution.task_executor.TaskExecutor", return_value=fake):
+            module = TaskExecuteModule(MagicMock())
+            collected = [event async for event in module.stream({"task_id": "abc"}, None)]
+
+        types = [e.get("type") for e in collected]
+        assert "task_start" in types
+        assert "task_completed" in types  # the late detached put is not dropped
+        assert collected[-1]["type"] == "result"
+
+    @pytest.mark.asyncio
+    async def test_stream_cancels_background_run_on_early_close(self):
+        # Regression for the leak: closing the generator early (SSE client
+        # disconnect) must cancel the background execution, not orphan it.
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        class _OneEventThenHang:
+            async def execute_task_by_id(
+                self, task_id, use_streaming=False, streaming_callbacks_context=None, **_kw
+            ):
+                started.set()
+                if streaming_callbacks_context is not None:
+                    await streaming_callbacks_context.put({"type": "task_start"})
+                try:
+                    await asyncio.sleep(10)  # long-running execution
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+                return {"status": "completed"}
+
+        with patch(
+            "apflow.core.execution.task_executor.TaskExecutor",
+            return_value=_OneEventThenHang(),
+        ):
+            gen = TaskExecuteModule(MagicMock()).stream({"task_id": "abc"}, None)
+            first = await gen.__anext__()
+            assert first["type"] == "task_start"
+            await gen.aclose()  # type: ignore[attr-defined]  # disconnect -> finally cancels run
+
+        assert started.is_set()
+        assert cancelled.is_set()
 
 
 class TestTaskListModule:

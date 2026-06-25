@@ -9,6 +9,7 @@ use await to call the repository correctly.
 """
 
 import asyncio
+import contextlib
 import copy
 from collections.abc import AsyncIterator
 from typing import Any
@@ -237,19 +238,34 @@ class TaskExecuteModule:
                 task_id, use_streaming=True, streaming_callbacks_context=events
             )
         )
+        try:
+            # Relay progress events until execution finishes.
+            while not run.done():
+                try:
+                    yield await asyncio.wait_for(events.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
+            # StreamingCallbacks enqueues events via detached fire-and-forget tasks, so
+            # a late put (e.g. the terminal progress event) can land just after run
+            # finishes. Drain with a short grace window instead of a single empty()
+            # check so those in-flight events are not dropped.
+            while True:
+                try:
+                    yield await asyncio.wait_for(events.get(), timeout=0.05)
+                except asyncio.TimeoutError:
+                    break
 
-        # Relay progress events until execution finishes, then drain the tail.
-        while not run.done():
-            try:
-                yield await asyncio.wait_for(events.get(), timeout=0.1)
-            except asyncio.TimeoutError:
-                continue
-        while not events.empty():
-            yield events.get_nowait()
-
-        # Terminal event carrying the execution result (propagates execution errors).
-        result = await run
-        yield {"type": "result", "task_id": task_id, "result": result}
+            # Terminal event carrying the execution result (propagates execution errors).
+            result = await run
+            yield {"type": "result", "task_id": task_id, "result": result}
+        finally:
+            # On early generator close (SSE client disconnect -> GeneratorExit), cancel
+            # the background execution so it does not keep running detached and holding
+            # its pooled DB session. On the happy path run is already done -> no-op.
+            if not run.done():
+                run.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await run
 
 
 class TaskListModule:
