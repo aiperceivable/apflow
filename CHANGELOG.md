@@ -1,6 +1,149 @@
 # Changelog
 
 
+## [0.21.0] - 2026-06-25
+
+### Added
+
+- **apcore ecosystem upgrade — 0.22.0 → 0.25.0 coordinated release**
+  - Dependency floors: `apcore>=0.25.0`, `apcore-toolkit>=0.9.1`, `apcore-mcp>=0.17.0`,
+    `apcore-a2a>=0.4.2`, `apcore-cli>=0.10.2`
+  - **A2A protocol 1.0** (apcore-a2a 0.4.0): protobuf types, `Task` event before status
+    updates, `AgentCard.supported_interfaces`, `/.well-known/agent-card.json` canonical path
+  - **Per-instance `ToggleState` isolation** (apcore 0.24.0): disabling a module on one
+    `APCore` instance no longer bleeds into other instances
+  - **AI error-recovery metadata** (apcore 0.23.0): `user_fixable` and `ai_guidance` are
+    auto-populated on `ModuleError` at construction time — no code change required
+  - **Config-driven ACL discovery** (apcore 0.25.0): `ACL.discover(config)` auto-wired in
+    `APCore.__init__`; skipped when caller supplies its own Executor (no behavior change for
+    apflow's current usage)
+  - **`serve()` Phase B fix** (apcore-mcp 0.17.0): `approval_store` and `approval_notify`
+    are now correctly forwarded through `serve()` / `async_serve()` (was broken in 0.16.0)
+  - **apcore-cli 0.10**: `create_cli()` uses the SDK's native `version=` / `description=`
+    parameters — the SDK version no longer leaks into the help text
+
+- **`ModuleAnnotations` on all 16 bridge task modules** — correct `readonly`, `destructive`,
+  `requires_approval`, `idempotent`, and `paginated` flags so MCP/A2A clients and AI agents
+  receive accurate capability metadata for every orchestration tool
+
+- **Module preview support** (`__apcore_module_preview` meta-tool)
+  - `ExecutableTaskModuleAdapter.preview()`: describes which executor would run
+  - `TaskExecuteModule.preview()`: names the task that would be triggered
+  - `TaskDeleteModule.preview()`: names the task that would be permanently deleted
+  - `TaskCancelModule.preview()`: lists every task that would be cancelled
+  - AI agents can call `__apcore_module_preview` to inspect the impact of a destructive
+    operation before confirming it
+
+- **`apflow mcp --approval`** — opt-in async human-approval workflow (apcore-mcp Phase B).
+  Registers the `__apcore_approval_check` meta-tool so AI agents can poll for out-of-band
+  approvals without blocking the MCP connection. Uses `InMemoryApprovalStore` (dev only;
+  production deployments wire a persistent `ApprovalStore` via `APCoreMCP` directly).
+
+- **`apflow serve --sys-modules`** — expose apcore `sys.*` introspection modules as A2A
+  skills (opt-in; off by default)
+
+- **`apflow mcp --metrics`** — opt-in Prometheus metrics + usage middleware (wires
+  `observability=True` on apcore-mcp 0.15+)
+
+- **`DistributedRuntime.from_session()`** construction seam — derives a `sessionmaker` from
+  a session's bound engine and builds the runtime with its full correct argument contract,
+  eliminating caller-side argument reconstruction bugs across `create_app()` and `cli worker`
+
+### Fixed
+
+#### Distributed coordinator
+- **`apflow worker` crash** — `WorkerRuntime` was called with 1 of 7 required positional
+  args (TypeError). Now constructs via `from_session()`.
+- **`create_app(cluster=True)` silent no-op** — `DistributedRuntime()` received missing
+  `session_factory` (TypeError swallowed by a bare `except`), making cluster mode silently
+  degrade to single-node. Now raises an explicit `ValueError` when the database is not
+  PostgreSQL.
+- **`is_leader` side-effects** — `DistributedRuntime.is_leader` was mutating `_role` /
+  `_lease_token` on expiry reads; reading it from a status endpoint could silently demote
+  the node. Now a pure read; demotion is owned solely by `_leader_renewal_loop`. (group E)
+- **Lease-gated status write** — `_finalize_task` gates the status write on the token-scoped
+  lease `DELETE` matching a row; stale workers can no longer clobber the new owner's status
+  after lease-expiry reassignment. (group D)
+- **Duplicate task poll** — `_poll_loop` skips tasks already in `_running_tasks`, preventing
+  still-pending rows from being re-spawned each cycle and overwriting the live entry.
+  (group D)
+- **Lease leak on cancel** — `_execute_task` releases the lease on `CancelledError` before
+  `finally` pops `_active_leases`, so shutdown's release loop no longer misses in-flight
+  leases. (group D)
+- **Idempotency key correctness** — now incorporates task inputs (per the documented
+  contract); computed once and shared across the cache-check / store / failure paths.
+  `cleanup_expired_leases` bumps `attempt_id` when reverting `in_progress→pending` so
+  reassigned attempts compute a fresh key instead of colliding. (group D)
+- **`store_result` conflict** — reconciles a stale `failed` row to `completed` rather than
+  treating every key conflict as success. (group D)
+- **`NodeRegistry` `DetachedInstanceError`** — `detect_stale_nodes` / `detect_dead_nodes` /
+  `get_healthy_nodes` now call `session.expunge_all()` before returning so ORM objects are
+  detached while their attributes are loaded, matching `worker._find_executable_tasks`.
+  (group E)
+- **Cluster bootstrap PostgreSQL guard** — `create_app(cluster=True)` calls `is_postgresql()`
+  and raises explicitly instead of silently continuing with SQLite. (group A)
+- **`DistributedConfig` timing invariant** — `validate_and_initialize()` now rejects
+  `leader_renew_seconds >= leader_lease_seconds`, which caused silent leader flapping.
+
+#### TaskManager
+- **False failure classification** — `_handle_task_execution_result` treated any result with
+  an `"error"` key (even `None` / `""`) as a failure. Now only fails on a truthy error
+  value. (group F)
+- **Parallel branch cancellation** — `_execute_priority_group` now uses
+  `return_exceptions=True` so one branch's failure no longer cancels in-flight siblings
+  (which stranded them in `in_progress`). The first real failure is still re-raised to
+  preserve the fail-the-tree contract. (group F)
+- **Credentials / PII in logs** — demoted two `INFO` logs that dumped raw task inputs /
+  results to `DEBUG`. (group F)
+
+#### Bridge / task modules
+- **`reset_kwargs` mutation** — `TaskCreator._clone_task` operated on one shared dict across
+  a whole tree clone; a task's `id` / lineage fields were written back and corrupted later
+  clones. Now operates on a per-call copy. (group C)
+- **Mixed-mode `origin_type` bleed** — `_reset_task_recursive` mutated the shared override
+  dict when applying `origin_type=link` to link nodes, silently turning subsequent sibling /
+  descendant copy nodes into links (`convert_to_link` nulled their data). Now derives a
+  fresh per-node dict. (group C)
+- **`TaskCancelModule` iterating string** — when `task_ids` was a bare string, `cancel_task`
+  was called once per character. Now raises `ValueError("task_ids must be an array")`.
+  (group B)
+- **Override allowlist** — `TaskCopyModule` / `TaskLinkModule` / `TaskCloneMixedModule` now
+  filter external agent overrides through a content-only allowlist (`name`, `inputs`,
+  `params`, `priority`). Prevents an agent from splatting `user_id` / `task_tree_id` /
+  `origin_type` / `status` to corrupt tenancy or tree-lineage invariants. (group B)
+- **`TaskScheduledListModule` unbounded results** — now queries via `get_scheduled_tasks()`
+  with DB-level `user_id` scoping and ordered `LIMIT`; limit clamped to 100. Previously
+  fetched all tasks then sliced in Python. (group B)
+- **`TaskRunningListModule` limit bypass** — limit clamp now caps at the advertised schema
+  maximum (100) instead of 1000. (group B)
+- **`limit` / `offset` coercion** — all list modules now run inputs through `_coerce_int()`
+  so non-numeric / null MCP inputs raise a clean `ValueError` instead of crashing in
+  `min()` / `max()`. Non-object elements in `tasks[]` array raise `ValueError` instead of
+  `AttributeError`. `TaskUpdate` writes only schema-advertised fields via a whitelist and
+  no longer mutates the caller's inputs dict.
+
+### Removed
+
+- **Dead `ExecutorRegistry` class** — `src/apflow/core/execution/executor_registry.py` had
+  zero production callers (live path uses `apflow.core.extensions.get_registry`). Removed
+  along with its lazy re-exports from `core/execution/__init__.py` and the dead `conftest`
+  reset hook. (group G)
+
+### Changed
+
+- **`ExtensionRegistry.register()`** — returns `None` on the skip path (matching its
+  `-> None` annotation); docstring corrected (it warns and skips on duplicate ID, not
+  raises). (group G)
+- **`scanner.scan_builtin_executors()`** — clears the in-memory metadata cache before a
+  rescan so deleted / renamed executors no longer linger. (group G)
+- **`scanner_bridge`** — bare `except: pass` around entry-point group discovery replaced
+  with a logged warning; broken plugin metadata is now observable. (group G)
+- **`StreamingCallbacks`** — retains strong references to fire-and-forget progress tasks (in
+  a set, discarded on completion) to prevent garbage collection mid-flight. (group G)
+- **Version**: 0.20.0 → 0.21.0
+
+---
+
 ## [0.20.0] - 2026-04-16
 
 ### BREAKING CHANGES — Product Repositioning

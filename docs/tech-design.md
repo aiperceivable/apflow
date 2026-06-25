@@ -4,10 +4,10 @@
 > to **"AI-Perceivable Distributed Orchestration"** (AP+Flow). See README.md for current positioning.
 
 **Product:** apflow v2 -- AI-Perceivable Distributed Orchestration
-**Version:** 0.20.0 (MVP)
+**Version:** 0.21.0
 **Author:** apflow team
-**Date:** 2026-03-28
-**Status:** Draft
+**Date:** 2026-06-25
+**Status:** Active
 **PRD Reference:** `docs/prd.md`
 
 ---
@@ -516,7 +516,7 @@ All three existing migrations (001, 002, 003) require this change. The pattern i
 ```toml
 [project]
 name = "apflow"
-version = "0.20.0"
+version = "0.21.0"
 description = "AI Agent Production Middleware"
 requires-python = ">=3.11"
 
@@ -529,12 +529,12 @@ dependencies = [
     "alembic>=1.13.0",
     # SQLite is Python stdlib -- no additional dependency
     # apcore ecosystem is core (MCP/A2A/CLI are standard apflow features, not extras).
-    # apcore-a2a 0.4.0 implements A2A protocol 1.0; apcore 0.22.0 is its required floor.
-    "apcore>=0.22.0",
-    "apcore-toolkit>=0.8.0",
-    "apcore-mcp>=0.15.0",
-    "apcore-a2a>=0.4.0",
-    "apcore-cli>=0.10.0",
+    # apcore-a2a 0.4.2 implements A2A protocol 1.0; apcore 0.25.0 is its required floor.
+    "apcore>=0.25.0",
+    "apcore-toolkit>=0.9.1",
+    "apcore-mcp>=0.17.0",
+    "apcore-a2a>=0.4.2",
+    "apcore-cli>=0.10.2",
 ]
 
 # Storage

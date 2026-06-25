@@ -62,9 +62,10 @@ serve(app.registry, name="apflow")
 # Or from the command line
 apflow serve              # A2A HTTP server
 apflow serve --explorer   # With Explorer UI
-apflow serve --cluster    # Distributed cluster mode
+apflow serve --cluster    # Distributed cluster mode (requires PostgreSQL)
 apflow worker --db ...    # Start worker node
-apflow mcp                # MCP server (for Claude/Cursor)
+apflow mcp                # MCP server (stdio, for Claude/Cursor)
+apflow mcp --transport streamable-http --approval  # HTTP + async human-approval workflow
 apflow info               # Show registered modules
 ```
 
