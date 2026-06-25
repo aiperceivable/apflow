@@ -20,6 +20,12 @@ from typing import Any
 from apcore import APCore, Registry
 
 from apflow.bridge.scanner_bridge import discover_executor_modules
+from apflow.bridge.schedule_modules import (
+    ScheduleCompleteModule,
+    ScheduleDueModule,
+    ScheduleExportICalModule,
+    ScheduleSetModule,
+)
 from apflow.bridge.task_modules import (
     TaskCreateModule,
     TaskDeleteModule,
@@ -102,6 +108,10 @@ def create_apflow_registry(
         "task.clone_mixed": TaskCloneMixedModule(task_creator, task_repository),
         "task.running": TaskRunningListModule(task_repository),
         "task.scheduled": TaskScheduledListModule(task_repository),
+        "schedule.set": ScheduleSetModule(task_repository),
+        "schedule.due": ScheduleDueModule(task_repository),
+        "schedule.complete": ScheduleCompleteModule(task_repository),
+        "schedule.export_ical": ScheduleExportICalModule(),
     }
     for action, module in task_modules.items():
         module_id = f"{namespace}.{action}"

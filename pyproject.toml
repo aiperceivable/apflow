@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "apflow"
-version = "0.21.0"
+version = "0.22.0"
 description = "AI-Perceivable Distributed Orchestration"
 readme = "README.md"
 requires-python = ">=3.11"

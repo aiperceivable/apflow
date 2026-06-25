@@ -42,6 +42,7 @@ def _build_cli() -> click.Group:
     # Register apflow-specific commands
     cli.add_command(serve)
     cli.add_command(mcp)
+    cli.add_command(rest)
     cli.add_command(info)
     cli.add_command(worker)
 
@@ -54,6 +55,12 @@ def _build_cli() -> click.Group:
 @click.option("--name", default="apflow", help="Agent name in A2A Agent Card")
 @click.option("--explorer", is_flag=True, help="Enable A2A Explorer UI")
 @click.option("--metrics", is_flag=True, help="Enable /metrics endpoint")
+@click.option(
+    "--all",
+    "all_protocols",
+    is_flag=True,
+    help="Serve REST + A2A + MCP together on one port (/, /a2a, /mcp)",
+)
 @click.option(
     "--sys-modules",
     is_flag=True,
@@ -73,13 +80,14 @@ def serve(
     name: str,
     explorer: bool,
     metrics: bool,
+    all_protocols: bool,
     sys_modules: bool,
     cors: Optional[str],
     db: Optional[str],
     cluster: bool,
     log_level: Optional[str],
 ) -> None:
-    """Start A2A HTTP server (internal network service)."""
+    """Start the A2A HTTP server, or all protocols together with --all."""
     from apflow import __version__
     from apflow.app import create_app
 
@@ -97,6 +105,27 @@ def serve(
     app = create_app(connection_string=db, cluster=False)
 
     cors_origins = [s.strip() for s in cors.split(",")] if cors else None
+
+    if all_protocols:
+        from apflow.api import serve_all
+
+        click.echo(f"Starting unified REST + A2A + MCP server on {host}:{port}")
+        click.echo(f"  REST: http://{host}:{port}/  (docs at /docs)")
+        click.echo(f"  A2A:  http://{host}:{port}/a2a")
+        click.echo(f"  MCP:  http://{host}:{port}/mcp")
+        click.echo(f"Modules: {app.registry.count}")
+        serve_all(
+            app.registry,
+            host=host,
+            port=port,
+            title=name,
+            version=__version__,
+            cors_origins=cors_origins,
+            log_level=log_level,
+            explorer=explorer,
+            metrics=metrics,
+        )
+        return
 
     click.echo(f"Starting A2A server on {host}:{port}")
     click.echo(f"Modules: {len(list(app.registry.list()))}")
@@ -190,6 +219,43 @@ def mcp(
         observability=metrics,
         log_level=log_level,
         approval_store=InMemoryApprovalStore() if approval else None,
+    )
+
+
+@click.command()
+@click.option("--host", default="0.0.0.0", help="Bind host")
+@click.option("--port", default=8080, type=int, help="Bind port")
+@click.option("--cors", default=None, help="CORS origins (comma-separated)")
+@click.option("--db", default=None, help="Database connection string")
+@click.option("--log-level", default=None, help="Log level (DEBUG/INFO/WARNING/ERROR)")
+def rest(
+    host: str,
+    port: int,
+    cors: Optional[str],
+    db: Optional[str],
+    log_level: Optional[str],
+) -> None:
+    """Start REST/HTTP server (registry-driven JSON API + OpenAPI docs)."""
+    from apflow import __version__
+    from apflow.api import serve_rest
+    from apflow.app import create_app
+
+    app = create_app(connection_string=db)
+
+    cors_origins = [s.strip() for s in cors.split(",")] if cors else None
+
+    click.echo(f"Starting REST server on {host}:{port}")
+    click.echo(f"Modules: {app.registry.count}")
+    click.echo(f"Docs:    http://{host}:{port}/docs")
+
+    serve_rest(
+        app.registry,
+        host=host,
+        port=port,
+        title="apflow",
+        version=__version__,
+        cors_origins=cors_origins,
+        log_level=log_level,
     )
 
 
