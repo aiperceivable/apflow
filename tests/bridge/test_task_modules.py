@@ -1,7 +1,7 @@
 """Tests for task management modules"""
 
 import pytest
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from apflow.bridge.task_modules import (
     TaskArchiveModule,
@@ -68,14 +68,32 @@ class TestTaskCreateModule:
             await module.execute({})
 
 
+class _FakeTaskExecutor:
+    """Stand-in for TaskExecutor that returns a canned result and (optionally)
+    feeds progress events into the streaming callbacks queue."""
+
+    def __init__(self, events=None, result=None):
+        self._events = events or []
+        self._result = (
+            result if result is not None else {"status": "completed", "root_task_id": "abc"}
+        )
+
+    async def execute_task_by_id(
+        self, task_id, use_streaming=False, streaming_callbacks_context=None, **_kw
+    ):
+        if use_streaming and streaming_callbacks_context is not None:
+            for event in self._events:
+                await streaming_callbacks_context.put(event)
+        return self._result
+
+
 class TestTaskExecuteModule:
     @pytest.mark.asyncio
-    async def test_execute_valid(self):
-        manager = MagicMock()
-        manager.execute_task = AsyncMock(return_value={"task_id": "abc", "status": "completed"})
-
-        module = TaskExecuteModule(manager)
-        result = await module.execute({"task_id": "abc"})
+    async def test_execute_runs_via_task_executor(self):
+        fake = _FakeTaskExecutor(result={"task_id": "abc", "status": "completed"})
+        with patch("apflow.core.execution.task_executor.TaskExecutor", return_value=fake):
+            module = TaskExecuteModule(MagicMock())
+            result = await module.execute({"task_id": "abc"})
         assert result["status"] == "completed"
 
     @pytest.mark.asyncio
@@ -83,6 +101,32 @@ class TestTaskExecuteModule:
         module = TaskExecuteModule(MagicMock())
         with pytest.raises(ValueError):
             await module.execute({"task_id": ""})
+
+    @pytest.mark.asyncio
+    async def test_stream_relays_progress_then_result(self):
+        events = [
+            {"type": "task_start", "task_id": "abc", "status": "in_progress"},
+            {"type": "progress", "task_id": "abc", "progress": 0.5},
+        ]
+        fake = _FakeTaskExecutor(
+            events=events, result={"status": "completed", "root_task_id": "abc"}
+        )
+        with patch("apflow.core.execution.task_executor.TaskExecutor", return_value=fake):
+            module = TaskExecuteModule(MagicMock())
+            collected = [event async for event in module.stream({"task_id": "abc"}, None)]
+
+        types = [e.get("type") for e in collected]
+        assert "task_start" in types
+        assert "progress" in types
+        assert collected[-1]["type"] == "result"
+        assert collected[-1]["result"]["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_stream_empty_id_raises(self):
+        module = TaskExecuteModule(MagicMock())
+        with pytest.raises(ValueError):
+            async for _event in module.stream({"task_id": ""}, None):
+                pass
 
 
 class TestTaskListModule:

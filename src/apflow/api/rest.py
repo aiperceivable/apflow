@@ -25,6 +25,7 @@ registry-driven REST face over the v2 apcore Registry.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from typing import Any, Optional
 
 from apcore.errors import ModuleError
@@ -33,7 +34,7 @@ from apcore.registry.registry import Registry
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from apflow.logger import get_logger
@@ -149,22 +150,25 @@ def build_openapi(
     }
 
 
-async def _execute(
-    executor: Executor, module_id: str, raw_body: bytes
-) -> tuple[int, dict[str, Any]]:
-    """Parse the request body, run the module, and map the result/error to HTTP."""
-    if raw_body:
-        try:
-            inputs = json.loads(raw_body)
-        except json.JSONDecodeError as exc:
-            return 400, {"error": {"code": "INVALID_JSON", "message": f"Invalid JSON body: {exc}"}}
-    else:
-        inputs = {}
-    if not isinstance(inputs, dict):
-        return 400, {
+def _read_inputs(raw_body: bytes) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    """Parse a JSON-object body. Returns (inputs, None) or (None, error_payload)."""
+    if not raw_body:
+        return {}, None
+    try:
+        data = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        return None, {"error": {"code": "INVALID_JSON", "message": f"Invalid JSON body: {exc}"}}
+    if not isinstance(data, dict):
+        return None, {
             "error": {"code": "INVALID_INPUT", "message": "Request body must be a JSON object"}
         }
+    return data, None
 
+
+async def _execute(
+    executor: Executor, module_id: str, inputs: dict[str, Any]
+) -> tuple[int, dict[str, Any]]:
+    """Run the module and map the result/error to an HTTP status + JSON payload."""
     try:
         output = await executor.call_async(module_id, inputs)
     except ModuleError as exc:
@@ -174,6 +178,34 @@ async def _execute(
         logger.error("REST execute %s crashed: %s", module_id, exc, exc_info=True)
         return 500, {"error": {"code": "INTERNAL_ERROR", "message": str(exc)}}
     return 200, output
+
+
+def _sse_event(data: dict[str, Any], *, event: Optional[str] = None) -> str:
+    """Format a single Server-Sent Events frame."""
+    prefix = f"event: {event}\n" if event else ""
+    return f"{prefix}data: {json.dumps(data)}\n\n"
+
+
+async def _stream_events(
+    executor: Executor, module_id: str, inputs: dict[str, Any]
+) -> AsyncIterator[str]:
+    """Stream a module's output as SSE frames.
+
+    Streaming-capable modules emit one ``data`` frame per chunk; non-streaming
+    modules emit a single ``data`` frame (the executor falls back to call_async).
+    A terminal ``done`` event always closes the stream; errors arrive as an
+    ``error`` event rather than corrupting the SSE framing.
+    """
+    try:
+        async for chunk in executor.stream(module_id, inputs):
+            yield _sse_event(chunk)
+    except ModuleError as exc:
+        logger.info("REST stream %s failed [%s]: %s", module_id, exc.code, exc.message)
+        yield _sse_event({"error": exc.to_dict()}, event="error")
+    except Exception as exc:  # noqa: BLE001 — surface as an SSE error event
+        logger.error("REST stream %s crashed: %s", module_id, exc, exc_info=True)
+        yield _sse_event({"error": {"code": "INTERNAL_ERROR", "message": str(exc)}}, event="error")
+    yield _sse_event({}, event="done")
 
 
 _SWAGGER_HTML = """<!DOCTYPE html>
@@ -212,7 +244,9 @@ def build_rest_app(
         GET  /docs          -- Swagger UI
         GET  /modules       -- list module descriptors
         GET  /modules/{id}  -- single module descriptor
-        POST /modules/{id}  -- execute a module with a JSON-object body
+        POST /modules/{id}  -- execute a module with a JSON-object body; returns
+                               JSON, or an SSE event stream when the request's
+                               Accept header is text/event-stream
     """
     executor = Executor.from_registry(registry)
     openapi_spec = build_openapi(registry, title=title, version=version, description=description)
@@ -250,7 +284,21 @@ def build_rest_app(
             )
         if request.method == "GET":
             return JSONResponse(_descriptor_dict(registry, module_id))
-        status, payload = await _execute(executor, module_id, await request.body())
+
+        inputs, error = _read_inputs(await request.body())
+        if error is not None:
+            return JSONResponse(error, status_code=400)
+        assert inputs is not None  # _read_inputs returns one of (inputs, error)
+
+        # Content negotiation: stream execution as SSE when the client asks for it.
+        if "text/event-stream" in request.headers.get("accept", ""):
+            return StreamingResponse(
+                _stream_events(executor, module_id, inputs),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        status, payload = await _execute(executor, module_id, inputs)
         return JSONResponse(payload, status_code=status)
 
     routes = [

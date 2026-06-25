@@ -8,7 +8,9 @@ Note: Repository methods are async (AsyncSession). All execute() methods
 use await to call the repository correctly.
 """
 
+import asyncio
 import copy
+from collections.abc import AsyncIterator
 from typing import Any
 
 from apcore import Change, ModuleAnnotations, PreviewResult
@@ -177,12 +179,19 @@ class TaskCreateModule:
 
 
 class TaskExecuteModule:
-    """Execute an existing task in the apflow task engine."""
+    """Execute an existing task (and its tree) in the apflow task engine.
+
+    A streaming module: ``stream()`` relays the engine's progress events
+    (task_start / progress / task_completed / final) as they occur, then a
+    terminal ``result`` event; ``execute()`` is the non-streaming equivalent.
+    """
 
     description = "Execute an existing task in the apflow task engine."
-    annotations = ModuleAnnotations(destructive=True, requires_approval=True)
+    annotations = ModuleAnnotations(destructive=True, requires_approval=True, streaming=True)
 
     def __init__(self, task_manager: Any) -> None:
+        # task_manager is retained for dependency-injection compatibility; execution
+        # is driven through TaskExecutor, which owns the session and task-tree build.
         self._manager = task_manager
         self.input_schema = _make_schema(_TASK_ID_INPUT)
         self.output_schema = _make_schema(
@@ -197,6 +206,12 @@ class TaskExecuteModule:
             }
         )
 
+    @staticmethod
+    def _new_executor() -> Any:
+        from apflow.core.execution.task_executor import TaskExecutor
+
+        return TaskExecutor()
+
     async def preview(self, inputs: dict[str, Any], context: Any = None) -> PreviewResult:
         task_id = inputs.get("task_id", "")
         summary = f"Execute task '{task_id}'" if task_id else "Execute task (task_id not provided)"
@@ -208,9 +223,33 @@ class TaskExecuteModule:
         task_id = inputs.get("task_id", "")
         if not task_id:
             raise ValueError("task_id must be non-empty")
+        return await self._new_executor().execute_task_by_id(task_id)
 
-        result = await self._manager.execute_task(task_id)
-        return result
+    async def stream(self, inputs: dict[str, Any], context: Any) -> AsyncIterator[dict[str, Any]]:
+        """Execute the task, relaying engine progress events as they occur."""
+        task_id = inputs.get("task_id", "")
+        if not task_id:
+            raise ValueError("task_id must be non-empty")
+
+        events: asyncio.Queue = asyncio.Queue()
+        run = asyncio.create_task(
+            self._new_executor().execute_task_by_id(
+                task_id, use_streaming=True, streaming_callbacks_context=events
+            )
+        )
+
+        # Relay progress events until execution finishes, then drain the tail.
+        while not run.done():
+            try:
+                yield await asyncio.wait_for(events.get(), timeout=0.1)
+            except asyncio.TimeoutError:
+                continue
+        while not events.empty():
+            yield events.get_nowait()
+
+        # Terminal event carrying the execution result (propagates execution errors).
+        result = await run
+        yield {"type": "result", "task_id": task_id, "result": result}
 
 
 class TaskListModule:

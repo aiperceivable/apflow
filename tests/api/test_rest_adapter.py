@@ -33,6 +33,26 @@ class EchoModule:
         return {"echo": inputs.get("message", "")}
 
 
+class StreamingEcho:
+    """A streaming module that emits one chunk per step."""
+
+    description = "Emit n incremental chunks"
+    input_schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
+    output_schema = {"type": "object"}
+
+    def __init__(self) -> None:
+        self.annotations = ModuleAnnotations(streaming=True)
+
+    async def execute(
+        self, inputs: dict[str, Any], context: Optional[Any] = None
+    ) -> dict[str, Any]:
+        return {"chunks": inputs.get("n", 3)}
+
+    async def stream(self, inputs: dict[str, Any], context: Any) -> Any:
+        for i in range(inputs.get("n", 3)):
+            yield {"chunk": i}
+
+
 @pytest.fixture
 def client() -> TestClient:
     registry = Registry()
@@ -97,3 +117,41 @@ def test_build_openapi_directly() -> None:
     spec = build_openapi(registry, title="t", version="1.0", description="d")
     assert "/modules/echo" in spec["paths"]
     assert spec["info"] == {"title": "t", "version": "1.0", "description": "d"}
+
+
+def test_execute_via_sse_falls_back_for_non_streaming_module(client: TestClient) -> None:
+    resp = client.post(
+        "/modules/echo",
+        json={"message": "hi"},
+        headers={"accept": "text/event-stream"},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    # Non-streaming modules emit a single data frame (the call_async result).
+    assert '"echo"' in resp.text and '"hi"' in resp.text
+    assert "event: done" in resp.text
+
+
+def test_execute_via_sse_streams_each_chunk() -> None:
+    registry = Registry()
+    registry.register("stream_echo", StreamingEcho())
+    client = TestClient(build_rest_app(registry))
+    resp = client.post(
+        "/modules/stream_echo",
+        json={"n": 3},
+        headers={"accept": "text/event-stream"},
+    )
+    assert resp.status_code == 200
+    assert resp.text.count("data:") >= 3
+    assert '"chunk": 0' in resp.text and '"chunk": 2' in resp.text
+    assert "event: done" in resp.text
+
+
+def test_sse_unknown_module_returns_404(client: TestClient) -> None:
+    resp = client.post(
+        "/modules/nope",
+        json={},
+        headers={"accept": "text/event-stream"},
+    )
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "MODULE_NOT_FOUND"
