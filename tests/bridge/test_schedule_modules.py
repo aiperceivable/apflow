@@ -13,6 +13,10 @@ from apflow.bridge.schedule_modules import (
     ScheduleSetModule,
 )
 
+# ScheduleSetModule validates the schedule via ScheduleCalculator before writing;
+# patch it so tests don't depend on real cron/interval parsing.
+_CALC = "apflow.core.storage.sqlalchemy.schedule_calculator.ScheduleCalculator.calculate_next_run"
+
 
 def _task(**overrides: Any) -> SimpleNamespace:
     base = {
@@ -31,15 +35,17 @@ def _task(**overrides: Any) -> SimpleNamespace:
 @pytest.mark.asyncio
 async def test_schedule_set_updates_then_initializes() -> None:
     repo = AsyncMock()
+    repo.get_task_by_id.return_value = _task()
     repo.initialize_schedule.return_value = _task()
-    out = await ScheduleSetModule(repo).execute(
-        {
-            "task_id": "t1",
-            "schedule_type": "cron",
-            "schedule_expression": "0 9 * * *",
-            "max_runs": "5",
-        }
-    )
+    with patch(_CALC, return_value=None):
+        out = await ScheduleSetModule(repo).execute(
+            {
+                "task_id": "t1",
+                "schedule_type": "cron",
+                "schedule_expression": "0 9 * * *",
+                "max_runs": "5",
+            }
+        )
     kwargs = repo.update_task.await_args.kwargs
     assert kwargs["task_id"] == "t1"
     assert kwargs["schedule_type"] == "cron"
@@ -56,13 +62,29 @@ async def test_schedule_set_requires_type_and_expression() -> None:
 
 
 @pytest.mark.asyncio
+async def test_schedule_set_invalid_schedule_rejected_without_write() -> None:
+    # An invalid schedule must surface a ValueError AND leave the task untouched
+    # (no partial write) — not a misleading "task not found".
+    repo = AsyncMock()
+    with patch(_CALC, side_effect=ValueError("Unknown schedule type: bogus")):
+        with pytest.raises(ValueError, match="Invalid schedule"):
+            await ScheduleSetModule(repo).execute(
+                {"task_id": "t1", "schedule_type": "bogus", "schedule_expression": "x"}
+            )
+    repo.update_task.assert_not_awaited()
+    repo.initialize_schedule.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_schedule_set_missing_task_raises_keyerror() -> None:
     repo = AsyncMock()
-    repo.initialize_schedule.return_value = None
-    with pytest.raises(KeyError):
-        await ScheduleSetModule(repo).execute(
-            {"task_id": "x", "schedule_type": "cron", "schedule_expression": "* * * * *"}
-        )
+    repo.get_task_by_id.return_value = None  # task does not exist
+    with patch(_CALC, return_value=None):
+        with pytest.raises(KeyError):
+            await ScheduleSetModule(repo).execute(
+                {"task_id": "x", "schedule_type": "cron", "schedule_expression": "* * * * *"}
+            )
+    repo.update_task.assert_not_awaited()  # no write for a missing task
 
 
 @pytest.mark.asyncio
@@ -78,6 +100,7 @@ async def test_schedule_due_lists_and_clamps_limit() -> None:
 @pytest.mark.asyncio
 async def test_schedule_complete_coerces_and_calls_repo() -> None:
     repo = AsyncMock()
+    repo.get_task_by_id.return_value = _task()
     repo.complete_scheduled_run.return_value = _task()
     out = await ScheduleCompleteModule(repo).execute(
         {"task_id": "t1", "success": False, "error": "boom"}
@@ -87,6 +110,26 @@ async def test_schedule_complete_coerces_and_calls_repo() -> None:
     assert kwargs["success"] is False
     assert kwargs["error"] == "boom"
     assert out["id"] == "t1"
+
+
+@pytest.mark.asyncio
+async def test_schedule_complete_missing_task_raises_keyerror() -> None:
+    repo = AsyncMock()
+    repo.get_task_by_id.return_value = None
+    with pytest.raises(KeyError):
+        await ScheduleCompleteModule(repo).execute({"task_id": "x"})
+    repo.complete_scheduled_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_schedule_complete_existing_task_op_failure_is_not_keyerror() -> None:
+    # An existing task whose completion fails (e.g. corrupt stored schedule) must NOT
+    # be reported as "not found" (KeyError → REST 404).
+    repo = AsyncMock()
+    repo.get_task_by_id.return_value = _task()
+    repo.complete_scheduled_run.return_value = None  # op failed for an existing task
+    with pytest.raises(RuntimeError):
+        await ScheduleCompleteModule(repo).execute({"task_id": "t1"})
 
 
 @pytest.mark.asyncio

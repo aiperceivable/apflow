@@ -60,11 +60,27 @@ class ScheduleSetModule:
         self.output_schema = _make_schema({"type": "object"})
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        from apflow.core.storage.sqlalchemy.schedule_calculator import ScheduleCalculator
+
         task_id = inputs.get("task_id", "")
         schedule_type = inputs.get("schedule_type", "")
         schedule_expression = inputs.get("schedule_expression", "")
         if not task_id or not schedule_type or not schedule_expression:
             raise ValueError("task_id, schedule_type and schedule_expression are required")
+
+        # Validate the schedule BEFORE persisting, so an invalid type/expression never
+        # leaves a half-applied schedule on the task and surfaces a clear error rather
+        # than a misleading "task not found" (initialize_schedule swallows the calc
+        # failure into None, which would otherwise be read as a missing task below).
+        try:
+            ScheduleCalculator.calculate_next_run(schedule_type, schedule_expression)
+        except ValueError as exc:
+            raise ValueError(f"Invalid schedule: {exc}") from exc
+
+        # Confirm the task exists before mutating: a genuine miss raises KeyError here,
+        # so a later None from initialize_schedule can only mean a real lookup miss.
+        if await self._repo.get_task_by_id(task_id) is None:
+            raise KeyError(f"Task '{task_id}' not found")
 
         fields: dict[str, Any] = {
             "schedule_type": schedule_type,
@@ -154,6 +170,14 @@ class ScheduleCompleteModule:
         task_id = inputs.get("task_id", "")
         if not task_id:
             raise ValueError("task_id must be non-empty")
+
+        # complete_scheduled_run returns None for BOTH a missing task and a swallowed
+        # failure (e.g. a corrupt stored schedule). Check existence first so an existing
+        # task is never misreported as "not found"; a None after that is an operation
+        # failure, surfaced distinctly rather than as a 404.
+        if await self._repo.get_task_by_id(task_id) is None:
+            raise KeyError(f"Task '{task_id}' not found")
+
         task = await self._repo.complete_scheduled_run(
             task_id=task_id,
             success=bool(inputs.get("success", True)),
@@ -161,7 +185,10 @@ class ScheduleCompleteModule:
             calculate_next_run=bool(inputs.get("calculate_next_run", True)),
         )
         if task is None:
-            raise KeyError(f"Task '{task_id}' not found")
+            raise RuntimeError(
+                f"Failed to complete scheduled run for task '{task_id}' "
+                "(check the task's schedule configuration)"
+            )
         return task.to_dict()
 
 
