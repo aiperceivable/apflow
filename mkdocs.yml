@@ -66,6 +66,7 @@ nav:
     - Durable Execution: features/durable-execution.md
     - Cost Governance: features/cost-governance.md
     - TaskCreator Relaxation: features/task-creator-relaxation.md
+    - REST / HTTP API: features/rest-api.md
 
 # Plugins
 plugins:

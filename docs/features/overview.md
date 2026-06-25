@@ -17,6 +17,7 @@
 | F-003 | Durable Execution | `durable-execution.md` | P0 | Phase 2 |
 | F-004 | Cost Governance | `cost-governance.md` | P0 | Phase 3 |
 | F-005 | TaskCreator Relaxation | `task-creator-relaxation.md` | P0 | Phase 1 |
+| F-012 | REST / HTTP API | `rest-api.md` | P1 | Phase 4 |
 
 ## Dependency Graph
 

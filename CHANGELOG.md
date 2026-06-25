@@ -1,6 +1,52 @@
 # Changelog
 
 
+## [0.22.0] - 2026-06-25
+
+### Added
+
+- **REST/HTTP API adapter (`apflow rest`)** — a registry-driven REST face over the apcore
+  Registry, the missing sibling of `apcore-mcp` / `apcore-a2a`. Built on Starlette (no
+  FastAPI dependency); OpenAPI 3.1 + Swagger UI are generated from each module's JSON
+  Schema, so the service is self-documenting.
+  - `apflow rest` starts the server (default `:8080`)
+  - `GET /modules` lists module descriptors; `GET /modules/{id}` returns one descriptor
+  - `POST /modules/{id}` executes a module with a JSON-object body
+  - `GET /openapi.json`, `GET /docs` (Swagger UI), `GET /healthz`, `GET /`
+  - One registration → reachable over REST, MCP, A2A, and CLI simultaneously
+
+- **Unified server (`apflow serve --all`)** — REST + A2A + MCP on a single port/process:
+  `/` REST (+ `/docs`), `/a2a` A2A agent, `/mcp` MCP streamable-http. uvicorn runs inside
+  the apcore-mcp async context so the MCP transport lifetime spans the server.
+
+- **SSE streaming for module execution** — `POST /modules/{id}` with
+  `Accept: text/event-stream` streams execution events (one `data:` frame per chunk for
+  streaming modules, a single-frame fallback otherwise; terminal `event: done`, errors as
+  `event: error`).
+
+- **`task.execute` is now a streaming module** — `stream()` relays the engine's progress
+  events (`task_start` / `progress` / `task_completed` / `final`) as they occur, then a
+  terminal `result` event, so REST/MCP/A2A clients can show live execution progress.
+
+- **Scheduling modules (`schedule.*`)** — expose the task-scheduling lifecycle as apcore
+  modules (CLI/REST/MCP/A2A): `schedule.set` (configure a schedule + compute next run),
+  `schedule.due` (list runs whose time has arrived), `schedule.complete` (record a run +
+  advance), `schedule.export_ical` (iCalendar feed). Complements the existing
+  `task.scheduled` list.
+
+### Fixed
+
+- **`task.execute` called a non-existent `TaskManager.execute_task`** — it now drives
+  execution through the real `TaskExecutor.execute_task_by_id` entry point.
+- **`schedule.set` / `schedule.complete` conflated "task missing" with "operation failed"**
+  — an invalid schedule was persisted and then reported as `KeyError('not found')` for an
+  existing task. The schedule is now validated before the write (no partial write) and task
+  existence is checked, so an operation failure is surfaced distinctly from a missing task.
+- **`task.execute` streaming dropped late progress events and leaked on disconnect** — the
+  SSE drain now tolerates the engine's fire-and-forget event puts, and the background
+  execution is cancelled when the streaming client disconnects.
+
+
 ## [0.21.0] - 2026-06-25
 
 ### Added
