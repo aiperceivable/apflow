@@ -4,16 +4,21 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock
 
 from apflow.bridge.task_modules import (
+    TaskArchiveModule,
     TaskCancelModule,
+    TaskChildrenModule,
+    TaskCloneMixedModule,
     TaskCopyModule,
     TaskCreateModule,
     TaskCreateTreeModule,
     TaskDeleteModule,
     TaskExecuteModule,
     TaskGetModule,
+    TaskLinkModule,
     TaskListModule,
     TaskRunningListModule,
     TaskScheduledListModule,
+    TaskTreeModule,
     TaskUpdateModule,
 )
 
@@ -302,3 +307,116 @@ class TestTaskScheduledListModule:
 
         repo.get_scheduled_tasks.assert_called_once_with(enabled_only=True, user_id="u1", limit=5)
         repo.query_tasks.assert_not_called()
+
+
+class TestModuleAnnotations:
+    """All task modules must carry correct apcore ModuleAnnotations."""
+
+    def test_readonly_modules(self):
+        for ModuleCls, dep in [
+            (TaskListModule, (_mock_repo(),)),
+            (TaskGetModule, (_mock_repo(),)),
+            (TaskTreeModule, (_mock_repo(),)),
+            (TaskChildrenModule, (_mock_repo(),)),
+            (TaskRunningListModule, (_mock_repo(),)),
+            (TaskScheduledListModule, (_mock_repo(),)),
+        ]:
+            m = ModuleCls(*dep)
+            assert m.annotations.readonly is True, f"{ModuleCls.__name__} should be readonly"
+            assert m.annotations.idempotent is True, f"{ModuleCls.__name__} should be idempotent"
+            assert (
+                m.annotations.destructive is False
+            ), f"{ModuleCls.__name__} should not be destructive"
+
+    def test_destructive_requires_approval_modules(self):
+        for ModuleCls, dep in [
+            (TaskExecuteModule, (MagicMock(),)),
+            (TaskDeleteModule, (_mock_repo(),)),
+            (TaskCancelModule, (MagicMock(),)),
+        ]:
+            m = ModuleCls(*dep)
+            assert m.annotations.destructive is True, f"{ModuleCls.__name__} should be destructive"
+            assert (
+                m.annotations.requires_approval is True
+            ), f"{ModuleCls.__name__} should require approval"
+            assert m.annotations.readonly is False, f"{ModuleCls.__name__} should not be readonly"
+
+    def test_idempotent_modules(self):
+        for ModuleCls, dep in [
+            (TaskLinkModule, (_mock_repo(), MagicMock())),
+            (TaskArchiveModule, (_mock_repo(), MagicMock())),
+        ]:
+            m = ModuleCls(*dep)
+            assert m.annotations.idempotent is True, f"{ModuleCls.__name__} should be idempotent"
+
+    def test_non_destructive_mutating_modules(self):
+        for ModuleCls, dep in [
+            (TaskCreateModule, (MagicMock(), _mock_repo())),
+            (TaskCopyModule, (MagicMock(), _mock_repo())),
+            (TaskCloneMixedModule, (MagicMock(), _mock_repo())),
+            (TaskUpdateModule, (_mock_repo(),)),
+        ]:
+            m = ModuleCls(*dep)
+            assert (
+                m.annotations.destructive is False
+            ), f"{ModuleCls.__name__} should not be destructive"
+            assert m.annotations.readonly is False, f"{ModuleCls.__name__} should not be readonly"
+
+
+class TestPreviewMethods:
+    """Destructive modules expose preview() for the __apcore_module_preview meta-tool."""
+
+    @pytest.mark.asyncio
+    async def test_execute_preview_with_task_id(self):
+        m = TaskExecuteModule(MagicMock())
+        result = await m.preview({"task_id": "t-99"})
+        assert len(result.changes) == 1
+        assert result.changes[0].action == "execute"
+        assert "t-99" in result.changes[0].target
+        assert "t-99" in result.changes[0].summary
+
+    @pytest.mark.asyncio
+    async def test_execute_preview_without_task_id(self):
+        m = TaskExecuteModule(MagicMock())
+        result = await m.preview({})
+        assert len(result.changes) == 1
+        assert "not provided" in result.changes[0].summary
+
+    @pytest.mark.asyncio
+    async def test_delete_preview_with_task_id(self):
+        m = TaskDeleteModule(_mock_repo())
+        result = await m.preview({"task_id": "t-42"})
+        assert len(result.changes) == 1
+        assert result.changes[0].action == "delete"
+        assert "t-42" in result.changes[0].target
+        assert "Permanently delete" in result.changes[0].summary
+
+    @pytest.mark.asyncio
+    async def test_delete_preview_without_task_id(self):
+        m = TaskDeleteModule(_mock_repo())
+        result = await m.preview({})
+        assert len(result.changes) == 1
+        assert "not provided" in result.changes[0].summary
+
+    @pytest.mark.asyncio
+    async def test_cancel_preview_multiple_ids(self):
+        m = TaskCancelModule(MagicMock())
+        result = await m.preview({"task_ids": ["t-1", "t-2", "t-3"]})
+        assert len(result.changes) == 3
+        targets = {c.target for c in result.changes}
+        assert "task:t-1" in targets
+        assert "task:t-3" in targets
+        for c in result.changes:
+            assert c.action == "cancel"
+
+    @pytest.mark.asyncio
+    async def test_cancel_preview_empty_ids(self):
+        m = TaskCancelModule(MagicMock())
+        result = await m.preview({})
+        assert result.changes == []
+
+    @pytest.mark.asyncio
+    async def test_cancel_preview_none_ids(self):
+        m = TaskCancelModule(MagicMock())
+        result = await m.preview({"task_ids": None})
+        assert result.changes == []

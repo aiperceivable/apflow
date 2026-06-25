@@ -76,3 +76,26 @@ class TestAdapterExecution:
         adapter = _make_adapter()
         result = await adapter.execute({})
         assert result == {"result": "processed "}
+
+
+class TestAdapterPreview:
+    @pytest.mark.asyncio
+    async def test_preview_returns_previewresult(self):
+        adapter = _make_adapter()
+        result = await adapter.preview({"query": "test"})
+        assert len(result.changes) == 1
+        assert result.changes[0].action == "execute"
+        assert "mock_executor" in result.changes[0].target
+
+    @pytest.mark.asyncio
+    async def test_preview_includes_executor_name(self):
+        adapter = _make_adapter(executor_name="My Executor", executor_id="my_exec")
+        result = await adapter.preview({})
+        assert "My Executor" in result.changes[0].summary
+
+    @pytest.mark.asyncio
+    async def test_preview_with_context_ignored(self):
+        adapter = _make_adapter()
+        result_no_ctx = await adapter.preview({"x": 1})
+        result_with_ctx = await adapter.preview({"x": 1}, context=object())
+        assert result_no_ctx.changes[0].action == result_with_ctx.changes[0].action

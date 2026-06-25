@@ -11,6 +11,8 @@ use await to call the repository correctly.
 import copy
 from typing import Any
 
+from apcore import Change, ModuleAnnotations, PreviewResult
+
 
 def _make_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Return a deep copy to prevent class-level mutation by apcore."""
@@ -134,6 +136,7 @@ class TaskCreateModule:
     """Create a new task in the apflow task engine."""
 
     description = "Create a new task in the apflow task engine."
+    annotations = ModuleAnnotations()
 
     def __init__(self, task_creator: Any, task_repository: Any) -> None:
         self._creator = task_creator
@@ -177,6 +180,7 @@ class TaskExecuteModule:
     """Execute an existing task in the apflow task engine."""
 
     description = "Execute an existing task in the apflow task engine."
+    annotations = ModuleAnnotations(destructive=True, requires_approval=True)
 
     def __init__(self, task_manager: Any) -> None:
         self._manager = task_manager
@@ -193,6 +197,13 @@ class TaskExecuteModule:
             }
         )
 
+    async def preview(self, inputs: dict[str, Any], context: Any = None) -> PreviewResult:
+        task_id = inputs.get("task_id", "")
+        summary = f"Execute task '{task_id}'" if task_id else "Execute task (task_id not provided)"
+        return PreviewResult(
+            changes=[Change(action="execute", target=f"task:{task_id}", summary=summary)]
+        )
+
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         task_id = inputs.get("task_id", "")
         if not task_id:
@@ -206,6 +217,7 @@ class TaskListModule:
     """List tasks from the apflow task engine with optional filtering."""
 
     description = "List tasks from the apflow task engine with optional filtering."
+    annotations = ModuleAnnotations(readonly=True, idempotent=True, paginated=True)
 
     def __init__(self, task_repository: Any) -> None:
         self._repo = task_repository
@@ -250,6 +262,7 @@ class TaskGetModule:
     """Get detailed information about a specific task."""
 
     description = "Get detailed information about a specific task."
+    annotations = ModuleAnnotations(readonly=True, idempotent=True)
 
     def __init__(self, task_repository: Any) -> None:
         self._repo = task_repository
@@ -272,6 +285,7 @@ class TaskDeleteModule:
     """Delete a task from the apflow task engine."""
 
     description = "Delete a task from the apflow task engine."
+    annotations = ModuleAnnotations(destructive=True, requires_approval=True)
 
     def __init__(self, task_repository: Any) -> None:
         self._repo = task_repository
@@ -284,6 +298,17 @@ class TaskDeleteModule:
                     "deleted": {"type": "boolean"},
                 },
             }
+        )
+
+    async def preview(self, inputs: dict[str, Any], context: Any = None) -> PreviewResult:
+        task_id = inputs.get("task_id", "")
+        summary = (
+            f"Permanently delete task '{task_id}'"
+            if task_id
+            else "Permanently delete task (task_id not provided)"
+        )
+        return PreviewResult(
+            changes=[Change(action="delete", target=f"task:{task_id}", summary=summary)]
         )
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
@@ -369,6 +394,7 @@ class TaskCreateTreeModule:
         "Use parent_id for tree structure and dependencies for execution ordering. "
         "Tasks without parent_id are root tasks. Multiple roots are allowed."
     )
+    annotations = ModuleAnnotations()
 
     def __init__(self, task_creator: Any, task_repository: Any) -> None:
         self._creator = task_creator
@@ -452,6 +478,7 @@ class TaskLinkModule:
         "The linked tasks point to the originals without duplicating data. "
         "Requires the source task tree to be fully completed."
     )
+    annotations = ModuleAnnotations(idempotent=True)
 
     def __init__(self, task_creator: Any, task_repository: Any) -> None:
         self._creator = task_creator
@@ -491,6 +518,7 @@ class TaskCopyModule:
         "automatically remapped. Override any field (inputs, priority, etc.) "
         "to create a variant. Use this to re-run a workflow with different parameters."
     )
+    annotations = ModuleAnnotations()
 
     def __init__(self, task_creator: Any, task_repository: Any) -> None:
         self._creator = task_creator
@@ -531,6 +559,7 @@ class TaskArchiveModule:
         "compliance records, and production snapshots. "
         "Requires the source task tree to be fully completed."
     )
+    annotations = ModuleAnnotations(idempotent=True)
 
     def __init__(self, task_creator: Any, task_repository: Any) -> None:
         self._creator = task_creator
@@ -568,6 +597,7 @@ class TaskCloneMixedModule:
         "others are linked (read-only reference). Specify link_task_ids to choose which "
         "tasks to link; all others are copied. Use this to re-run only changed steps."
     )
+    annotations = ModuleAnnotations()
 
     def __init__(self, task_creator: Any, task_repository: Any) -> None:
         self._creator = task_creator
@@ -624,6 +654,7 @@ class TaskUpdateModule:
     # schema-validated by default (apcore-mcp validate_inputs=False), so the
     # writable surface must be enforced here rather than splatting arbitrary keys
     # into update_task() (which would let an agent set e.g. user_id). (Review W1)
+    annotations = ModuleAnnotations()
     _UPDATABLE_FIELDS = (
         "name",
         "status",
@@ -692,6 +723,7 @@ class TaskCancelModule:
         "Cancel running tasks by ID. Returns cancellation status for each task. "
         "Supports partial results and token usage from cancelled executors."
     )
+    annotations = ModuleAnnotations(destructive=True, requires_approval=True)
 
     def __init__(self, task_manager: Any) -> None:
         self._manager = task_manager
@@ -722,6 +754,18 @@ class TaskCancelModule:
             }
         )
 
+    async def preview(self, inputs: dict[str, Any], context: Any = None) -> PreviewResult:
+        task_ids = inputs.get("task_ids") or []
+        changes = [
+            Change(
+                action="cancel",
+                target=f"task:{tid}",
+                summary=f"Cancel running task '{tid}'",
+            )
+            for tid in task_ids
+        ]
+        return PreviewResult(changes=changes)
+
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         task_ids = inputs.get("task_ids", [])
         if not isinstance(task_ids, list):
@@ -748,6 +792,7 @@ class TaskTreeModule:
         "Get the complete task tree starting from a root task, including all children "
         "and their statuses. Returns nested tree structure."
     )
+    annotations = ModuleAnnotations(readonly=True, idempotent=True)
 
     def __init__(self, task_repository: Any) -> None:
         self._repo = task_repository
@@ -771,6 +816,7 @@ class TaskChildrenModule:
     """Get direct children of a task."""
 
     description = "Get the direct children of a task by parent ID."
+    annotations = ModuleAnnotations(readonly=True, idempotent=True)
 
     def __init__(self, task_repository: Any) -> None:
         self._repo = task_repository
@@ -800,6 +846,7 @@ class TaskRunningListModule:
     """List currently running tasks."""
 
     description = "List all tasks currently in 'in_progress' status."
+    annotations = ModuleAnnotations(readonly=True, idempotent=True, paginated=True)
 
     def __init__(self, task_repository: Any) -> None:
         self._repo = task_repository
@@ -835,6 +882,7 @@ class TaskScheduledListModule:
     """List scheduled tasks."""
 
     description = "List tasks that have scheduling configured (cron, interval, etc.)."
+    annotations = ModuleAnnotations(readonly=True, idempotent=True, paginated=True)
 
     def __init__(self, task_repository: Any) -> None:
         self._repo = task_repository

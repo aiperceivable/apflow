@@ -138,6 +138,18 @@ def serve(
     is_flag=True,
     help="Enable observability (metrics + usage endpoints under /api/usage)",
 )
+@click.option(
+    "--approval",
+    is_flag=True,
+    help=(
+        "Enable async human-approval workflow (Phase B). "
+        "Registers the __apcore_approval_check meta-tool so AI agents can poll "
+        "for out-of-band approvals without blocking the MCP connection. "
+        "Uses InMemoryApprovalStore — suitable for local dev only. "
+        "Production deployments should wire a persistent ApprovalStore via "
+        "APCoreMCP(approval_store=...) directly."
+    ),
+)
 @click.option("--db", default=None, help="Database connection string")
 @click.option("--log-level", default=None, help="Log level")
 def mcp(
@@ -146,6 +158,7 @@ def mcp(
     port: int,
     explorer: bool,
     metrics: bool,
+    approval: bool,
     db: Optional[str],
     log_level: Optional[str],
 ) -> None:
@@ -159,11 +172,13 @@ def mcp(
         click.echo(f"Tools: {len(list(app.registry.list()))}")
         if explorer:
             click.echo(f"Explorer: http://{host}:{port}/explorer")
+        if approval:
+            click.echo("Approval: enabled (InMemoryApprovalStore — dev only)")
     else:
         # stdio mode — no console output (would corrupt protocol)
         pass
 
-    from apcore_mcp import serve as mcp_serve
+    from apcore_mcp import InMemoryApprovalStore, serve as mcp_serve
 
     mcp_serve(
         app.registry,
@@ -174,6 +189,7 @@ def mcp(
         explorer=explorer,
         observability=metrics,
         log_level=log_level,
+        approval_store=InMemoryApprovalStore() if approval else None,
     )
 
 

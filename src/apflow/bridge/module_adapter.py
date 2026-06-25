@@ -7,7 +7,7 @@ description, and execute() is a valid module.
 
 from typing import Any, Dict
 
-from apcore import ModuleAnnotations
+from apcore import Change, ModuleAnnotations, PreviewResult
 
 from apflow.logger import get_logger
 
@@ -56,6 +56,18 @@ class ExecutableTaskModuleAdapter:
             "dependencies": dependencies or [],
             "always_available": always_available,
         }
+
+    async def preview(self, inputs: Dict[str, Any], context: Any = None) -> PreviewResult:
+        """Return a prediction of what this executor would change if called."""
+        return PreviewResult(
+            changes=[
+                Change(
+                    action="execute",
+                    target=f"executor:{self._executor_id}",
+                    summary=f"Run executor '{self._executor_name}' with the provided inputs",
+                )
+            ]
+        )
 
     async def execute(self, inputs: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
         """Instantiate the executor and delegate to its execute() method."""
