@@ -1,5 +1,8 @@
 """Tests for the unified REST+A2A+MCP mount assembly (apflow.api.combined)."""
 
+from unittest.mock import patch
+
+import pytest
 from apcore.registry.registry import Registry
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -7,7 +10,7 @@ from starlette.responses import PlainTextResponse, Response
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from apflow.api.combined import assemble_combined
+from apflow.api.combined import _serve_all_async, assemble_combined
 from apflow.api.rest import build_rest_app
 
 
@@ -46,3 +49,56 @@ def test_rest_404_envelope_preserved() -> None:
     resp = _combined().post("/modules/nope", json={})
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "MODULE_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_serve_all_async_assembles_and_runs() -> None:
+    """_serve_all_async builds REST, awaits the A2A app, enters the MCP context,
+    assembles them, and runs uvicorn — verified with the apcore/uvicorn layers mocked."""
+    a2a_stub = Starlette()
+    mcp_stub = Starlette()
+    served: dict = {}
+
+    async def fake_a2a_serve(registry: object, **_kw: object) -> Starlette:
+        return a2a_stub
+
+    class _FakeMcpCtx:
+        async def __aenter__(self) -> Starlette:
+            return mcp_stub
+
+        async def __aexit__(self, *_exc: object) -> bool:
+            return False
+
+    def fake_mcp_serve(registry: object, **_kw: object) -> _FakeMcpCtx:
+        return _FakeMcpCtx()
+
+    class _FakeServer:
+        def __init__(self, config: object) -> None:
+            served["config"] = config
+
+        async def serve(self) -> None:
+            served["served"] = True
+
+    with (
+        patch("apcore_a2a.async_serve", fake_a2a_serve),
+        patch("apcore_mcp.async_serve", fake_mcp_serve),
+        patch("uvicorn.Server", _FakeServer),
+    ):
+        await _serve_all_async(
+            Registry(),
+            host="127.0.0.1",
+            port=9999,
+            title="apflow",
+            version="1.0",
+            description="d",
+            cors_origins=None,
+            log_level=None,
+            explorer=False,
+            metrics=False,
+        )
+
+    assert served.get("served") is True
+    combined = served["config"].app  # the uvicorn.Config built around the combined app
+    paths = [getattr(r, "path", None) for r in combined.routes]
+    assert "/a2a" in paths  # A2A mounted under /a2a
+    assert "/healthz" in paths  # REST routes lifted to root
