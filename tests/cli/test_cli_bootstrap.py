@@ -135,3 +135,41 @@ def test_rest_webhook_with_secret_under_auth_is_allowed(monkeypatch) -> None:
 
 class _FakeApp:
     registry = SimpleNamespace(count=0)
+
+
+def test_task_group_registered_at_top_level() -> None:
+    """apflow task <subcmd> must be reachable without going through `apflow apflow`."""
+    from apflow.cli import _build_cli
+
+    cli = _build_cli()
+    assert "task" in cli.commands, "task group missing from top-level CLI"
+    task_grp = cli.commands["task"]
+    assert "create" in task_grp.commands
+    assert "list" in task_grp.commands
+    assert "get" in task_grp.commands
+
+
+def test_schedule_group_registered_at_top_level() -> None:
+    """apflow schedule <subcmd> must be reachable without going through `apflow apflow`."""
+    from apflow.cli import _build_cli
+
+    cli = _build_cli()
+    assert "schedule" in cli.commands, "schedule group missing from top-level CLI"
+    sched_grp = cli.commands["schedule"]
+    assert "set" in sched_grp.commands
+    assert "due" in sched_grp.commands
+    assert "trigger" in sched_grp.commands
+
+
+def test_apflow_module_group_hidden_from_top_level_help() -> None:
+    """The 'apflow' module group must not appear in top-level help once task/schedule are promoted."""
+    from click.testing import CliRunner
+
+    from apflow.cli import _build_cli
+
+    cli = _build_cli()
+    result = CliRunner().invoke(cli, ["--help"])
+    assert "Groups:" not in result.output, "Groups section should be hidden after task/schedule promotion"
+    # But the group must still be reachable for backward compat
+    apflow_grp = cli.get_command(None, "apflow")
+    assert apflow_grp is not None, "apflow module group must remain accessible via get_command"

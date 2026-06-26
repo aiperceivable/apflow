@@ -56,6 +56,40 @@ def _require_webhook_secret(webhook: bool, auth: bool, webhook_secret: Optional[
         )
 
 
+def _build_module_subgroups(module_group: Any) -> list[click.Group]:
+    """Extract task.* and schedule.* module commands into top-level Click groups.
+
+    Transforms flat dot-namespaced names (task.create, schedule.set) into
+    proper subgroups so users invoke `apflow task create` instead of
+    `apflow apflow task.create`.
+
+    Works with apcore-cli's _LazyGroup, which exposes commands via
+    list_commands()/get_command() rather than a pre-populated .commands dict.
+    """
+    group_meta: dict[str, str] = {
+        "task": "Task management (create, list, get, update, clone, link, etc.).",
+        "schedule": "Schedule management (set, due, trigger, complete, etc.).",
+    }
+    groups: dict[str, click.Group] = {
+        name: click.Group(name, help=help_text) for name, help_text in group_meta.items()
+    }
+
+    names: list[str] = (
+        module_group.list_commands(None) if hasattr(module_group, "list_commands") else []
+    )
+    for cmd_name in names:
+        if "." not in cmd_name:
+            continue
+        prefix, subname = cmd_name.split(".", 1)
+        if prefix not in groups:
+            continue
+        cmd = module_group.get_command(None, cmd_name)
+        if cmd is not None:
+            groups[prefix].add_command(cmd, name=subname)
+
+    return [g for g in groups.values() if g.commands]
+
+
 def _build_cli() -> click.Group:
     """Build the apflow CLI by extending apcore-cli with apflow-specific commands."""
     from apflow.app import create_app
@@ -83,6 +117,20 @@ def _build_cli() -> click.Group:
     cli.add_command(info)
     cli.add_command(worker)
     cli.add_command(scheduler)
+
+    # Promote task.* and schedule.* into top-level groups (apflow task create, etc.)
+    # apcore-cli returns a _LazyGroup (not a plain click.Group), so we resolve it
+    # via get_command() rather than accessing .commands directly.
+    # get_command() also triggers _build_group_map() and caches the lazy group in
+    # _group_cache["apflow"], so we can safely remove "apflow" from _group_map
+    # to suppress the "Groups: apflow (25 commands)" line in --help output.
+    # The group remains fully accessible as `apflow apflow <cmd>` via the cache.
+    module_grp = cli.get_command(None, "apflow")
+    if module_grp is not None:
+        for grp in _build_module_subgroups(module_grp):
+            cli.add_command(grp)
+        if hasattr(cli, "_group_map"):
+            cli._group_map.pop("apflow", None)
 
     return cli
 
