@@ -95,7 +95,8 @@ apflow.task.copy          — Clone with modifications
 apflow.task.link          — Reference completed workflow
 apflow.task.cancel        — Cancel running tasks
 apflow.task.tree          — View full tree structure
-... and 13 more tools
+apflow.schedule.set       — Configure a task's schedule
+... and 14 more tools
 ```
 
 Start MCP server: `apflow mcp` — Claude/Cursor will discover these tools automatically.

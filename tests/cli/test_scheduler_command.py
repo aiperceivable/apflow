@@ -18,7 +18,7 @@ def test_scheduler_maps_options_to_config(monkeypatch) -> None:
     """CLI options are forwarded to SchedulerConfig and run_scheduler is invoked."""
     captured: dict = {}
 
-    async def fake_run_scheduler(config, verbose: bool = False) -> None:
+    async def fake_run_scheduler(config: object, verbose: bool = False) -> None:
         captured["config"] = config
         captured["verbose"] = verbose
 
@@ -40,7 +40,7 @@ def test_scheduler_maps_options_to_config(monkeypatch) -> None:
 def test_scheduler_db_binds_pool_before_running(monkeypatch) -> None:
     """--db initializes the global session pool so the direct-DB path uses it."""
 
-    async def fake_run_scheduler(config, verbose: bool = False) -> None:
+    async def fake_run_scheduler(config: object, verbose: bool = False) -> None:  # noqa: ARG001
         return None
 
     monkeypatch.setattr("apflow.scheduler.internal.run_scheduler", fake_run_scheduler)

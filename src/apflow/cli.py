@@ -535,9 +535,8 @@ def scheduler(
     """Run the internal scheduler: poll for due scheduled tasks and execute them.
 
     Runs in the foreground until interrupted (Ctrl+C). This is the pull-based
-    complement to the inbound ``schedule.trigger`` module (push). Set
-    APFLOW_API_SERVER_URL to route execution through a running API server;
-    otherwise the scheduler executes against the database directly.
+    complement to the inbound ``schedule.trigger`` module (push). Executes tasks
+    in-process using direct database access.
     """
     import asyncio
 

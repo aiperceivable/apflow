@@ -47,6 +47,16 @@ there must be re-exported here. Current set (16 modules):
 - Composition: `TaskLinkModule`, `TaskCopyModule`, `TaskArchiveModule`, `TaskCloneMixedModule`
 - Queries: `TaskRunningListModule`, `TaskScheduledListModule`
 
+**`src/apflow/bridge/schedule_modules.py`**
+
+Contains the 5 scheduling lifecycle modules (total registered = 21):
+
+- `ScheduleSetModule` → `schedule.set` — configure a task's schedule and compute its next run
+- `ScheduleDueModule` → `schedule.due` — list scheduled tasks whose next run has arrived
+- `ScheduleTriggerModule` → `schedule.trigger` — trigger a scheduled task immediately
+- `ScheduleCompleteModule` → `schedule.complete` — record a run as complete and advance the schedule
+- `ScheduleExportICalModule` → `schedule.export_ical` — export scheduled tasks as an iCalendar feed
+
 **`src/apflow/bridge/registry_setup.py`**
 
 Contains `create_apflow_registry()` function.
@@ -263,7 +273,7 @@ def create_apflow_registry(
     1. Create APCore() client.
     2. Access client.registry (APCore provides registry directly, no create_registry() needed).
     3. Call discover_executor_modules() to get executor adapters.
-    4. For each adapter, call client.register(f"{namespace}.{adapter._executor_id}", adapter).
+    4. For each adapter, call client.register(f"{namespace}.{adapter.executor_id}", adapter).
     5. Create TaskCreateModule, TaskExecuteModule, TaskListModule, TaskGetModule, TaskDeleteModule.
     6. Register each as f"{namespace}.task.{action}".
     7. Log total module count.
@@ -351,7 +361,7 @@ def test_discover_executor_modules_returns_list():
 def test_discover_executor_modules_has_rest():
     """REST executor is discovered."""
     adapters = discover_executor_modules()
-    ids = [a._executor_id for a in adapters]
+    ids = [a.executor_id for a in adapters]
     assert "rest_executor" in ids
 
 def test_discover_handles_import_failure(monkeypatch):
@@ -451,4 +461,4 @@ async def test_registry_custom_namespace():
 4. Each module has valid JSON Schema for inputs and outputs (input_schema and output_schema are non-empty dicts with "type" key).
 5. Module registration is automatic: adding a new `@executor_register` decorated class causes it to appear in the registry without any code changes to the bridge.
 6. All built-in executor modules are registered: rest, send_email, aggregate_results, apflow_api (4 executors).
-7. All 16 task management modules are registered (see `registry_setup.py` → `task_modules` as source of truth): task.create, task.create_tree, task.execute, task.cancel, task.get, task.update, task.list, task.delete, task.tree, task.children, task.link, task.copy, task.archive, task.clone_mixed, task.running, task.scheduled.
+7. All 21 modules are registered (see `registry_setup.py` as source of truth): 16 task management modules (task.create, task.create_tree, task.execute, task.cancel, task.get, task.update, task.list, task.delete, task.tree, task.children, task.link, task.copy, task.archive, task.clone_mixed, task.running, task.scheduled) and 5 schedule modules (schedule.set, schedule.due, schedule.trigger, schedule.complete, schedule.export_ical).

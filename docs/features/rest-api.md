@@ -38,7 +38,7 @@ Design constraints:
 ### New Files
 
 **`src/apflow/api/__init__.py`** — re-exports `build_rest_app`, `serve_rest`, `build_openapi`,
-`assemble_combined`, `serve_all`.
+`assemble_combined`, `serve_all`, `build_webhook_routes`.
 
 **`src/apflow/api/rest.py`** — `build_rest_app(registry)` builds the Starlette app;
 `serve_rest(registry, …)` runs it under uvicorn; `build_openapi(registry, …)` generates the
@@ -66,7 +66,7 @@ Start with `apflow rest` (default `:8080`).
 |---|---|
 | `GET /` | Service info (name, version, module count, doc links) |
 | `GET /healthz` | Liveness probe (`{"status": "ok"}`) |
-| `GET /modules` | List every module descriptor (id, description, input/output schema, tags) |
+| `GET /modules` | List all module descriptors; response: `{"modules": [...], "count": N}` — each item has `module_id`, `description`, `input_schema`, `output_schema`, `tags` |
 | `GET /modules/{id}` | Single module descriptor |
 | `POST /modules/{id}` | Execute a module with a JSON-object body (the module `inputs`) |
 | `GET /openapi.json` | Generated OpenAPI 3.1 document |
@@ -119,7 +119,8 @@ curl -N -X POST localhost:8080/modules/task.execute \
 
 ## Unified Server (`apflow serve --all`)
 
-`apflow serve --all` mounts all three protocol surfaces on one port/process:
+`apflow serve --all` mounts all three protocol surfaces on one port/process (default `:8000`,
+which differs from the REST-only `apflow rest` default of `:8080`):
 
 | Path | Surface |
 |---|---|
@@ -175,7 +176,7 @@ Optional `api.jwt_audience` / `api.jwt_issuer` enforce the `aud` / `iss` claims.
 
 **Exempt paths.** Public metadata stays reachable without a token: `/`, `/healthz`, `/docs`,
 `/openapi.json` (and, on A2A, the agent-card discovery path). The inbound webhook is exempt
-from JWT because it carries its own HMAC auth. On `serve --all`, the `/a2a` and `/mcp` prefixes
+from JWT because it carries its own HMAC auth. On `serve --all`, the `/a2a`, `/mcp`, `/health`, `/metrics`, and `/.well-known` prefixes
 are exempt at the parent because those sub-apps authenticate themselves.
 
 ```bash
@@ -224,7 +225,8 @@ the database** (the built-in scheduler has no API/RPC mode):
     or `apflow rest --scheduler` runs the loop inside the server's event loop, so it shares the
     single SQLite writer — no second process contends for the database.
   - **Standalone process:** `apflow scheduler` (foreground) with `--poll-interval` (default
-    60s), `--max-concurrent` (default 10), `--user-id`, `--task-timeout`, `--db`, `--verbose`.
+    60s), `--max-concurrent` (default 10), `--user-id`, `--task-timeout`, `--db`, `--verbose`,
+    `--log-level`.
 - **Push (external scheduler):** cron / Kubernetes CronJob / Temporal trigger a task by URL or
   registry call — either `POST /webhook/trigger/{task_id}` (see [Inbound Webhook](#inbound-webhook))
   or the `schedule.trigger` module. Both reuse `WebhookGateway` (mark running → execute tree →
@@ -258,7 +260,9 @@ exempts the webhook path):
 
 Status mapping: a missing task → `404`; a task that ran and failed → `200` with
 `{"success": false, …}` (a valid result external schedulers read from the body, not a transport
-error). `?async=false` waits for the result instead of returning immediately.
+error). `?async=false` waits for the result instead of returning immediately. Alternatively,
+include `"async_execution": false` in the JSON body for the same per-request override (the
+query parameter takes precedence when both are supplied).
 
 ```bash
 apflow rest --webhook --webhook-secret "$SECRET"

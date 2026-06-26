@@ -76,19 +76,25 @@ Update `to_dict()` to include: `token_usage`, `token_budget`, `estimated_cost_us
                    await self.task_repository.update_task(
                        task_id=task_id, status="failed",
                        error=f"Budget exhausted: {evaluation.message}",
+                       completed_at=datetime.now(timezone.utc),
                    )
+                   if self.stream:
+                       self.streaming_callbacks.task_failed(task_id, evaluation.message)
                    return
                elif evaluation.action == PolicyAction.DOWNGRADE and evaluation.model_override:
                    # Inject model override into inputs
-                   task_inputs = task.inputs or {}
-                   task_inputs["model"] = evaluation.model_override
+                   final_inputs = final_inputs or {}
+                   final_inputs["model"] = evaluation.model_override
                elif evaluation.action == PolicyAction.NOTIFY:
                    logger.warning(f"Budget warning for task {task_id}: {evaluation.message}")
            else:
                await self.task_repository.update_task(
                    task_id=task_id, status="failed",
                    error="Token budget exhausted and no cost policy configured.",
+                   completed_at=datetime.now(timezone.utc),
                )
+               if self.stream:
+                   self.streaming_callbacks.task_failed(task_id, "Budget exhausted")
                return
    ```
 
@@ -149,7 +155,7 @@ class BudgetManager:
         Logic:
         1. Validate task_id non-empty.
         2. Get task from repository. Raise KeyError if not found.
-        3. If task.token_budget is None: return allowed=True, remaining=-1 (unlimited).
+        3. If task.token_budget is None: return allowed=True, remaining=-1, utilization=-1.0 (unlimited; -1.0 means no budget configured).
         4. Get current usage from task.token_usage.total (default 0).
         5. Create TokenBudget.
         6. Return BudgetCheckResult(allowed=not exhausted, remaining, utilization).
@@ -321,19 +327,22 @@ async def test_budget_manager_check_empty_id_raises():
 async def test_budget_manager_check_not_found_raises():
     """Non-existent task_id raises KeyError."""
 
-async def test_budget_manager_update_accumulates():
-    """Two updates accumulate: first {total: 300}, second {total: 200} -> total=500."""
+# The following are methods of TestBudgetManager class, not top-level functions:
 
-async def test_budget_manager_update_negative_raises():
-    """Negative token_usage value raises ValueError."""
-    with pytest.raises(ValueError, match=">= 0"):
-        await bm.update_usage("t1", {"input": -1, "output": 0, "total": -1})
+class TestBudgetManager:
+    async def test_update_accumulates(self):
+        """Single update accumulates: existing {input:100, output:200, total:300}
+        + new {input:50, output:50, total:100} → result.used == 400.
+        Persistence: update_task called with {input:150, output:250, total:400}.
+        """
 
-async def test_budget_manager_update_returns_budget():
-    """Returns updated TokenBudget when budget is configured."""
+    async def test_update_negative_raises(self):
+        """Negative token_usage value raises ValueError."""
+        with pytest.raises(ValueError, match=">= 0"):
+            await bm.update_usage("t1", {"input": -1, "output": 0, "total": -1})
 
-async def test_budget_manager_update_returns_none_no_budget():
-    """Returns None when no budget is configured."""
+    async def test_update_returns_none_no_budget(self):
+        """Returns None when no budget is configured."""
 ```
 
 ### Unit Tests: `tests/governance/test_policy.py`
@@ -487,32 +496,45 @@ def test_export_json_format():
 ### Integration Tests: `tests/governance/test_integration.py`
 
 ```python
-async def test_budget_enforcement_end_to_end():
-    """Task with budget=1000 executes twice. First uses 600, second is blocked.
-    Steps:
-    1. Create task with token_budget=1000.
-    2. Mock executor returns token_usage={total: 600}.
-    3. Execute. Success. Budget remaining=400.
-    4. Mock executor returns token_usage={total: 500}.
-    5. Execute. Budget check fails. Task marked failed.
-    """
+# --- Wiring: TaskExecutor builds governance components only when enabled ---
 
-async def test_downgrade_chain_end_to_end():
-    """Task with budget=1000 and downgrade policy triggers model switch.
-    Steps:
-    1. Register policy: threshold=0.7, action=DOWNGRADE, chain=["opus","sonnet","haiku"].
-    2. Create task with budget=1000, cost_policy="default".
-    3. First execution: uses 800 tokens (utilization 0.8 > 0.7).
-    4. Second execution: policy triggers downgrade. Verify model_override="sonnet" in inputs.
-    """
+def test_build_components_governance_enabled(sync_db_session):
+    """TaskExecutor._build_execution_components() includes budget_manager and
+    policy_engine when governance is enabled via set_governance_enabled(True)."""
 
-async def test_token_usage_flow():
-    """Executor result with token_usage is stored in task record.
-    Steps:
-    1. Create task.
-    2. Execute with mock executor returning {output: "data", token_usage: {input: 100, output: 200, total: 300}}.
-    3. Query task. Verify token_usage={input: 100, output: 200, total: 300}.
-    """
+def test_build_components_disabled_by_default(sync_db_session):
+    """With no config changes, components == {} (no governance or durability)."""
+
+# --- Real async BudgetManager against a real repository (not a sync mock) ---
+
+async def test_budget_check_allows_under_limit(sync_db_session):
+    """Task with token_budget=1000, token_usage={total:400}: allowed=True, remaining=600."""
+
+async def test_budget_check_blocks_when_exhausted(sync_db_session):
+    """Task with token_budget=100, token_usage={total:100}: allowed=False, remaining=0."""
+
+async def test_budget_check_unlimited_without_budget(sync_db_session):
+    """Task with no token_budget: allowed=True, remaining=-1 (unlimited)."""
+
+async def test_update_usage_accumulates_and_persists(sync_db_session):
+    """Task with existing {total:300} + update {total:100} → DB token_usage["total"] == 400."""
+
+# --- Policy evaluation drives the block/downgrade decision on exhaustion ---
+
+def test_policy_blocks_on_exhaustion():
+    """CostPolicy(action=BLOCK, threshold=0.8) with utilization=1.0 → BLOCK."""
+
+def test_policy_downgrades_to_next_model():
+    """CostPolicy(action=DOWNGRADE, chain=["opus","sonnet","haiku"]) at index=0,
+    utilization=0.85 → DOWNGRADE with model_override="sonnet"."""
+
+# --- End-to-end enforcement: a budget-exhausted task is blocked during execution ---
+
+async def test_budget_exhausted_task_blocked_end_to_end(sync_db_session):
+    """A token_budget-exhausted task run through TaskManager (with BudgetManager +
+    PolicyEngine injected directly as constructor args) is marked failed with a
+    budget error before the executor runs. Confirms the enforcement path closes
+    the gap between check_budget returning not-allowed and the task actually failing."""
 ```
 
 ---
@@ -521,11 +543,33 @@ async def test_token_usage_flow():
 
 Governance (and durability, F-003) lives in `TaskManager`, but every execution
 path runs through the singleton `TaskExecutor`, which builds a fresh `TaskManager`
-per execution. Those components are wired in through the global `ConfigRegistry`:
+per execution. Two wiring paths exist:
 
-- **app.py** registers the process-singletons (`PolicyEngine`,
-  `CircuitBreakerRegistry`) and flips `set_governance_enabled(True)` /
-  `set_durability_enabled(True)`.
+### Path 1: Direct injection in `create_app()` (app.py lines 99–110)
+
+`create_app()` instantiates `BudgetManager` and `PolicyEngine` and passes them
+directly as constructor arguments to the `TaskManager` it creates:
+
+```python
+budget_manager = BudgetManager(task_repository)
+policy_engine = PolicyEngine()
+task_manager = TaskManager(
+    session,
+    budget_manager=budget_manager,
+    policy_engine=policy_engine,
+)
+```
+
+This governs the `TaskManager` used by the `task.cancel` module and by any
+caller that uses the `app.task_manager` reference directly.
+
+### Path 2: ConfigRegistry flags (for TaskExecutor — every per-request execution)
+
+`create_app()` also registers the process-singletons and enables governance
+globally so that `TaskExecutor` picks them up for every request execution:
+
+- **app.py** calls `set_policy_engine(policy_engine)`, `set_governance_enabled(True)`,
+  `set_circuit_breaker_registry(...)`, and `set_durability_enabled(True)`.
 - **TaskExecutor._build_execution_components(session)** reads those flags and,
   per execution, builds the session-bound components on the **live execution
   session** — `BudgetManager(TaskRepository(session))` and

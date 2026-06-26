@@ -60,7 +60,7 @@ class ScheduleSetModule:
         )
         self.output_schema = _make_schema({"type": "object"})
 
-    async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+    async def execute(self, inputs: dict[str, Any], _context: Any = None) -> dict[str, Any]:
         from apflow.core.storage.sqlalchemy.schedule_calculator import ScheduleCalculator
 
         task_id = inputs.get("task_id", "")
@@ -122,7 +122,7 @@ class ScheduleDueModule:
             }
         )
 
-    async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+    async def execute(self, inputs: dict[str, Any], _context: Any = None) -> dict[str, Any]:
         tasks = await self._repo.get_due_scheduled_tasks(
             user_id=inputs.get("user_id"),
             limit=_coerce_int(inputs.get("limit"), 100, minimum=1, maximum=1000),
@@ -167,7 +167,7 @@ class ScheduleCompleteModule:
         )
         self.output_schema = _make_schema({"type": "object"})
 
-    async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+    async def execute(self, inputs: dict[str, Any], _context: Any = None) -> dict[str, Any]:
         task_id = inputs.get("task_id", "")
         if not task_id:
             raise ValueError("task_id must be non-empty")
@@ -224,6 +224,8 @@ class ScheduleTriggerModule:
                         "type": "string",
                         "description": "Optional owner check; rejects tasks owned by others",
                     },
+                    # Intentionally defaults to False (synchronous) — overrides
+                    # WebhookConfig's True default so callers get a result immediately.
                     "async_execution": {
                         "type": "boolean",
                         "default": False,
@@ -235,7 +237,7 @@ class ScheduleTriggerModule:
         )
         self.output_schema = _make_schema({"type": "object"})
 
-    async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+    async def execute(self, inputs: dict[str, Any], _context: Any = None) -> dict[str, Any]:
         from apflow.scheduler.gateway.webhook import WebhookGateway
 
         task_id = inputs.get("task_id", "")
@@ -285,7 +287,7 @@ class ScheduleExportICalModule:
             }
         )
 
-    async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+    async def execute(self, inputs: dict[str, Any], _context: Any = None) -> dict[str, Any]:
         from apflow.scheduler.gateway.ical import ICalExporter
 
         exporter = ICalExporter(base_url=inputs.get("base_url"))

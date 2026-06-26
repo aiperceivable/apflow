@@ -26,7 +26,7 @@ See [REST / HTTP API → Authentication](../features/rest-api.md#authentication-
 
 | Variable | Config Key | Default | Description |
 |----------|-----------|---------|-------------|
-| `APFLOW_API_JWT_SECRET` | `api.jwt_secret` | None | Shared secret for **symmetric** algorithms (HS256/384/512). Also used to auto-generate the scheduler's admin token. Use ≥32 bytes in production. |
+| `APFLOW_API_JWT_SECRET` | `api.jwt_secret` | None | Shared secret for **symmetric** algorithms (HS256/384/512). Use ≥32 bytes in production. |
 | `APFLOW_API_JWT_ALGORITHM` | `api.jwt_algorithm` | HS256 | Allowed algorithm(s); comma-separated for multiple (e.g. `RS256,RS512`) |
 | `APFLOW_API_JWT_PUBLIC_KEY` | `api.jwt_public_key` | None | PEM public key for **asymmetric** algorithms (RS*/ES*/PS*); used to *verify* tokens |
 | `APFLOW_API_JWT_PUBLIC_KEY_PATH` | `api.jwt_public_key_path` | None | Path to a PEM public-key file (alternative to inline `jwt_public_key`) |
@@ -42,10 +42,12 @@ See [REST / HTTP API → Authentication](../features/rest-api.md#authentication-
 
 | Variable | Config Key | Default | Description |
 |----------|-----------|---------|-------------|
-| `DATABASE_URL` | — | SQLite file | Database connection string |
-| `APFLOW_DATABASE_URL` | — | — | Alternative to DATABASE_URL |
-| `APFLOW_STORAGE_DIALECT` | `storage.dialect` | sqlite | Storage backend (sqlite/postgresql) |
-| `APFLOW_STORAGE_PATH` | `storage.path` | .data/apflow.db | SQLite file path |
+| `DATABASE_URL` | — | SQLite file | Database connection string. Takes precedence over `APFLOW_DATABASE_URL`. |
+| `APFLOW_DATABASE_URL` | — | — | Alternative to `DATABASE_URL`. |
+| `APFLOW_STORAGE_DIALECT` | `storage.dialect` | sqlite | **Not consumed by the storage factory at runtime.** The dialect is inferred automatically from the connection string scheme (`postgresql://` → PostgreSQL, `sqlite://` → SQLite). This key is only meaningful in `apflow.yaml` for documentation purposes. |
+| `APFLOW_STORAGE_PATH` | `storage.path` | computed | **Not consumed by the storage factory at runtime.** The SQLite file path is computed dynamically by internal project-aware path resolution (prefers `<project-root>/.data/apflow.db`; falls back to `~/.aiperceivable/data/apflow.db`). Set `DATABASE_URL` or `APFLOW_DATABASE_URL` to an explicit `sqlite:///...` URL to control the path. |
+| `APFLOW_MAX_SESSIONS` | — | 50 | Maximum concurrent pooled sessions (`SessionPoolManager`). Requests beyond this limit receive a `SessionLimitExceeded` error. |
+| `APFLOW_SESSION_TIMEOUT` | — | 1800 | Idle session timeout in seconds (30 minutes). Expired sessions are cleaned up on the next pool access. |
 
 ## Governance
 
@@ -67,9 +69,17 @@ See [REST / HTTP API → Authentication](../features/rest-api.md#authentication-
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `APFLOW_CLUSTER_ENABLED` | false | Enable distributed mode |
-| `APFLOW_NODE_ROLE` | auto | Node role (auto/leader/worker) |
+| `APFLOW_NODE_ROLE` | auto | Node role (auto/leader/worker/observer) |
 | `APFLOW_NODE_ID` | auto-generated | Unique node identifier |
-| `APFLOW_MAX_PARALLEL_TASKS` | 4 | Max concurrent task executions |
+| `APFLOW_MAX_PARALLEL_TASKS` | 4 | Max concurrent task executions per node |
+| `APFLOW_LEADER_LEASE` | 30 | Leader lease duration (seconds). The leader must renew before this expires or it loses leadership. |
+| `APFLOW_LEADER_RENEW` | 10 | Leader renewal interval (seconds). Must be less than `APFLOW_LEADER_LEASE`. |
+| `APFLOW_LEASE_DURATION` | 30 | Task lease duration (seconds). A worker must complete or renew its task claim within this window. |
+| `APFLOW_LEASE_CLEANUP_INTERVAL` | 10 | Interval (seconds) between expired task lease cleanup runs. |
+| `APFLOW_POLL_INTERVAL` | 5 | Worker poll interval (seconds). How often a worker checks for new tasks. |
+| `APFLOW_HEARTBEAT_INTERVAL` | 10 | Node heartbeat interval (seconds). Nodes publish a heartbeat at this rate. |
+| `APFLOW_NODE_STALE_THRESHOLD` | 30 | Seconds without a heartbeat before a node is considered stale. |
+| `APFLOW_NODE_DEAD_THRESHOLD` | 120 | Seconds without a heartbeat before a node is considered dead and its tasks are reclaimed. |
 
 ## YAML Config File
 

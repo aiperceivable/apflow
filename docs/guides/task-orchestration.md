@@ -120,10 +120,8 @@ Set `token_budget` and `cost_policy` for AI-related tasks:
 ## Distributed Mode
 
 ```bash
-# Leader node
-apflow serve --cluster --db postgresql://user:pass@host/db
-
-# Worker nodes
+# All nodes run as workers; leader election is handled automatically
+apflow worker --db postgresql://user:pass@host/db
 apflow worker --db postgresql://user:pass@host/db --node-id worker-1
 apflow worker --db postgresql://user:pass@host/db --node-id worker-2
 ```

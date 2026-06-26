@@ -128,7 +128,7 @@ def test_rest_webhook_with_secret_under_auth_is_allowed(monkeypatch) -> None:
     monkeypatch.setattr("apflow.core.config_manager.get_config_manager", lambda: _configured_jwt())
     # create_app would start a server; stub it so the guard is what we exercise.
     monkeypatch.setattr("apflow.app.create_app", lambda **_kw: _FakeApp())
-    monkeypatch.setattr("apflow.api.serve_rest", lambda *a, **k: None)
+    monkeypatch.setattr("apflow.api.serve_rest", lambda *_a, **_k: None)
     result = CliRunner().invoke(rest, ["--auth", "--webhook", "--webhook-secret", "s3cret"])
     assert result.exit_code == 0, result.output
 

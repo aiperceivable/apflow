@@ -63,12 +63,12 @@ serve(app.registry, name="apflow")
 apflow serve              # A2A HTTP server
 apflow serve --explorer   # With Explorer UI
 apflow serve --all        # Unified REST + A2A + MCP on one port (/, /a2a, /mcp)
-apflow serve --cluster    # Distributed cluster mode (requires PostgreSQL)
-apflow worker --db ...    # Start worker node
+apflow worker --db <postgres-url>  # Start distributed worker node (requires PostgreSQL)
 apflow rest               # REST/HTTP API + OpenAPI docs at /docs (default :8080)
+apflow scheduler          # Run the internal poll-based scheduler (foreground process)
 apflow mcp                # MCP server (stdio, for Claude/Cursor)
 apflow mcp --transport streamable-http --approval  # HTTP + async human-approval workflow
-apflow info               # Show registered modules
+apflow info               # Show version, config, and registered modules
 ```
 
 ## Core Capabilities

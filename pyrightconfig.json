@@ -1,0 +1,7 @@
+{
+  "include": ["src", "tests"],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "standard",
+  "reportUnusedVariable": "none",
+  "reportUnusedParameter": "none"
+}
