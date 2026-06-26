@@ -110,6 +110,25 @@ def create_app(
     )
     logger.info("TaskManager initialized with durability + governance")
 
+    # Wire execution components into the global ConfigRegistry so EVERY execution
+    # path (task.execute module, REST/MCP/A2A, the scheduler) runs governed — not
+    # just the cancel-only task_manager above. TaskExecutor reads these when it
+    # builds each per-execution TaskManager. Session-free singletons (PolicyEngine,
+    # CircuitBreakerRegistry) are shared here; the session-bound BudgetManager and
+    # CheckpointManager are rebuilt per execution on the live (async) session —
+    # CheckpointManager supports AsyncSession, so durability is enabled here too.
+    from apflow.core.config import (
+        set_circuit_breaker_registry,
+        set_durability_enabled,
+        set_governance_enabled,
+        set_policy_engine,
+    )
+
+    set_policy_engine(policy_engine)
+    set_governance_enabled(True)
+    set_circuit_breaker_registry(circuit_breaker_registry)
+    set_durability_enabled(True)
+
     # Create apcore registry
     registry = create_apflow_registry(
         task_manager=task_manager,

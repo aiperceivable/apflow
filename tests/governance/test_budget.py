@@ -1,9 +1,17 @@
 """Tests for budget module"""
 
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from apflow.governance.budget import BudgetScope, TokenBudget, BudgetManager
+
+
+def _async_repo(task: object) -> MagicMock:
+    """Repo stub whose async methods mirror the real async TaskRepository."""
+    repo = MagicMock()
+    repo.get_task_by_id = AsyncMock(return_value=task)
+    repo.update_task = AsyncMock()
+    return repo
 
 
 class TestTokenBudget:
@@ -60,17 +68,14 @@ def _mock_task(token_budget=None, token_usage=None):
 class TestBudgetManager:
     @pytest.mark.asyncio
     async def test_check_no_budget(self):
-        repo = MagicMock()
-        repo.get_task_by_id.return_value = _mock_task(token_budget=None)
-        bm = BudgetManager(repo)
+        bm = BudgetManager(_async_repo(_mock_task(token_budget=None)))
         result = await bm.check_budget("t1")
         assert result.allowed is True
         assert result.remaining == -1
 
     @pytest.mark.asyncio
     async def test_check_within_budget(self):
-        repo = MagicMock()
-        repo.get_task_by_id.return_value = _mock_task(token_budget=1000, token_usage={"total": 500})
+        repo = _async_repo(_mock_task(token_budget=1000, token_usage={"total": 500}))
         bm = BudgetManager(repo)
         result = await bm.check_budget("t1")
         assert result.allowed is True
@@ -78,8 +83,7 @@ class TestBudgetManager:
 
     @pytest.mark.asyncio
     async def test_check_exhausted(self):
-        repo = MagicMock()
-        repo.get_task_by_id.return_value = _mock_task(token_budget=100, token_usage={"total": 100})
+        repo = _async_repo(_mock_task(token_budget=100, token_usage={"total": 100}))
         bm = BudgetManager(repo)
         result = await bm.check_budget("t1")
         assert result.allowed is False
@@ -87,15 +91,13 @@ class TestBudgetManager:
 
     @pytest.mark.asyncio
     async def test_check_empty_id_raises(self):
-        bm = BudgetManager(MagicMock())
+        bm = BudgetManager(_async_repo(None))
         with pytest.raises(ValueError):
             await bm.check_budget("")
 
     @pytest.mark.asyncio
     async def test_check_not_found_raises(self):
-        repo = MagicMock()
-        repo.get_task_by_id.return_value = None
-        bm = BudgetManager(repo)
+        bm = BudgetManager(_async_repo(None))
         with pytest.raises(KeyError):
             await bm.check_budget("nonexistent")
 
@@ -104,28 +106,26 @@ class TestBudgetManager:
         task = _mock_task(
             token_budget=1000, token_usage={"input": 100, "output": 200, "total": 300}
         )
-        repo = MagicMock()
-        repo.get_task_by_id.return_value = task
-        repo.db = MagicMock()
+        repo = _async_repo(task)
         bm = BudgetManager(repo)
 
         result = await bm.update_usage("t1", {"input": 50, "output": 50, "total": 100})
         assert result is not None
         assert result.used == 400
-        assert task.token_usage["total"] == 400
+        # Persistence goes through the async update_task with the accumulated usage.
+        repo.update_task.assert_awaited_once_with(
+            task_id="t1", token_usage={"input": 150, "output": 250, "total": 400}
+        )
 
     @pytest.mark.asyncio
     async def test_update_negative_raises(self):
-        bm = BudgetManager(MagicMock())
+        bm = BudgetManager(_async_repo(None))
         with pytest.raises(ValueError, match=">= 0"):
             await bm.update_usage("t1", {"input": -1, "output": 0, "total": -1})
 
     @pytest.mark.asyncio
     async def test_update_returns_none_no_budget(self):
-        task = _mock_task(token_budget=None, token_usage={})
-        repo = MagicMock()
-        repo.get_task_by_id.return_value = task
-        repo.db = MagicMock()
+        repo = _async_repo(_mock_task(token_budget=None, token_usage={}))
         bm = BudgetManager(repo)
         result = await bm.update_usage("t1", {"input": 100, "output": 100, "total": 200})
         assert result is None

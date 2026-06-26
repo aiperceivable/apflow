@@ -25,6 +25,7 @@ from apflow.bridge.schedule_modules import (
     ScheduleDueModule,
     ScheduleExportICalModule,
     ScheduleSetModule,
+    ScheduleTriggerModule,
 )
 from apflow.bridge.task_modules import (
     TaskCreateModule,
@@ -110,6 +111,7 @@ def create_apflow_registry(
         "task.scheduled": TaskScheduledListModule(task_repository),
         "schedule.set": ScheduleSetModule(task_repository),
         "schedule.due": ScheduleDueModule(task_repository),
+        "schedule.trigger": ScheduleTriggerModule(task_repository),
         "schedule.complete": ScheduleCompleteModule(task_repository),
         "schedule.export_ical": ScheduleExportICalModule(),
     }

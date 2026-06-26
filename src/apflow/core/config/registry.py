@@ -9,7 +9,7 @@ passing parameters through multiple layers.
 import importlib
 import os
 from threading import local
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from apflow.core.types import TaskPreHook, TaskPostHook, WebhookVerifyHook
 from apflow.logger import get_logger
@@ -43,6 +43,15 @@ class ConfigRegistry:
         self._post_hooks: List[TaskPostHook] = []
         self._use_task_creator: Optional[type] = None  # Default to True for rigorous task creation
         self._require_existing_tasks: bool = False  # Default to False for convenience (auto-create)
+        # Execution components (F-003 durability, F-004 governance). Process-singleton,
+        # session-free components (PolicyEngine, CircuitBreakerRegistry) are stored here so
+        # TaskExecutor can hand them to every per-execution TaskManager. Session-bound
+        # components (BudgetManager, CheckpointManager) are NOT stored — they are built
+        # per-execution from the live session; these flags say whether to build them.
+        self._policy_engine: Optional[Any] = None
+        self._circuit_breaker_registry: Optional[Any] = None
+        self._governance_enabled: bool = False
+        self._durability_enabled: bool = False
         # Task tree lifecycle hooks
         self._task_tree_hooks: Dict[str, List[Callable]] = {
             "on_tree_created": [],
@@ -219,6 +228,40 @@ class ConfigRegistry:
         """
         return self._require_existing_tasks
 
+    # --- Execution components: durability (F-003) + governance (F-004) ---
+
+    def set_policy_engine(self, policy_engine: Optional[Any]) -> None:
+        """Register the process-wide PolicyEngine (cost-policy evaluation)."""
+        self._policy_engine = policy_engine
+
+    def get_policy_engine(self) -> Optional[Any]:
+        """Get the registered PolicyEngine, or None."""
+        return self._policy_engine
+
+    def set_circuit_breaker_registry(self, registry: Optional[Any]) -> None:
+        """Register the process-wide CircuitBreakerRegistry (shared trip state)."""
+        self._circuit_breaker_registry = registry
+
+    def get_circuit_breaker_registry(self) -> Optional[Any]:
+        """Get the registered CircuitBreakerRegistry, or None."""
+        return self._circuit_breaker_registry
+
+    def set_governance_enabled(self, enabled: bool) -> None:
+        """Enable per-execution budget enforcement (BudgetManager built per session)."""
+        self._governance_enabled = enabled
+
+    def is_governance_enabled(self) -> bool:
+        """Whether the executor should build a BudgetManager for each execution."""
+        return self._governance_enabled
+
+    def set_durability_enabled(self, enabled: bool) -> None:
+        """Enable per-execution durability (CheckpointManager/RetryManager per session)."""
+        self._durability_enabled = enabled
+
+    def is_durability_enabled(self) -> bool:
+        """Whether the executor should build checkpoint/retry managers for each execution."""
+        return self._durability_enabled
+
     def register_task_tree_hook(self, hook_type: str, hook: Callable) -> None:
         """
         Register a task tree lifecycle hook
@@ -334,6 +377,11 @@ class ConfigRegistry:
         self._use_task_creator = None  # Reset to default
         self._require_existing_tasks = False  # Reset to default
         self._webhook_verify_hook = None
+        # Reset execution components (durability/governance) to default (disabled)
+        self._policy_engine = None
+        self._circuit_breaker_registry = None
+        self._governance_enabled = False
+        self._durability_enabled = False
         # Clear task tree hooks
         for hook_list in self._task_tree_hooks.values():
             hook_list.clear()
@@ -516,6 +564,49 @@ def set_require_existing_tasks(require_existing_tasks: bool) -> None:
                               Default is False for convenience (auto-create).
     """
     _get_registry().set_require_existing_tasks(require_existing_tasks)
+
+
+# --- Execution components: durability (F-003) + governance (F-004) ---
+
+
+def set_policy_engine(policy_engine: Optional[Any]) -> None:
+    """Register the process-wide PolicyEngine (cost-policy evaluation)."""
+    _get_registry().set_policy_engine(policy_engine)
+
+
+def get_policy_engine() -> Optional[Any]:
+    """Get the registered PolicyEngine, or None."""
+    return _get_registry().get_policy_engine()
+
+
+def set_circuit_breaker_registry(registry: Optional[Any]) -> None:
+    """Register the process-wide CircuitBreakerRegistry (shared trip state)."""
+    _get_registry().set_circuit_breaker_registry(registry)
+
+
+def get_circuit_breaker_registry() -> Optional[Any]:
+    """Get the registered CircuitBreakerRegistry, or None."""
+    return _get_registry().get_circuit_breaker_registry()
+
+
+def set_governance_enabled(enabled: bool) -> None:
+    """Enable per-execution budget enforcement (BudgetManager built per session)."""
+    _get_registry().set_governance_enabled(enabled)
+
+
+def is_governance_enabled() -> bool:
+    """Whether the executor should build a BudgetManager for each execution."""
+    return _get_registry().is_governance_enabled()
+
+
+def set_durability_enabled(enabled: bool) -> None:
+    """Enable per-execution durability (CheckpointManager/RetryManager per session)."""
+    _get_registry().set_durability_enabled(enabled)
+
+
+def is_durability_enabled() -> bool:
+    """Whether the executor should build checkpoint/retry managers for each execution."""
+    return _get_registry().is_durability_enabled()
 
 
 def set_demo_sleep_scale(scale: float) -> None:

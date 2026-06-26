@@ -131,16 +131,20 @@ tests/durability/test_integration.py
 
 ```python
 class CheckpointManager:
-    def __init__(self, db: Session) -> None:
-        """Args: db (SQLAlchemy session, not None). Raises: TypeError if db is None."""
+    def __init__(self, db: Session | AsyncSession) -> None:
+        """Args: db (sync OR async SQLAlchemy session, not None). Raises: TypeError if None.
 
-    def save_checkpoint(
+        Methods are async and support both session types (the live execution
+        session is an AsyncSession); the sync path runs without awaiting the driver.
+        """
+
+    async def save_checkpoint(
         self,
         task_id: str,          # Non-empty string
         data: dict[str, Any],  # JSON-serializable dict
         step_name: Optional[str] = None,
     ) -> str:
-        """Save checkpoint (sync). Returns checkpoint_id (UUID).
+        """Save checkpoint. Returns checkpoint_id (UUID).
         Logic:
         1. Validate task_id non-empty.
         2. Validate data is dict.
@@ -151,7 +155,7 @@ class CheckpointManager:
         7. Return checkpoint_id.
         """
 
-    def load_checkpoint(self, task_id: str) -> Optional[dict[str, Any]]:
+    async def load_checkpoint(self, task_id: str) -> Optional[dict[str, Any]]:
         """Load latest checkpoint. Returns None if no checkpoint exists.
         Logic:
         1. Validate task_id non-empty.
@@ -161,7 +165,7 @@ class CheckpointManager:
         5. Return parsed dict.
         """
 
-    def delete_checkpoints(self, task_id: str) -> int:
+    async def delete_checkpoints(self, task_id: str) -> int:
         """Delete all checkpoints for task. Returns count deleted.
         Logic:
         1. Validate task_id non-empty.
@@ -561,6 +565,20 @@ async def test_checkpoint_persists_across_sessions():
     4. Load checkpoint with session B. Verify data matches.
     """
 ```
+
+---
+
+## Execution Wiring
+
+Durability lives in `TaskManager`, but execution runs through the singleton
+`TaskExecutor`, which builds a `TaskManager` per execution. The components are
+wired via the global `ConfigRegistry`: `app.py` registers the process-singleton
+`CircuitBreakerRegistry` and calls `set_durability_enabled(True)`; per execution,
+`TaskExecutor._build_execution_components(session)` builds the session-bound
+`CheckpointManager(session)` + `RetryManager` on the live execution session and
+passes them to the `TaskManager`. This makes durability apply on every execution
+path (module/REST/MCP/A2A/scheduler), not just a dependency-injected instance.
+See the matching section in [Cost Governance](cost-governance.md#execution-wiring).
 
 ---
 

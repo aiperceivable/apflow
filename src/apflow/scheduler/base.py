@@ -112,8 +112,9 @@ class BaseScheduler(ABC):
     Abstract base class for all scheduler implementations.
 
     Implementations:
-    - InternalScheduler: Built-in scheduler using APScheduler
-    - External schedulers use the existing API endpoints (tasks.scheduled.*)
+    - InternalScheduler: built-in in-process poll loop (single-node)
+    - External schedulers push-trigger via the schedule.trigger module or the
+      POST /webhook/trigger/{task_id} endpoint; clusters use ``apflow worker``
 
     Lifecycle:
         scheduler = InternalScheduler(config)

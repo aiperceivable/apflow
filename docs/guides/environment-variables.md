@@ -13,11 +13,30 @@ Defaults → apflow.yaml → Environment Variables (highest priority)
 | Variable | Config Key | Default | Description |
 |----------|-----------|---------|-------------|
 | `APFLOW_CONFIG` | — | — | Explicit path to config YAML file |
-| `APFLOW_API_SERVER_URL` | `api.server_url` | None | API server URL (enables API mode for scheduler) |
+| `APFLOW_API_SERVER_URL` | `api.server_url` | None | Remote API server URL (used by API-gateway clients; the scheduler no longer has an API mode — it runs in-process) |
 | `APFLOW_API_TIMEOUT` | `api.timeout` | 30.0 | API request timeout (seconds) |
 | `APFLOW_API_RETRY_ATTEMPTS` | `api.retry_attempts` | 3 | API retry attempts |
 | `APFLOW_API_RETRY_BACKOFF` | `api.retry_backoff` | 1.0 | Initial retry backoff (seconds) |
-| `APFLOW_API_JWT_SECRET` | `api.jwt_secret` | None | JWT secret for auto-generated auth tokens |
+
+## Authentication (JWT)
+
+These configure the JWT Bearer auth shared by the REST, A2A, and MCP servers
+(enabled per server with `--auth`). The same token validates on every surface.
+See [REST / HTTP API → Authentication](../features/rest-api.md#authentication-jwt).
+
+| Variable | Config Key | Default | Description |
+|----------|-----------|---------|-------------|
+| `APFLOW_API_JWT_SECRET` | `api.jwt_secret` | None | Shared secret for **symmetric** algorithms (HS256/384/512). Also used to auto-generate the scheduler's admin token. Use ≥32 bytes in production. |
+| `APFLOW_API_JWT_ALGORITHM` | `api.jwt_algorithm` | HS256 | Allowed algorithm(s); comma-separated for multiple (e.g. `RS256,RS512`) |
+| `APFLOW_API_JWT_PUBLIC_KEY` | `api.jwt_public_key` | None | PEM public key for **asymmetric** algorithms (RS*/ES*/PS*); used to *verify* tokens |
+| `APFLOW_API_JWT_PUBLIC_KEY_PATH` | `api.jwt_public_key_path` | None | Path to a PEM public-key file (alternative to inline `jwt_public_key`) |
+| `APFLOW_API_JWT_AUDIENCE` | `api.jwt_audience` | None | Expected `aud` claim (optional) |
+| `APFLOW_API_JWT_ISSUER` | `api.jwt_issuer` | None | Expected `iss` claim (optional) |
+
+> **HS256 vs RS256.** Symmetric (HS*) verifies with `jwt_secret`. Asymmetric
+> (RS*/ES*/PS*) verifies with the **public key** — set `jwt_algorithm=RS256` and
+> provide `jwt_public_key` (or `_path`); the private key signs tokens elsewhere
+> and is never needed by the servers.
 
 ## Storage
 
@@ -60,7 +79,12 @@ Place `apflow.yaml` in your project root or `~/.aiperceivable/apflow/`:
 api:
   server_url: http://localhost:8000
   timeout: 60.0
+  # HS256 (symmetric): one shared secret signs and verifies.
   jwt_secret: ${APFLOW_API_JWT_SECRET}  # env var reference
+  jwt_algorithm: HS256
+  # RS256 (asymmetric): set algorithm + public key; the private key signs elsewhere.
+  # jwt_algorithm: RS256
+  # jwt_public_key_path: /etc/apflow/jwt_public.pem
 
 storage:
   dialect: sqlite

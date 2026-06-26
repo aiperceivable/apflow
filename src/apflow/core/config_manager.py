@@ -37,6 +37,13 @@ _DEFAULTS: Dict[str, Any] = {
     "api.retry_attempts": 3,
     "api.retry_backoff": 1.0,
     "api.jwt_secret": None,
+    "api.jwt_algorithm": "HS256",
+    "api.jwt_audience": None,
+    "api.jwt_issuer": None,
+    # Asymmetric algorithms (RS*/ES*/PS*) verify with a public key instead of the
+    # shared secret. Provide the PEM inline (jwt_public_key) or via a file path.
+    "api.jwt_public_key": None,
+    "api.jwt_public_key_path": None,
     "storage.dialect": "sqlite",
     "storage.path": None,
     "governance.default_policy": None,
@@ -189,6 +196,26 @@ class ConfigManager:
     @property
     def jwt_secret(self) -> Optional[str]:
         return self.get("api.jwt_secret")
+
+    @property
+    def jwt_algorithm(self) -> str:
+        return self.get("api.jwt_algorithm", "HS256")
+
+    @property
+    def jwt_audience(self) -> Optional[str]:
+        return self.get("api.jwt_audience")
+
+    @property
+    def jwt_issuer(self) -> Optional[str]:
+        return self.get("api.jwt_issuer")
+
+    @property
+    def jwt_public_key(self) -> Optional[str]:
+        return self.get("api.jwt_public_key")
+
+    @property
+    def jwt_public_key_path(self) -> Optional[str]:
+        return self.get("api.jwt_public_key_path")
 
     def is_api_configured(self) -> bool:
         return self.api_server_url is not None

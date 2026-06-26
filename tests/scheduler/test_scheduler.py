@@ -967,89 +967,27 @@ class TestSchedulerIntegration:
 
 
 # ============================================================================
-# Scheduler API Integration Tests
+# In-process scheduler start/stop
 # ============================================================================
 
 
-class TestSchedulerAPIDetection:
-    """Tests for scheduler API mode detection via ConfigManager.
-
-    _detect_api_mode() checks whether api_server_url is configured in
-    ConfigManager — it does NOT perform a health-check probe.  This avoids
-    the session-caching and URL-clearing issues of should_use_api().
-    """
-
-    @pytest.fixture(autouse=True)
-    def _reset_config(self):
-        """Reset ConfigManager between tests.
-
-        Clears config and env to ensure clean state.
-        """
-        from apflow.core.config_manager import get_config_manager
-
-        cm = get_config_manager()
-        cm.clear()
-        yield
-        cm.clear()
-
-    def test_detect_api_mode_true_when_url_configured(self, monkeypatch):
-        """Detection returns True when APFLOW_API_SERVER_URL is set."""
-        monkeypatch.setenv("APFLOW_API_SERVER_URL", "http://localhost:8000")
-        from apflow.core.config_manager import get_config_manager
-
-        get_config_manager().reload()
-
-        scheduler = InternalScheduler()
-        assert scheduler._detect_api_mode() is True
-
-    def test_detect_api_mode_false_when_no_url_configured(self):
-        """Detection returns False when no APFLOW_API_SERVER_URL is set."""
-        scheduler = InternalScheduler()
-        assert scheduler._detect_api_mode() is False
-
-    def test_detect_api_mode_reflects_config_changes(self, monkeypatch):
-        """Detection re-reads ConfigManager on every call (no stale cache)."""
-        from apflow.core.config_manager import get_config_manager
-
-        cm = get_config_manager()
-        scheduler = InternalScheduler()
-
-        assert scheduler._detect_api_mode() is False
-
-        monkeypatch.setenv("APFLOW_API_SERVER_URL", "http://localhost:8000")
-        cm.reload()
-        assert scheduler._detect_api_mode() is True
-
-        monkeypatch.delenv("APFLOW_API_SERVER_URL")
-        cm.reload()
-        assert scheduler._detect_api_mode() is False
+class TestSchedulerLifecycle:
+    """The scheduler runs a single in-process poll loop (no API mode)."""
 
     @pytest.mark.asyncio
-    async def test_start_enables_api_mode_when_url_configured(self, monkeypatch):
-        """start() detects API and sets _use_api=True when URL configured."""
-        from apflow.core.config_manager import get_config_manager
-
-        monkeypatch.setenv("APFLOW_API_SERVER_URL", "http://localhost:8000")
-        get_config_manager().reload()
-
+    async def test_start_then_stop(self):
+        """start() launches the poll loop and stop() shuts it down cleanly."""
         scheduler = InternalScheduler()
         scheduler._get_due_tasks = AsyncMock(return_value=[])
 
         await scheduler.start()
-        assert scheduler._use_api is True
+        assert scheduler.stats.state == SchedulerState.running
         await scheduler.stop()
+        assert scheduler.stats.state == SchedulerState.stopped
 
     @pytest.mark.asyncio
-    async def test_start_disables_api_mode_when_no_url(self):
-        """start() sets _use_api=False when no URL configured."""
+    async def test_no_api_mode_attributes(self):
+        """The removed v1 API mode leaves no _use_api / _rpc_call surface."""
         scheduler = InternalScheduler()
-        scheduler._get_due_tasks = AsyncMock(return_value=[])
-
-        await scheduler.start()
-        assert scheduler._use_api is False
-        await scheduler.stop()
-
-    def test_use_api_defaults_to_false(self):
-        """_use_api defaults to False before start."""
-        scheduler = InternalScheduler()
-        assert scheduler._use_api is False
+        assert not hasattr(scheduler, "_use_api")
+        assert not hasattr(scheduler, "_rpc_call")

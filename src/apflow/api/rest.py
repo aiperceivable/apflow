@@ -234,6 +234,8 @@ def build_rest_app(
     version: str = "",
     description: str = "apflow REST API (registry-driven)",
     cors_origins: Optional[list[str]] = None,
+    extra_routes: Optional[list[Route]] = None,
+    lifespan: Any = None,
 ) -> Starlette:
     """Build a Starlette app exposing every registry module over REST.
 
@@ -247,6 +249,10 @@ def build_rest_app(
         POST /modules/{id}  -- execute a module with a JSON-object body; returns
                                JSON, or an SSE event stream when the request's
                                Accept header is text/event-stream
+
+    ``extra_routes`` are appended verbatim, letting callers mount non-registry
+    operational endpoints (e.g. the inbound webhook) without this adapter
+    depending on them. They are matched after the registry routes above.
     """
     executor = Executor.from_registry(registry)
     openapi_spec = build_openapi(registry, title=title, version=version, description=description)
@@ -309,6 +315,8 @@ def build_rest_app(
         Route("/modules", list_modules, methods=["GET"]),
         Route("/modules/{module_id:path}", module_endpoint, methods=["GET", "POST"]),
     ]
+    if extra_routes:
+        routes.extend(extra_routes)
 
     middleware: list[Middleware] = []
     if cors_origins:
@@ -323,7 +331,7 @@ def build_rest_app(
             )
         )
 
-    return Starlette(routes=routes, middleware=middleware)
+    return Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
 
 
 def serve_rest(
@@ -335,9 +343,51 @@ def serve_rest(
     version: str = "",
     cors_origins: Optional[list[str]] = None,
     log_level: Optional[str] = None,
+    webhook: bool = False,
+    webhook_secret: Optional[str] = None,
+    auth: bool = False,
+    scheduler: bool = False,
 ) -> None:
-    """Build the REST app and run it under uvicorn (blocking)."""
+    """Build the REST app and run it under uvicorn (blocking).
+
+    When ``webhook`` is set, the inbound ``POST /webhook/trigger/{task_id}``
+    endpoint is mounted (optionally HMAC-guarded by ``webhook_secret``).
+
+    When ``auth`` is set, module calls require a valid JWT Bearer token (built
+    from ``api.jwt_*`` config); public metadata paths and the webhook are exempt.
+    Raises RuntimeError if auth is requested without ``api.jwt_secret`` set.
+
+    When ``scheduler`` is set, the built-in scheduler poll loop runs inside this
+    server process (single-node consistency — one SQLite writer, no second
+    process). For multi-node clusters use ``apflow worker`` instead.
+    """
     import uvicorn
 
-    app = build_rest_app(registry, title=title, version=version, cors_origins=cors_origins)
+    extra_routes = None
+    if webhook:
+        from apflow.api.webhook import build_webhook_routes
+
+        extra_routes = build_webhook_routes(secret_key=webhook_secret)
+
+    lifespan = None
+    if scheduler:
+        from apflow.scheduler.internal import make_scheduler_lifespan
+
+        lifespan = make_scheduler_lifespan()
+
+    app: Any = build_rest_app(
+        registry,
+        title=title,
+        version=version,
+        cors_origins=cors_origins,
+        extra_routes=extra_routes,
+        lifespan=lifespan,
+    )
+    if auth:
+        from apflow.api.auth import apply_rest_auth, build_mcp_authenticator
+
+        authenticator = build_mcp_authenticator()
+        if authenticator is None:
+            raise RuntimeError("REST auth requested but api.jwt_secret is not configured")
+        app = apply_rest_auth(app, authenticator)
     uvicorn.run(app, host=host, port=port, log_level=(log_level or "info").lower())

@@ -11,6 +11,7 @@ from apflow.bridge.schedule_modules import (
     ScheduleDueModule,
     ScheduleExportICalModule,
     ScheduleSetModule,
+    ScheduleTriggerModule,
 )
 
 # ScheduleSetModule validates the schedule via ScheduleCalculator before writing;
@@ -130,6 +131,44 @@ async def test_schedule_complete_existing_task_op_failure_is_not_keyerror() -> N
     repo.complete_scheduled_run.return_value = None  # op failed for an existing task
     with pytest.raises(RuntimeError):
         await ScheduleCompleteModule(repo).execute({"task_id": "t1"})
+
+
+@pytest.mark.asyncio
+async def test_schedule_trigger_executes_via_gateway() -> None:
+    # An existing task is handed to WebhookGateway.trigger_task, whose result
+    # (success/status/result) is returned verbatim, and async_execution is threaded.
+    repo = AsyncMock()
+    repo.get_task_by_id.return_value = _task()
+    gateway_result = {"success": True, "status": "completed", "task_id": "t1"}
+    with patch("apflow.scheduler.gateway.webhook.WebhookGateway") as gateway_cls:
+        gateway_cls.return_value.trigger_task = AsyncMock(return_value=gateway_result)
+        out = await ScheduleTriggerModule(repo).execute(
+            {"task_id": "t1", "user_id": "u1", "async_execution": True}
+        )
+    call = gateway_cls.return_value.trigger_task.await_args
+    assert call is not None
+    assert call.args == ("t1",)
+    assert call.kwargs["user_id"] == "u1"
+    assert call.kwargs["execute_async"] is True
+    assert out == gateway_result
+
+
+@pytest.mark.asyncio
+async def test_schedule_trigger_missing_task_raises_keyerror() -> None:
+    # A genuine miss is a KeyError (REST 404), distinct from a task whose own
+    # execution fails (which is a valid success=False gateway result).
+    repo = AsyncMock()
+    repo.get_task_by_id.return_value = None
+    with patch("apflow.scheduler.gateway.webhook.WebhookGateway") as gateway_cls:
+        with pytest.raises(KeyError):
+            await ScheduleTriggerModule(repo).execute({"task_id": "x"})
+    gateway_cls.return_value.trigger_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_schedule_trigger_requires_task_id() -> None:
+    with pytest.raises(ValueError):
+        await ScheduleTriggerModule(AsyncMock()).execute({"task_id": ""})
 
 
 @pytest.mark.asyncio

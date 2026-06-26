@@ -6,13 +6,14 @@ appear as REST endpoints, MCP tools, A2A skills, and CLI commands:
 
     schedule.set          -> configure a task's schedule + compute next run
     schedule.due          -> list scheduled tasks whose next run has arrived
+    schedule.trigger      -> execute a scheduled task now (inbound webhook)
     schedule.complete     -> record a run complete + advance the next run
     schedule.export_ical  -> export scheduled tasks as an iCalendar feed
 
 The long-running scheduler daemon (start/stop/pause) is intentionally NOT a
-module — it is a lifecycle process (run it via the worker), not a stateless
-request/response call. Listing configured schedules already exists as the
-``task.scheduled`` module.
+module — it is a lifecycle process (run it via ``apflow scheduler``), not a
+stateless request/response call. Listing configured schedules already exists
+as the ``task.scheduled`` module.
 
 Repository methods are async (AsyncSession); execute() awaits them.
 """
@@ -190,6 +191,69 @@ class ScheduleCompleteModule:
                 "(check the task's schedule configuration)"
             )
         return task.to_dict()
+
+
+class ScheduleTriggerModule:
+    """Trigger immediate execution of a scheduled task.
+
+    This is the registry-native form of the inbound webhook: external schedulers
+    (cron, Kubernetes CronJob, Temporal, ...) call it to push-trigger a task,
+    complementing the built-in ``apflow scheduler`` poll loop's pull model. It
+    reuses ``WebhookGateway``, which marks the task running, executes its tree,
+    and advances the next run — atomically on the server side.
+    """
+
+    description = (
+        "Trigger a scheduled task to execute now (inbound webhook for external "
+        "schedulers such as cron or Kubernetes CronJob)."
+    )
+    annotations = ModuleAnnotations()
+
+    def __init__(self, task_repository: Any) -> None:
+        self._repo = task_repository
+        self.input_schema = _make_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Task ID to trigger",
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": "Optional owner check; rejects tasks owned by others",
+                    },
+                    "async_execution": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Return immediately and run in the background",
+                    },
+                },
+                "required": ["task_id"],
+            }
+        )
+        self.output_schema = _make_schema({"type": "object"})
+
+    async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        from apflow.scheduler.gateway.webhook import WebhookGateway
+
+        task_id = inputs.get("task_id", "")
+        if not task_id:
+            raise ValueError("task_id must be non-empty")
+
+        # Surface a genuine miss as a distinct KeyError (REST maps it to 404) rather
+        # than the gateway's generic {"success": False} payload. A task's own
+        # execution failure is a valid result (success=False), not a lookup error.
+        if await self._repo.get_task_by_id(task_id) is None:
+            raise KeyError(f"Task '{task_id}' not found")
+
+        gateway = WebhookGateway()
+        return await gateway.trigger_task(
+            task_id,
+            user_id=inputs.get("user_id"),
+            execute_async=bool(inputs.get("async_execution", False)),
+        )
 
 
 class ScheduleExportICalModule:

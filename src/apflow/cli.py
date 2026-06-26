@@ -19,6 +19,43 @@ from apflow.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _require_jwt_key(auth: bool, face: str) -> None:
+    """Fail early if --auth is requested without a usable JWT verification key.
+
+    HS256 verifies with api.jwt_secret; RS*/ES*/PS* verify with a public key.
+    Enabling auth without the relevant key would otherwise raise deep in the
+    serve call (or run unauthenticated); surface a clear actionable error.
+    """
+    if not auth:
+        return
+    from apflow.api.auth import resolve_verification_key
+    from apflow.core.config_manager import get_config_manager
+
+    if not resolve_verification_key(get_config_manager()):
+        raise click.ClickException(
+            f"{face} --auth requires a JWT verification key. Set APFLOW_API_JWT_SECRET "
+            "for HS256, or APFLOW_API_JWT_PUBLIC_KEY / api.jwt_public_key_path for "
+            "RS256 (matching api.jwt_algorithm)."
+        )
+
+
+def _require_webhook_secret(webhook: bool, auth: bool, webhook_secret: Optional[str]) -> None:
+    """Fail early if the webhook is mounted under --auth without its own HMAC secret.
+
+    The webhook path is JWT-exempt (it carries standalone HMAC auth), so mounting
+    it with --auth but no --webhook-secret would silently leave POST
+    /webhook/trigger/{task_id} unauthenticated while the operator believes --auth
+    protects the whole surface. Refuse that combination loudly.
+    """
+    if webhook and auth and not webhook_secret:
+        raise click.ClickException(
+            "--webhook is exempt from JWT auth, so under --auth it must carry its "
+            "own credential: pass --webhook-secret to HMAC-protect the inbound "
+            "webhook (otherwise POST /webhook/trigger/{task_id} would be "
+            "unauthenticated)."
+        )
+
+
 def _build_cli() -> click.Group:
     """Build the apflow CLI by extending apcore-cli with apflow-specific commands."""
     from apflow.app import create_app
@@ -45,6 +82,7 @@ def _build_cli() -> click.Group:
     cli.add_command(rest)
     cli.add_command(info)
     cli.add_command(worker)
+    cli.add_command(scheduler)
 
     return cli
 
@@ -66,6 +104,31 @@ def _build_cli() -> click.Group:
     is_flag=True,
     help="Expose apcore system modules (sys.*) as A2A skills",
 )
+@click.option(
+    "--push-notifications",
+    is_flag=True,
+    help="Enable A2A push notifications (POST task results to a client-supplied webhook)",
+)
+@click.option(
+    "--webhook",
+    is_flag=True,
+    help="With --all: mount POST /webhook/trigger/{task_id} for external schedulers",
+)
+@click.option(
+    "--webhook-secret",
+    default=None,
+    help="Optional HMAC-SHA256 shared secret to authenticate webhook requests",
+)
+@click.option(
+    "--auth",
+    is_flag=True,
+    help="Require a JWT Bearer token (needs a JWT verification key: HS256 secret or RS256 public key)",
+)
+@click.option(
+    "--scheduler",
+    is_flag=True,
+    help="With --all: run the built-in scheduler poll loop in this process (single-node)",
+)
 @click.option("--cors", default=None, help="CORS origins (comma-separated)")
 @click.option("--db", default=None, help="Database connection string")
 @click.option(
@@ -82,6 +145,11 @@ def serve(
     metrics: bool,
     all_protocols: bool,
     sys_modules: bool,
+    push_notifications: bool,
+    webhook: bool,
+    webhook_secret: Optional[str],
+    auth: bool,
+    scheduler: bool,
     cors: Optional[str],
     db: Optional[str],
     cluster: bool,
@@ -102,6 +170,17 @@ def serve(
             "Start distributed nodes with `apflow worker --db <postgres-url>` instead."
         )
 
+    _require_jwt_key(auth, "serve")
+    _require_webhook_secret(webhook, auth, webhook_secret)
+
+    # The in-process scheduler needs the server's own event loop; the plain A2A
+    # path runs apcore-a2a's blocking serve, which we can't hook. Require --all.
+    if scheduler and not all_protocols:
+        raise click.ClickException(
+            "--scheduler needs the unified server's event loop; use `serve --all --scheduler` "
+            "(or run the standalone `apflow scheduler` process)."
+        )
+
     app = create_app(connection_string=db, cluster=False)
 
     cors_origins = [s.strip() for s in cors.split(",")] if cors else None
@@ -113,6 +192,12 @@ def serve(
         click.echo(f"  REST: http://{host}:{port}/  (docs at /docs)")
         click.echo(f"  A2A:  http://{host}:{port}/a2a")
         click.echo(f"  MCP:  http://{host}:{port}/mcp")
+        if webhook:
+            click.echo(f"  Webhook: http://{host}:{port}/webhook/trigger/{{task_id}}")
+        if auth:
+            click.echo("  Auth: JWT Bearer required (REST modules, A2A, MCP)")
+        if scheduler:
+            click.echo("  Scheduler: in-process poll loop enabled")
         click.echo(f"Modules: {app.registry.count}")
         serve_all(
             app.registry,
@@ -124,6 +209,11 @@ def serve(
             log_level=log_level,
             explorer=explorer,
             metrics=metrics,
+            push_notifications=push_notifications,
+            webhook=webhook,
+            webhook_secret=webhook_secret,
+            auth=auth,
+            scheduler=scheduler,
         )
         return
 
@@ -131,8 +221,16 @@ def serve(
     click.echo(f"Modules: {len(list(app.registry.list()))}")
     if explorer:
         click.echo(f"Explorer: http://{host}:{port}/explorer")
+    if auth:
+        click.echo("Auth: JWT Bearer required")
 
     from apcore_a2a import serve as a2a_serve
+
+    from apflow.api.auth import build_a2a_authenticator
+
+    # build_a2a_authenticator returns None when no secret is set; _require_jwt_key
+    # above already guarantees a secret when auth is on, so a2a_auth is non-None here.
+    a2a_auth = build_a2a_authenticator() if auth else None
 
     # A2A protocol 1.0: the Agent Card now carries a version; apcore-a2a resolves
     # execution_timeout from the APCORE_A2A Config Bus when omitted.
@@ -147,8 +245,10 @@ def serve(
         explorer=explorer,
         metrics=metrics,
         sys_modules=sys_modules,
+        auth=a2a_auth,
         cors_origins=cors_origins,
         log_level=log_level,
+        push_notifications=push_notifications,
     )
 
 
@@ -179,6 +279,11 @@ def serve(
         "APCoreMCP(approval_store=...) directly."
     ),
 )
+@click.option(
+    "--auth",
+    is_flag=True,
+    help="Require a JWT Bearer token on HTTP transports (HS256 secret or RS256 public key)",
+)
 @click.option("--db", default=None, help="Database connection string")
 @click.option("--log-level", default=None, help="Log level")
 def mcp(
@@ -188,11 +293,14 @@ def mcp(
     explorer: bool,
     metrics: bool,
     approval: bool,
+    auth: bool,
     db: Optional[str],
     log_level: Optional[str],
 ) -> None:
     """Start MCP server (AI agent tool integration)."""
     from apflow.app import create_app
+
+    _require_jwt_key(auth, "mcp")
 
     app = create_app(connection_string=db)
 
@@ -203,11 +311,20 @@ def mcp(
             click.echo(f"Explorer: http://{host}:{port}/explorer")
         if approval:
             click.echo("Approval: enabled (InMemoryApprovalStore — dev only)")
+        if auth:
+            click.echo("Auth: JWT Bearer required")
     else:
         # stdio mode — no console output (would corrupt protocol)
         pass
 
     from apcore_mcp import InMemoryApprovalStore, serve as mcp_serve
+
+    from apflow.api.auth import build_mcp_authenticator
+
+    # require_auth is passed explicitly (not left to apcore-mcp's default of True):
+    # without it, the server would default to require_auth=True yet have no
+    # authenticator wired, rejecting every request. auth=False → both off.
+    authenticator = build_mcp_authenticator() if auth else None
 
     mcp_serve(
         app.registry,
@@ -219,6 +336,8 @@ def mcp(
         observability=metrics,
         log_level=log_level,
         approval_store=InMemoryApprovalStore() if approval else None,
+        authenticator=authenticator,
+        require_auth=auth,
     )
 
 
@@ -226,12 +345,36 @@ def mcp(
 @click.option("--host", default="0.0.0.0", help="Bind host")
 @click.option("--port", default=8080, type=int, help="Bind port")
 @click.option("--cors", default=None, help="CORS origins (comma-separated)")
+@click.option(
+    "--webhook",
+    is_flag=True,
+    help="Mount POST /webhook/trigger/{task_id} for external schedulers (cron/K8s)",
+)
+@click.option(
+    "--webhook-secret",
+    default=None,
+    help="Optional HMAC-SHA256 shared secret to authenticate webhook requests",
+)
+@click.option(
+    "--auth",
+    is_flag=True,
+    help="Require a JWT Bearer token on module calls (HS256 secret or RS256 public key)",
+)
+@click.option(
+    "--scheduler",
+    is_flag=True,
+    help="Run the built-in scheduler poll loop in this process (single-node)",
+)
 @click.option("--db", default=None, help="Database connection string")
 @click.option("--log-level", default=None, help="Log level (DEBUG/INFO/WARNING/ERROR)")
 def rest(
     host: str,
     port: int,
     cors: Optional[str],
+    webhook: bool,
+    webhook_secret: Optional[str],
+    auth: bool,
+    scheduler: bool,
     db: Optional[str],
     log_level: Optional[str],
 ) -> None:
@@ -240,6 +383,9 @@ def rest(
     from apflow.api import serve_rest
     from apflow.app import create_app
 
+    _require_jwt_key(auth, "REST")
+    _require_webhook_secret(webhook, auth, webhook_secret)
+
     app = create_app(connection_string=db)
 
     cors_origins = [s.strip() for s in cors.split(",")] if cors else None
@@ -247,6 +393,12 @@ def rest(
     click.echo(f"Starting REST server on {host}:{port}")
     click.echo(f"Modules: {app.registry.count}")
     click.echo(f"Docs:    http://{host}:{port}/docs")
+    if webhook:
+        click.echo(f"Webhook: http://{host}:{port}/webhook/trigger/{{task_id}}")
+    if auth:
+        click.echo("Auth:    JWT Bearer required (module calls)")
+    if scheduler:
+        click.echo("Scheduler: in-process poll loop enabled")
 
     serve_rest(
         app.registry,
@@ -256,6 +408,10 @@ def rest(
         version=__version__,
         cors_origins=cors_origins,
         log_level=log_level,
+        webhook=webhook,
+        webhook_secret=webhook_secret,
+        auth=auth,
+        scheduler=scheduler,
     )
 
 
@@ -298,6 +454,11 @@ def worker(db: str, node_id: Optional[str], log_level: Optional[str]) -> None:
     import asyncio
 
     from apflow.app import create_app
+
+    if log_level:
+        import logging
+
+        logging.getLogger("apflow").setLevel(log_level.upper())
 
     click.echo(f"Starting worker node: {node_id or 'auto'}")
 
@@ -352,6 +513,64 @@ def worker(db: str, node_id: Optional[str], log_level: Optional[str]) -> None:
         asyncio.run(run())
     except KeyboardInterrupt:
         click.echo("Worker stopped")
+
+
+@click.command()
+@click.option("--poll-interval", default=60, type=int, help="Seconds between due-task checks")
+@click.option("--max-concurrent", default=10, type=int, help="Max tasks to execute concurrently")
+@click.option("--user-id", default=None, help="Only process this user's scheduled tasks")
+@click.option("--task-timeout", default=3600, type=int, help="Per-task execution timeout (seconds)")
+@click.option("--db", default=None, help="Database connection string")
+@click.option("--verbose", is_flag=True, help="Print each task execution result")
+@click.option("--log-level", default=None, help="Log level (DEBUG/INFO/WARNING/ERROR)")
+def scheduler(
+    poll_interval: int,
+    max_concurrent: int,
+    user_id: Optional[str],
+    task_timeout: int,
+    db: Optional[str],
+    verbose: bool,
+    log_level: Optional[str],
+) -> None:
+    """Run the internal scheduler: poll for due scheduled tasks and execute them.
+
+    Runs in the foreground until interrupted (Ctrl+C). This is the pull-based
+    complement to the inbound ``schedule.trigger`` module (push). Set
+    APFLOW_API_SERVER_URL to route execution through a running API server;
+    otherwise the scheduler executes against the database directly.
+    """
+    import asyncio
+
+    from apflow.scheduler.base import SchedulerConfig
+    from apflow.scheduler.internal import run_scheduler
+
+    if log_level:
+        import logging
+
+        logging.getLogger("apflow").setLevel(log_level.upper())
+
+    # The scheduler's direct-DB path uses the global pooled session, which binds
+    # its connection on first use from APFLOW_DATABASE_URL / config — not from
+    # --db. Initialize the pool against the requested DB up front so --db is
+    # honored end to end rather than silently connecting to the default database.
+    if db:
+        from apflow.core.storage.factory import get_session_pool_manager
+
+        get_session_pool_manager().initialize(connection_string=db)
+
+    config = SchedulerConfig(
+        poll_interval=poll_interval,
+        max_concurrent_tasks=max_concurrent,
+        task_timeout=task_timeout,
+        user_id=user_id,
+    )
+
+    click.echo(f"Starting scheduler (poll={poll_interval}s, max_concurrent={max_concurrent})")
+    click.echo("Press Ctrl+C to stop")
+    try:
+        asyncio.run(run_scheduler(config, verbose=verbose))
+    except KeyboardInterrupt:
+        click.echo("Scheduler stopped")
 
 
 # Lazily built Click group for use by tests (via CliRunner) and entry point.

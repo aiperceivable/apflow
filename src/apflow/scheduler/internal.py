@@ -1,14 +1,17 @@
 """
 Internal Scheduler Implementation
 
-Built-in scheduler for apflow that polls for due tasks and executes them.
-Uses asyncio for lightweight scheduling without external dependencies.
+Built-in scheduler for apflow that polls for due tasks and executes them
+in-process against the database. Uses asyncio for lightweight scheduling
+without external dependencies.
 
-When APFLOW_API_SERVER_URL is set, the scheduler routes operations through
-the API server (JSON-RPC over HTTP) for data consistency and distributed
-locking. Falls back to direct DB access when not configured.
-
-API mode uses httpx + JSON-RPC 2.0 — no dependency on a2a-sdk or CLI.
+Consistency model (single-node): one poll loop runs in one process, so there
+is no cross-process contention. Re-execution is prevented by
+``mark_scheduled_task_running`` (atomic status transition) plus the in-process
+``_active_task_ids`` set. Run it inside the server process (``serve
+--scheduler``) so it shares the single SQLite writer. For multi-node clusters
+use ``apflow worker`` instead, whose distributed runtime leases tasks atomically
+via PostgreSQL — that is the supported path for distributed coordination.
 """
 
 from __future__ import annotations
@@ -33,10 +36,8 @@ class InternalScheduler(BaseScheduler):
     Built-in scheduler for apflow.
 
     Features:
-    - Auto-detects API server and routes through it when available
-    - Falls back to direct DB access when API is unavailable
-    - Polls for due tasks at configurable intervals
-    - Executes tasks concurrently up to max_concurrent_tasks
+    - Polls the database for due tasks at configurable intervals
+    - Executes tasks in-process concurrently up to max_concurrent_tasks
     - Handles task completion and next_run calculation
     - Supports pause/resume without losing state
     - Multi-user support via user_id filter
@@ -51,18 +52,20 @@ class InternalScheduler(BaseScheduler):
         await scheduler.start()
 
     For CLI usage:
-        apflow scheduler start --poll-interval 60 --max-concurrent 5
+        apflow scheduler --poll-interval 60 --max-concurrent 5
     """
 
     def __init__(self, config: Optional[SchedulerConfig] = None, verbose: bool = False):
         super().__init__(config)
         self._poll_task: Optional[asyncio.Task[None]] = None
-        self._stop_event: Optional[asyncio.Event] = None
-        self._pause_event: Optional[asyncio.Event] = None
+        # asyncio.Event/Semaphore constructors do not bind a loop on 3.10+, so
+        # they are safe to create here (non-Optional); start() re-creates fresh
+        # events to support restart.
+        self._stop_event: asyncio.Event = asyncio.Event()
+        self._pause_event: asyncio.Event = asyncio.Event()
+        self._pause_event.set()  # Not paused initially
         self._active_task_ids: Set[str] = set()
-        self._semaphore: Optional[asyncio.Semaphore] = None
-        self._use_api: bool = False
-        self._auto_auth_token: Optional[str] = None
+        self._semaphore: asyncio.Semaphore = asyncio.Semaphore(self.config.max_concurrent_tasks)
         self._verbose: bool = verbose
         self._task_names: Dict[str, str] = {}
         self._console: Any = None
@@ -75,8 +78,7 @@ class InternalScheduler(BaseScheduler):
         """
         Start the scheduler.
 
-        Begins polling for due tasks and executing them.
-        Auto-detects whether to use API or direct DB access.
+        Begins polling the database for due tasks and executing them in-process.
         Raises RuntimeError if already running.
         """
         if self.stats.state in (SchedulerState.running, SchedulerState.starting):
@@ -90,15 +92,6 @@ class InternalScheduler(BaseScheduler):
 
         self.stats.state = SchedulerState.starting
         self.stats.started_at = datetime.now(timezone.utc)
-
-        # Detect API mode (same pattern as CLI commands)
-        self._use_api = self._detect_api_mode()
-        if self._use_api:
-            logger.info("Scheduler using API mode (server detected)")
-            # Log auth identity for troubleshooting
-            self._log_auth_identity()
-        else:
-            logger.info("Scheduler using direct DB mode")
 
         # Initialize control events
         self._stop_event = asyncio.Event()
@@ -208,7 +201,7 @@ class InternalScheduler(BaseScheduler):
         # Add to active set BEFORE creating task to prevent duplicate triggers
         self._active_task_ids.add(task_id)
         try:
-            asyncio.create_task(self._execute_task(task_id, manual=True))
+            asyncio.create_task(self._execute_task(task_id))
             return True
         except Exception as e:
             # Rollback if task creation fails
@@ -246,108 +239,6 @@ class InternalScheduler(BaseScheduler):
             line += f"\n           [red]Error: {error}[/red]"
         self._console.print(line)
 
-    def _log_auth_identity(self) -> None:
-        """Log the auth identity that will be used for API requests."""
-        token = self._get_auth_token()
-        if token:
-            logger.info("Scheduler auth: JWT token present")
-        else:
-            logger.warning("Scheduler auth: no token (unauthenticated)")
-
-    def _detect_api_mode(self) -> bool:
-        """Detect whether API server is configured via ConfigManager.
-
-        ConfigManager reads APFLOW_API_SERVER_URL from environment.
-        """
-        try:
-            from apflow.core.config_manager import get_config_manager
-
-            return get_config_manager().is_api_configured()
-        except Exception as e:
-            logger.debug(f"API detection failed, using direct DB: {e}")
-            return False
-
-    _rpc_id_counter: int = 0
-    _auth_generation_failed: bool = False
-
-    def _get_auth_token(self) -> Optional[str]:
-        """Get auth token for API requests.
-
-        Auto-generates JWT with 1-hour expiry from ConfigManager.jwt_secret.
-        Cached until near expiry. Returns None if generation failed.
-        """
-        # Don't retry if import/generation already failed
-        if self._auth_generation_failed:
-            return None
-
-        if self._auto_auth_token is None:
-            try:
-                from apflow.core.config_manager import get_config_manager
-                from datetime import timedelta
-
-                jwt_secret = get_config_manager().jwt_secret
-                if jwt_secret:
-                    import jwt
-
-                    self._auto_auth_token = jwt.encode(
-                        {
-                            "sub": "apflow-scheduler",
-                            "roles": ["admin"],
-                            "exp": datetime.now(timezone.utc) + timedelta(hours=1),
-                        },
-                        jwt_secret,
-                        algorithm="HS256",
-                    )
-                    logger.debug("Auto-generated admin JWT (1h expiry)")
-            except ImportError:
-                logger.warning("PyJWT not installed, cannot auto-generate auth token")
-                self._auth_generation_failed = True
-                return None
-            except Exception as e:
-                logger.warning(f"Failed to auto-generate admin JWT: {e}")
-                self._auth_generation_failed = True
-                return None
-
-        return self._auto_auth_token
-
-    async def _rpc_call(self, method: str, timeout: Optional[float] = None, **params: Any) -> Any:
-        """Make a JSON-RPC 2.0 call to the API server.
-
-        Uses httpx directly — no dependency on CLI or a2a-sdk.
-        Server URL and timeout from ConfigManager.
-        """
-        import httpx
-        from apflow.core.config_manager import get_config_manager
-
-        cm = get_config_manager()
-        server_url = cm.api_server_url or "http://localhost:8000"
-        request_timeout = timeout or cm.api_timeout
-
-        headers: Dict[str, str] = {"Content-Type": "application/json"}
-        token = self._get_auth_token()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-
-        InternalScheduler._rpc_id_counter += 1
-        payload = {
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-            "id": InternalScheduler._rpc_id_counter,
-        }
-
-        async with httpx.AsyncClient(timeout=request_timeout) as client:
-            response = await client.post(server_url, json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
-
-        if "error" in data:
-            error = data["error"]
-            msg = error.get("message", str(error)) if isinstance(error, dict) else str(error)
-            raise RuntimeError(f"RPC error ({method}): {msg}")
-
-        return data.get("result")
-
     async def _poll_loop(self) -> None:
         """
         Main polling loop that checks for due tasks.
@@ -382,18 +273,15 @@ class InternalScheduler(BaseScheduler):
                             f"[blue][{now}][/blue] Found {len(due_tasks)} due task(s)"
                         )
 
-                    # Execute due tasks (respecting concurrency limit)
+                    # Execute due tasks (respecting concurrency limit).
+                    # _get_due_tasks returns to_dict()'d rows, so each task is a dict.
                     for task in due_tasks:
                         if self._stop_event.is_set():
                             break
 
-                        task_id = task.get("id") or task.id
+                        task_id = task.get("id", "")
                         if self._verbose:
-                            task_name = (
-                                task.get("name", "")
-                                if isinstance(task, dict)
-                                else getattr(task, "name", "")
-                            )
+                            task_name = task.get("name", "")
                             self._task_names[task_id] = task_name
                         if task_id not in self._active_task_ids:
                             # Add to active set BEFORE creating task to prevent
@@ -428,42 +316,11 @@ class InternalScheduler(BaseScheduler):
         logger.debug("Poll loop ended")
 
     async def _get_due_tasks(self) -> List[Dict[str, Any]]:
-        """
-        Get tasks that are due for execution.
-
-        Uses API when configured, direct DB access otherwise.
-        When API mode is active, does NOT fall back to DB — SQLite's
-        single-writer lock means the API server already holds the lock.
+        """Get tasks that are due for execution (direct database access).
 
         Returns:
             List of task dictionaries that are due
         """
-        if self._use_api:
-            try:
-                return await self._get_due_tasks_via_api()
-            except Exception as e:
-                logger.error(f"API call failed for due tasks: {e}")
-                return []
-
-        return await self._get_due_tasks_via_db()
-
-    async def _get_due_tasks_via_api(self) -> List[Dict[str, Any]]:
-        """Get due tasks via API server (JSON-RPC over HTTP)."""
-        params: Dict[str, Any] = {
-            "limit": self.config.max_concurrent_tasks * 2,
-        }
-        if self.config.user_id:
-            params["user_id"] = self.config.user_id
-
-        result = await self._rpc_call("tasks.scheduled.due", **params)
-        if isinstance(result, list):
-            return result
-        if isinstance(result, dict) and "tasks" in result:
-            return result["tasks"]
-        return []
-
-    async def _get_due_tasks_via_db(self) -> List[Dict[str, Any]]:
-        """Get due tasks via direct database access."""
         try:
             from apflow.core.storage import create_pooled_session
             from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
@@ -483,17 +340,12 @@ class InternalScheduler(BaseScheduler):
             logger.error(f"Failed to get due tasks: {e}", exc_info=True)
             return []
 
-    async def _execute_task(self, task_id: str, manual: bool = False) -> None:
+    async def _execute_task(self, task_id: str) -> None:
         """
-        Execute a single scheduled task.
-
-        Uses API when configured, direct DB access otherwise.
-        When API mode is active, does NOT fall back to DB — SQLite's
-        single-writer lock means the API server already holds the lock.
+        Execute a single scheduled task in-process against the database.
 
         Args:
             task_id: The task ID to execute
-            manual: Whether this is a manual trigger (bypass schedule check)
 
         Note:
             task_id must already be in _active_task_ids before calling this method.
@@ -503,18 +355,6 @@ class InternalScheduler(BaseScheduler):
             # Acquire semaphore to limit concurrency
             async with self._semaphore:
                 self.stats.active_tasks = len(self._active_task_ids)
-
-                if self._use_api:
-                    try:
-                        await self._execute_task_via_api(task_id)
-                    except Exception as e:
-                        logger.error(f"API execution failed for task {task_id}: {e}")
-                        self.stats.tasks_executed += 1
-                        self.stats.tasks_failed += 1
-                        task_name = self._task_names.pop(task_id, "")
-                        self._print_task_result(task_id, task_name, "failed", error=str(e))
-                    return
-
                 await self._execute_task_via_db(task_id)
 
         finally:
@@ -523,67 +363,6 @@ class InternalScheduler(BaseScheduler):
             # never gets to execute due to cancellation or other errors.
             self._active_task_ids.discard(task_id)
             self.stats.active_tasks = len(self._active_task_ids)
-
-    async def _execute_task_via_api(self, task_id: str) -> None:
-        """Execute a task via the API server (JSON-RPC over HTTP).
-
-        Uses tasks.webhook.trigger with async_execution=False, which handles the
-        full execution cycle (mark_running + execute + complete_scheduled_run)
-        atomically on the server side.
-        """
-        logger.debug(f"Executing scheduled task via API: {task_id}")
-
-        result = await self._rpc_call(
-            "tasks.webhook.trigger",
-            timeout=float(self.config.task_timeout),
-            task_id=task_id,
-            async_execution=False,
-        )
-
-        # Parse result and update stats
-        success = False
-        task_result = None
-        error = None
-
-        if isinstance(result, dict):
-            success = result.get("status") == "completed" or result.get("success", False)
-            task_result = result.get("result")
-            error = result.get("error")
-            logger.debug(f"API response for task {task_id}: {result}")
-        else:
-            logger.warning(f"Unexpected API response type for task {task_id}: {type(result)}")
-
-        self.stats.tasks_executed += 1
-        if success:
-            self.stats.tasks_succeeded += 1
-            logger.info(f"Task {task_id} completed successfully via API")
-        elif error:
-            self.stats.tasks_failed += 1
-            logger.warning(f"Task {task_id} failed via API: {error}")
-        else:
-            # Task not completed but no error (e.g., still pending/not ready)
-            self.stats.tasks_failed += 1
-            status = result.get("status") if isinstance(result, dict) else "N/A"
-            logger.debug(f"Task {task_id} not completed via API (status={status})")
-
-        task_name = self._task_names.pop(task_id, "")
-        if isinstance(result, dict):
-            task_name = task_name or result.get("name", "")
-
-        # Print children results first, then parent
-        if self._console and isinstance(result, dict):
-            for child in result.get("children", []):
-                self._print_task_result(
-                    child.get("task_id", ""),
-                    child.get("name", ""),
-                    child.get("status", "unknown"),
-                    error=child.get("error"),
-                )
-        self._print_task_result(
-            task_id, task_name, "completed" if success else "failed", error=error
-        )
-
-        self._notify_task_complete(task_id, success, task_result)
 
     async def _execute_task_via_db(self, task_id: str) -> None:
         """Execute a task via direct database access."""
@@ -751,3 +530,26 @@ async def run_scheduler(config: Optional[SchedulerConfig] = None, verbose: bool 
     finally:
         if scheduler.stats.state != SchedulerState.stopped:
             await scheduler.stop()
+
+
+def make_scheduler_lifespan(config: Optional[SchedulerConfig] = None) -> Any:
+    """Build a Starlette lifespan that runs the scheduler in the server process.
+
+    This is the single-node consistency path: the poll loop shares the server's
+    event loop (and SQLite single writer), so there is no second process
+    contending for the database. Used by ``apflow rest --scheduler`` and
+    ``serve --all --scheduler``; clusters use ``apflow worker`` instead.
+    """
+    from collections.abc import AsyncIterator
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(_app: Any) -> AsyncIterator[None]:
+        scheduler = InternalScheduler(config)
+        await scheduler.start()
+        try:
+            yield
+        finally:
+            await scheduler.stop()
+
+    return lifespan

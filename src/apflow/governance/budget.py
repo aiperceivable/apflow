@@ -84,7 +84,7 @@ class BudgetManager:
         if not task_id:
             raise ValueError("task_id must be non-empty")
 
-        task = self._repo.get_task_by_id(task_id)
+        task = await self._repo.get_task_by_id(task_id)
         if task is None:
             raise KeyError(f"Task '{task_id}' not found")
 
@@ -123,7 +123,7 @@ class BudgetManager:
             if key in token_usage and token_usage[key] < 0:
                 raise ValueError(f"token_usage['{key}'] must be >= 0, got {token_usage[key]}")
 
-        task = self._repo.get_task_by_id(task_id)
+        task = await self._repo.get_task_by_id(task_id)
         if task is None:
             raise KeyError(f"Task '{task_id}' not found")
 
@@ -135,12 +135,9 @@ class BudgetManager:
             "total": existing.get("total", 0) + token_usage.get("total", 0),
         }
 
-        # Update via repository's update method to respect abstraction boundary
-        task.token_usage = accumulated
-        if hasattr(self._repo, "db"):
-            self._repo.db.commit()
-        elif hasattr(self._repo, "commit"):
-            self._repo.commit()
+        # Persist through the repository's async update_task so it works on the
+        # live execution session (the repo is async; a raw sync commit would not).
+        await self._repo.update_task(task_id=task_id, token_usage=accumulated)
 
         if task.token_budget is None:
             return None

@@ -968,7 +968,7 @@ class TaskManager:
                 self._circuit_breaker_registry.get(task.name).record_success()
             if self._checkpoint_manager:
                 try:
-                    self._checkpoint_manager.delete_checkpoints(task_id)
+                    await self._checkpoint_manager.delete_checkpoints(task_id)
                 except Exception as e:
                     logger.debug(f"Task {task_id}: checkpoint cleanup: {e}")
 
@@ -1154,7 +1154,7 @@ class TaskManager:
 
             # --- Durability: Load checkpoint ---
             if self._checkpoint_manager:
-                checkpoint_data = self._checkpoint_manager.load_checkpoint(task_id)
+                checkpoint_data = await self._checkpoint_manager.load_checkpoint(task_id)
                 if checkpoint_data is not None:
                     logger.info(f"Task {task_id}: resuming from checkpoint")
                     # Merge checkpoint data into inputs for executor
@@ -1183,7 +1183,7 @@ class TaskManager:
                         if executor and hasattr(executor, "get_checkpoint"):
                             cp_data = executor.get_checkpoint()
                             if cp_data:
-                                self._checkpoint_manager.save_checkpoint(tid, cp_data)
+                                await self._checkpoint_manager.save_checkpoint(tid, cp_data)
                     # Update attempt count
                     await self.task_repository.update_task(
                         task_id=tid,

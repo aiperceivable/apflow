@@ -102,6 +102,46 @@ class TaskExecutor:
         """Attach the DistributedRuntime (called by the API server at startup)."""
         self.distributed_runtime = runtime
 
+    def _build_execution_components(
+        self, db_session: Union[Session, AsyncSession]
+    ) -> Dict[str, Any]:
+        """Assemble durability + governance components for a per-execution TaskManager.
+
+        Process-singletons (PolicyEngine, CircuitBreakerRegistry) come from the
+        ConfigRegistry; session-bound ones (BudgetManager, CheckpointManager,
+        RetryManager) are built fresh on the live execution session so they share
+        its transaction (the registry never stores a session-bound component built
+        on a different session). Returns TaskManager kwargs; empty when disabled,
+        so behaviour is unchanged unless the app opts in via app.py registration.
+        """
+        from apflow.core.config import (
+            get_circuit_breaker_registry,
+            get_policy_engine,
+            is_durability_enabled,
+            is_governance_enabled,
+        )
+
+        components: Dict[str, Any] = {}
+
+        if is_governance_enabled():
+            from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
+            from apflow.governance import BudgetManager
+
+            components["budget_manager"] = BudgetManager(
+                TaskRepository(db_session, task_model_class=self.task_model_class)
+            )
+            components["policy_engine"] = get_policy_engine()
+
+        if is_durability_enabled():
+            from apflow.durability import CheckpointManager, RetryManager
+
+            checkpoint_manager = CheckpointManager(db_session)
+            components["checkpoint_manager"] = checkpoint_manager
+            components["retry_manager"] = RetryManager(checkpoint_manager=checkpoint_manager)
+            components["circuit_breaker_registry"] = get_circuit_breaker_registry()
+
+        return components
+
     def _is_leader_or_single_node(self) -> bool:
         """Return True when this node may accept mutating operations.
 
@@ -256,6 +296,9 @@ class TaskExecutor:
                 post_hooks=self.post_hooks,
                 executor_instances=self._executor_instances,  # Pass shared executor instances
                 use_demo=use_demo,  # Pass use_demo flag
+                # Durability (F-003) + governance (F-004): wired once here so every
+                # execution path (module/REST/MCP/A2A/scheduler) is consistently governed.
+                **self._build_execution_components(db_session),
             )
 
             # Set tasks to re-execute in TaskManager

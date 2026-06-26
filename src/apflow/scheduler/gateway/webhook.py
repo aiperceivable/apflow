@@ -205,11 +205,13 @@ class WebhookGateway:
         if not self.check_rate_limit(client_ip):
             return {"valid": False, "error": "Rate limit exceeded"}
 
-        # Check signature if configured
-        if self.config.secret_key and payload:
+        # Check signature if configured. A configured secret requires EVERY request
+        # to be signed — including empty-body triggers, where task_id lives in the
+        # URL path — so the HMAC guard cannot be bypassed by omitting the body.
+        if self.config.secret_key:
             if not signature:
                 return {"valid": False, "error": "Missing signature"}
-            if not self.validate_signature(payload, signature, timestamp):
+            if not self.validate_signature(payload or b"", signature, timestamp):
                 return {"valid": False, "error": "Invalid signature"}
 
         return {"valid": True}
@@ -350,6 +352,12 @@ class WebhookGateway:
                 # Get result — capture status/error before complete_scheduled_run
                 # resets the task object via SQLAlchemy identity map
                 task = await task_repository.get_task_by_id(task_id)
+                if task is None:
+                    return {
+                        "success": False,
+                        "error": "Task disappeared during execution",
+                        "task_id": task_id,
+                    }
                 task_status = task.status
                 task_result = task.result
                 task_error = task.error

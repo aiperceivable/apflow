@@ -28,6 +28,14 @@ from apflow.core.config.registry import (
     get_demo_sleep_scale,
     register_webhook_verify_hook,
     get_webhook_verify_hook,
+    set_policy_engine,
+    get_policy_engine,
+    set_circuit_breaker_registry,
+    get_circuit_breaker_registry,
+    set_governance_enabled,
+    is_governance_enabled,
+    set_durability_enabled,
+    is_durability_enabled,
 )
 
 __all__ = [
@@ -50,4 +58,12 @@ __all__ = [
     "get_demo_sleep_scale",
     "register_webhook_verify_hook",
     "get_webhook_verify_hook",
+    "set_policy_engine",
+    "get_policy_engine",
+    "set_circuit_breaker_registry",
+    "get_circuit_breaker_registry",
+    "set_governance_enabled",
+    "is_governance_enabled",
+    "set_durability_enabled",
+    "is_durability_enabled",
 ]

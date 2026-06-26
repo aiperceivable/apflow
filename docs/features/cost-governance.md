@@ -517,6 +517,38 @@ async def test_token_usage_flow():
 
 ---
 
+## Execution Wiring
+
+Governance (and durability, F-003) lives in `TaskManager`, but every execution
+path runs through the singleton `TaskExecutor`, which builds a fresh `TaskManager`
+per execution. Those components are wired in through the global `ConfigRegistry`:
+
+- **app.py** registers the process-singletons (`PolicyEngine`,
+  `CircuitBreakerRegistry`) and flips `set_governance_enabled(True)` /
+  `set_durability_enabled(True)`.
+- **TaskExecutor._build_execution_components(session)** reads those flags and,
+  per execution, builds the session-bound components on the **live execution
+  session** — `BudgetManager(TaskRepository(session))` and
+  `CheckpointManager(session)` — then hands them (plus the singletons) to the
+  `TaskManager` it constructs.
+
+This makes governance consistent across **every** entry point — the
+`task.execute` module, REST/MCP/A2A, and the built-in scheduler — because they
+all execute through the same `TaskExecutor`. The session-bound components are
+never shared across sessions; they are rebuilt each execution so they share the
+executor's transaction.
+
+> Note: `BudgetManager` and `CheckpointManager` are async against the live
+> `AsyncSession` (the execution session is always async). Earlier these classes
+> were sync and only exercised by sync-mock unit tests, so the missing `await`
+> went unnoticed until they were wired into the real execution path.
+
+Coverage: `tests/governance/test_integration.py` proves the async `BudgetManager`
+works against a real repository and that `TaskExecutor` assembles the components
+when governance is enabled.
+
+---
+
 ## Acceptance Criteria
 
 1. A task with `token_budget=1000` is blocked when cumulative usage reaches the limit.

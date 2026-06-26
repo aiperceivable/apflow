@@ -17,7 +17,7 @@ for the lifetime of the server, so uvicorn runs *inside* the ``async with`` bloc
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from typing import Any, Optional
 
 from apcore.registry.registry import Registry
 from starlette.applications import Starlette
@@ -84,16 +84,44 @@ async def _serve_all_async(
     log_level: Optional[str],
     explorer: bool,
     metrics: bool,
+    push_notifications: bool,
+    webhook: bool,
+    webhook_secret: Optional[str],
+    auth: bool,
+    scheduler: bool,
 ) -> None:
-    """Assemble the combined app and run uvicorn inside the MCP async context."""
+    """Assemble the combined app and run uvicorn inside the MCP async context.
+
+    When ``auth`` is set, every face validates the same JWT: A2A and MCP each
+    carry their own authenticator (so their sub-apps self-authenticate, keeping
+    A2A agent-card discovery exempt), while a parent AuthMiddleware guards the
+    REST module routes. The parent exempts the /a2a and /mcp prefixes (handled
+    by the sub-apps), the HMAC webhook, and the public REST metadata paths.
+    """
     import uvicorn
     from apcore_a2a import async_serve as a2a_async_serve
     from apcore_mcp import async_serve as mcp_async_serve
 
     base_url = f"http://{host}:{port}"
+    # The webhook route is lifted to the top level alongside the other REST routes
+    # by assemble_combined (*rest_app.routes), so it serves at /webhook/trigger/...
+    extra_routes = None
+    if webhook:
+        from apflow.api.webhook import build_webhook_routes
+
+        extra_routes = build_webhook_routes(secret_key=webhook_secret)
+
+    a2a_auth = None
+    mcp_auth = None
+    if auth:
+        from apflow.api.auth import build_a2a_authenticator, build_mcp_authenticator
+
+        a2a_auth = build_a2a_authenticator()
+        mcp_auth = build_mcp_authenticator()
+
     # CORS is applied once at the combined parent (assemble_combined), so the REST
     # sub-app is built without its own CORS layer here.
-    rest_app = build_rest_app(registry, title=title, version=version)
+    rest_app = build_rest_app(registry, title=title, version=version, extra_routes=extra_routes)
     a2a_app = await a2a_async_serve(
         registry,
         name=title,
@@ -103,6 +131,8 @@ async def _serve_all_async(
         explorer=explorer,
         metrics=metrics,
         cors_origins=cors_origins,
+        push_notifications=push_notifications,
+        auth=a2a_auth,
     )
 
     # The MCP transport session manager lives for the duration of this block, so
@@ -113,12 +143,37 @@ async def _serve_all_async(
         version=version,
         explorer=explorer,
         observability=metrics,
+        authenticator=mcp_auth,
+        require_auth=auth,
     ) as mcp_app:
         combined = assemble_combined(rest_app, a2a_app, mcp_app, cors_origins=cors_origins)
-        config = uvicorn.Config(
-            combined, host=host, port=port, log_level=(log_level or "info").lower()
-        )
-        await uvicorn.Server(config).serve()
+        app: Any = combined
+        if auth:
+            from apflow.api.auth import apply_rest_auth
+
+            # A2A and MCP self-authenticate inside their mounted sub-apps, so the
+            # parent only needs to guard the lifted REST module routes; exempt the
+            # sub-app prefixes (and MCP's health/metrics) to avoid double-gating.
+            app = apply_rest_auth(
+                combined,
+                mcp_auth,
+                extra_exempt_prefixes={"/a2a", "/mcp", "/health", "/metrics", "/.well-known"},
+            )
+        config = uvicorn.Config(app, host=host, port=port, log_level=(log_level or "info").lower())
+
+        # Run the scheduler poll loop in this same process/event loop (single
+        # SQLite writer) for the lifetime of the server; clusters use worker.
+        scheduler_obj = None
+        if scheduler:
+            from apflow.scheduler.internal import InternalScheduler
+
+            scheduler_obj = InternalScheduler()
+            await scheduler_obj.start()
+        try:
+            await uvicorn.Server(config).serve()
+        finally:
+            if scheduler_obj is not None:
+                await scheduler_obj.stop()
 
 
 def serve_all(
@@ -133,6 +188,11 @@ def serve_all(
     log_level: Optional[str] = None,
     explorer: bool = False,
     metrics: bool = False,
+    push_notifications: bool = False,
+    webhook: bool = False,
+    webhook_secret: Optional[str] = None,
+    auth: bool = False,
+    scheduler: bool = False,
 ) -> None:
     """Build and run the unified REST + A2A + MCP server on one port (blocking)."""
     asyncio.run(
@@ -147,5 +207,10 @@ def serve_all(
             log_level=log_level,
             explorer=explorer,
             metrics=metrics,
+            push_notifications=push_notifications,
+            webhook=webhook,
+            webhook_secret=webhook_secret,
+            auth=auth,
+            scheduler=scheduler,
         )
     )
