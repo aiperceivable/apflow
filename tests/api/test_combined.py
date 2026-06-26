@@ -96,6 +96,7 @@ async def test_serve_all_async_assembles_and_runs() -> None:
             cors_origins=None,
             log_level=None,
             explorer=False,
+
             metrics=False,
             push_notifications=True,
             webhook=True,
@@ -166,6 +167,7 @@ async def test_serve_all_threads_jwt_auth() -> None:
             cors_origins=None,
             log_level=None,
             explorer=False,
+
             metrics=False,
             push_notifications=False,
             webhook=False,
@@ -228,6 +230,7 @@ async def test_serve_all_runs_in_process_scheduler() -> None:
             cors_origins=None,
             log_level=None,
             explorer=False,
+
             metrics=False,
             push_notifications=False,
             webhook=False,

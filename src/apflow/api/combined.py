@@ -142,6 +142,7 @@ async def _serve_all_async(
         name=title,
         version=version,
         explorer=explorer,
+        allow_execute=explorer,
         observability=metrics,
         authenticator=mcp_auth,
         require_auth=auth,
