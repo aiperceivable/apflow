@@ -532,7 +532,30 @@ class ClusterLeader(Base):
 
 
 class TaskEvent(Base):
-    """Audit log for task lifecycle events."""
+    """Distributed-worker audit log — NOT a general task/run history table.
+
+    Scope and intent (read before reusing this table):
+    - Purpose: append-only audit trail of the DISTRIBUTED execution lifecycle
+      (which node assigned / started / completed / failed / reassigned a task).
+      Introduced by migration ``003_add_distributed_support`` purely for
+      observability and debugging of multi-node task processing.
+    - Writers: ONLY ``core/distributed/`` — ``worker.py`` (task_assigned,
+      task_started, task_completed, task_failed) and ``lease_manager.py``
+      (task_reassigned). Written exclusively via ``emit_task_event()``, whose
+      ``VALID_EVENT_TYPES`` whitelist is closed and raises on unknown types.
+    - Readers: NONE in production code. Nothing branches on these rows and no
+      API/CLI/module surfaces them; only tests query the table to assert a row
+      was written. This is a write-only sink.
+    - The in-process scheduler and in-process TaskManager execution paths do
+      NOT write here — a task run outside the distributed worker produces no
+      TaskEvent rows.
+
+    Do NOT overload this table for per-run history (e.g. scheduler run logs,
+    per-fire token usage, result snapshots). ``node_id`` is distributed-specific
+    and meaningless for in-process runs, and there is no read side to build on.
+    Schedule/execution history belongs in a dedicated ``task_run_history`` table
+    with its own schema (run_number, status, token_usage, duration, timestamp).
+    """
 
     __tablename__ = "apflow_task_events"
 
@@ -547,9 +570,13 @@ class TaskEvent(Base):
         index=True,
         nullable=False,
     )
+    # Closed whitelist enforced by emit_task_event's VALID_EVENT_TYPES:
+    # task_assigned, task_started, task_completed, task_failed, task_reassigned.
     event_type = Column(String(50), nullable=False)
-    node_id = Column(String(100), nullable=True)
-    details = Column(JSON, default=dict)
+    node_id = Column(
+        String(100), nullable=True
+    )  # Distributed worker node; null for non-distributed
+    details = Column(JSON, default=dict)  # Event-specific payload (e.g. {"error": ...} on failure)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     def __repr__(self) -> str:
