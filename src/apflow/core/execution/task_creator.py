@@ -1103,6 +1103,69 @@ class TaskCreator:
 
         return task_tree
 
+    async def instantiate_scheduled_run(
+        self,
+        _definition_task: TaskModelType,
+        _save: bool = True,
+    ) -> TaskTreeNode:
+        """
+        Instantiate a fresh run from a scheduled definition (clone-per-fire).
+
+        Clones the definition's task tree into a new independent tree that IS the
+        execution for this fire: stamped origin_type=scheduled_run, with a fresh
+        pending execution state (status/result/error/progress reset) so the
+        scheduler can execute the clone rather than the definition in place. All
+        schedule fields are cleared so the run instance is never itself picked up
+        by the poll loop (schedule_enabled=false). The clone engine sets the
+        run's original_task_id to the most original ancestor, so history is
+        queryable via list_scheduled_runs()/original_task_id.
+
+        The definition itself is never executed — the caller advances its
+        schedule (run_count, next_run_at) separately via complete_scheduled_run.
+
+        Args:
+            _definition_task: The scheduled definition to instantiate a run from.
+            _save: If True, persist the run tree.
+
+        Returns:
+            TaskTreeNode rooted at the fresh pending run instance.
+        """
+        reset_kwargs: Dict[str, Any] = {
+            "origin_type": TaskOriginType.scheduled_run,
+            # Fresh execution state — this instance is about to run.
+            "status": "pending",
+            "result": None,
+            "error": None,
+            "progress": 0.0,
+            "started_at": None,
+            "completed_at": None,
+            "token_usage": None,
+            # Clear scheduling so the run instance is never re-fired by the poll loop.
+            "schedule_type": None,
+            "schedule_expression": None,
+            "schedule_enabled": False,
+            "schedule_start_at": None,
+            "schedule_end_at": None,
+            "next_run_at": None,
+            "last_run_at": None,
+            "max_runs": None,
+            "run_count": 0,
+        }
+
+        original_tree = await self.task_repository.build_task_tree(_definition_task)
+        task_tree = await self._clone_task_tree(original_tree, reset_kwargs)
+        if _save:
+            await self.task_repository.save_task_tree(task_tree)
+            # Keep the definition's reference flag consistent with the new run rows.
+            await self.task_repository._set_original_task_has_reference_to_true(
+                str(_definition_task.id)
+            )
+        logger.info(
+            f"Instantiated scheduled run for definition '{_definition_task.id}' "
+            f"as '{task_tree.task.id}'"
+        )
+        return task_tree
+
     async def from_archive(
         self,
         _original_task: TaskModelType,

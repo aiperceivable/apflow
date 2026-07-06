@@ -188,6 +188,91 @@ applications.
 
 ---
 
+## Run History (Clone-per-fire)
+
+The scheduler uses a **clone-per-fire** model: instead of executing the scheduled task in
+place (which would overwrite the previous `result` and leave no history), each fire
+**clones the definition into a fresh run instance and executes that instance**. The
+definition itself never executes — it only advances its schedule. The set of run
+instances *is* the history, including each fire's `token_usage`.
+
+This is not just for history: it is the model the distributed execution stack requires.
+Lease, idempotency, and checkpoint all key on `task_id` assuming a task is executed once,
+so a recurring in-place task would break them. A fresh clone per fire is a normal
+one-shot task the distributed machinery already handles — see
+[Task Orchestration › System-generated Origin](../architecture/task-orchestration.md#system-generated-origin-scheduled_run).
+
+### Design
+
+On each fire (both the poll loop and the `schedule.trigger` push path):
+
+1. `TaskCreator.instantiate_scheduled_run(definition)` clones the definition's tree into a
+   fresh **pending** run stamped `origin_type=scheduled_run`, with all `schedule_*` fields
+   cleared (`schedule_enabled=false` → never re-selected by `schedule.due`) and
+   `original_task_id` pointing back to the definition.
+2. The scheduler executes the **run instance** (single-node: in-process; distributed:
+   the leader leaves it `pending` for a worker to lease — same model, different execution
+   venue; see [Distributed Scheduling](#distributed-scheduling-cluster)).
+3. `complete_scheduled_run(definition)` advances the definition's `run_count` and
+   `next_run_at`. The definition's own execution fields are never touched.
+
+Reuses the existing Copy/Mixed clone engine (`_clone_task_tree`) — no new table, and no
+`is_template` / `template_id` columns.
+
+### Querying history
+
+```sql
+-- Every run of a scheduled definition, newest first
+SELECT * FROM apflow_tasks
+WHERE original_task_id = :definition_id AND origin_type = 'scheduled_run'
+ORDER BY created_at DESC;
+```
+
+`TaskRepository.list_scheduled_runs(task_id, limit, offset)` wraps this query. Each row
+carries that fire's `result`, `status`, `error`, and `token_usage`.
+
+**Storage note:** history accumulates one run-tree per fire. High-frequency schedules
+should apply a retention policy (prune by age or keep the most recent N) rather than
+retaining every run indefinitely.
+
+---
+
+## Distributed Scheduling (cluster)
+
+In a multi-node cluster, scheduling and execution are decoupled:
+
+- **The elected leader** runs a *dispatch-only* scheduler. On each due schedule it
+  instantiates a fresh pending run instance (`instantiate_scheduled_run`) and advances the
+  definition's schedule — but does **not** execute it. Because leadership is single-holder
+  (leader election), exactly one node dispatches, so a schedule never fires on every node.
+- **Workers** across the cluster lease the pending run instances (`status=pending`) and
+  execute them, using the existing lease / idempotency / checkpoint machinery. Each run is
+  a distinct `task_id`, so those primitives work unchanged — the reason clone-per-fire is
+  the distributed-native model.
+
+```bash
+# Each node: a worker that also participates in leader election; the leader dispatches.
+apflow worker --db postgresql://… --scheduler
+```
+
+Configuration (env or `DistributedConfig`):
+
+| Setting | Env | Default | Description |
+|---|---|---|---|
+| `scheduling_enabled` | `APFLOW_CLUSTER_SCHEDULING` | `false` | Leader runs the dispatch scheduler |
+| `scheduler_poll_interval_seconds` | `APFLOW_SCHEDULER_POLL_INTERVAL` | `30` | Seconds between due-schedule checks |
+
+On leader change (renewal failure → demotion, or graceful shutdown) the dispatch scheduler
+is stopped, so the new leader becomes the sole dispatcher. Distributed mode requires a
+PostgreSQL `--db` (the coordination primitives need its atomic guarantees).
+
+**Boundary:** distributed execution of a run *tree* (children, cross-node dependency
+ordering) is the worker runtime's existing responsibility; the scheduler only produces the
+pending run instances. Duplicate-fire safety across the cluster comes from single-leader
+dispatch; a compare-and-swap claim on `next_run_at` is a possible future hardening.
+
+---
+
 ## Integration with REST / Unified Server
 
 The built-in scheduler can be embedded in the REST or unified server process so it

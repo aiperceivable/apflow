@@ -496,8 +496,15 @@ def info() -> None:
 @click.command()
 @click.option("--db", required=True, help="PostgreSQL connection string (required for cluster)")
 @click.option("--node-id", default=None, help="Worker node ID (auto-generated if omitted)")
+@click.option(
+    "--scheduler",
+    is_flag=True,
+    default=False,
+    help="Enable leader-side scheduling: the elected leader dispatches due schedules "
+    "as pending run instances for workers to execute.",
+)
 @click.option("--log-level", default=None, help="Log level")
-def worker(db: str, node_id: Optional[str], log_level: Optional[str]) -> None:
+def worker(db: str, node_id: Optional[str], scheduler: bool, log_level: Optional[str]) -> None:
     """Start a distributed worker node (requires PostgreSQL)."""
     import asyncio
 
@@ -532,6 +539,8 @@ def worker(db: str, node_id: Optional[str], log_level: Optional[str]) -> None:
 
     config = DistributedConfig.from_env()
     config.enabled = True
+    if scheduler:
+        config.scheduling_enabled = True
     if node_id:
         config.node_id = node_id
     # Validate timing invariants (renew < lease, positive intervals) and auto-generate

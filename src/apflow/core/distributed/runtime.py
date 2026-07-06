@@ -97,6 +97,10 @@ class DistributedRuntime:
         self._lease_token: str | None = None
         self._lease_expires_at: float | None = None
         self._worker_runtime: WorkerRuntime | None = None
+        # Leader-only dispatch scheduler (started when this node is leader and
+        # config.scheduling_enabled). Typed loosely to avoid importing the
+        # scheduler package at module load.
+        self._scheduler: object | None = None
         self._background_tasks: list[asyncio.Task[None]] = []
         self._shutdown_event = asyncio.Event()
 
@@ -176,6 +180,8 @@ class DistributedRuntime:
         """Cancel background tasks, release leadership, deregister node."""
         self._shutdown_event.set()
 
+        await self._stop_leader_scheduler()
+
         if self._worker_runtime is not None:
             await self._worker_runtime.shutdown()
 
@@ -208,6 +214,7 @@ class DistributedRuntime:
                     _utcnow() + timedelta(seconds=self._config.leader_lease_seconds)
                 ).timestamp()
                 self._start_leader_background_tasks()
+                await self._start_leader_scheduler()
                 return
 
             if role_config == "leader":
@@ -245,6 +252,45 @@ class DistributedRuntime:
         self._background_tasks.append(asyncio.create_task(self._lease_cleanup_loop()))
         self._background_tasks.append(asyncio.create_task(self._node_cleanup_loop()))
 
+    async def _start_leader_scheduler(self) -> None:
+        """Start the leader-only dispatch scheduler, if scheduling is enabled.
+
+        The leader runs a dispatch-only scheduler: each due schedule is turned
+        into a fresh pending run instance that distributed workers lease and
+        execute. Because leadership is single-holder, exactly one node dispatches,
+        so schedules do not fire on every node.
+        """
+        if not self._config.scheduling_enabled:
+            return
+        if self._scheduler is not None:
+            return
+
+        from apflow.scheduler.base import SchedulerConfig
+        from apflow.scheduler.internal import InternalScheduler
+
+        scheduler = InternalScheduler(
+            SchedulerConfig(
+                poll_interval=self._config.scheduler_poll_interval_seconds,
+                max_concurrent_tasks=self._config.max_parallel_tasks_per_node,
+            ),
+            dispatch_only=True,
+        )
+        await scheduler.start()
+        self._scheduler = scheduler
+        logger.info("Leader node %s started dispatch-only scheduler", self._node_id)
+
+    async def _stop_leader_scheduler(self) -> None:
+        """Stop the leader-only dispatch scheduler if it is running."""
+        scheduler = self._scheduler
+        if scheduler is None:
+            return
+        self._scheduler = None
+        try:
+            await scheduler.stop()  # type: ignore[attr-defined]
+            logger.info("Leader node %s stopped dispatch-only scheduler", self._node_id)
+        except Exception:
+            logger.error("Failed to stop dispatch scheduler", exc_info=True)
+
     async def _leader_renewal_loop(self) -> None:
         """Renew leader lease periodically. Demotes to worker on failure."""
         while not self._shutdown_event.is_set():
@@ -270,6 +316,9 @@ class DistributedRuntime:
                     "Leader lease renewal failed for node %s, demoting to worker",
                     self._node_id,
                 )
+                # Stop dispatching before demotion so the new leader is the only
+                # node turning schedules into runs.
+                await self._stop_leader_scheduler()
                 self._role = "worker"
                 self._lease_token = None
                 self._lease_expires_at = None

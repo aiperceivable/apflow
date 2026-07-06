@@ -261,15 +261,9 @@ class WebhookGateway:
                         "task_id": task_id,
                     }
 
-                # Mark task as running
-                task = await task_repository.mark_scheduled_task_running(task_id)
-                if not task:
-                    return {
-                        "success": False,
-                        "error": "Task not ready for execution",
-                        "task_id": task_id,
-                    }
-
+            # Clone-per-fire: _execute_task spawns a fresh run instance from the
+            # definition and executes that. The definition is never executed in
+            # place, so it is not marked in_progress here.
             if async_exec:
                 # Execute in background
                 asyncio.create_task(self._execute_task_background(task_id))
@@ -304,6 +298,7 @@ class WebhookGateway:
         """
         from apflow.core.storage import create_pooled_session
         from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
+        from apflow.core.execution.task_creator import TaskCreator
         from apflow.core.execution.task_executor import TaskExecutor
 
         try:
@@ -311,62 +306,60 @@ class WebhookGateway:
                 task_repository = TaskRepository(db_session)
                 task_executor = TaskExecutor()
 
-                # Get task to check execute mode
-                task = await task_repository.get_task_by_id(task_id)
-                if not task:
+                # Get the scheduled definition.
+                definition = await task_repository.get_task_by_id(task_id)
+                if not definition:
                     return {
                         "success": False,
                         "error": "Task not found",
                         "task_id": task_id,
                     }
 
-                # Always load task tree from DB — unified with tree execution model.
-                # For root tasks this returns the complete tree;
-                # for subtasks this returns the subtask's subtree.
-                # Dependency cascade is handled by execute_after_task.
-                task_tree = await task_repository.get_task_tree_for_api(task)
+                # Spawn a fresh run instance from the definition. The definition is
+                # never executed in place — the clone is what runs, giving isolated
+                # per-fire history (origin_type=scheduled_run) and matching the
+                # distributed one-task-id-per-run model.
+                run_tree = await TaskCreator(db_session).instantiate_scheduled_run(definition)
+                run_id = str(run_tree.task.id)
+
+                # Load the run tree from DB — unified with the tree execution model.
+                run = await task_repository.get_task_by_id(run_id)
+                if run is None:
+                    return {
+                        "success": False,
+                        "error": "Run instance disappeared after creation",
+                        "task_id": task_id,
+                    }
+                run_tree = await task_repository.get_task_tree_for_api(run)
                 logger.info(
-                    f"Loaded task tree for {task_id}: " f"{len(task_tree.children)} children"
+                    f"Executing run {run_id} for schedule {task_id}: "
+                    f"{len(run_tree.children)} children"
                 )
 
-                # Reset root task status for executor compatibility.
-                # trigger_task already set it to in_progress via mark_scheduled_task_running
-                # for duplicate prevention, but execute_task_tree skips in_progress tasks
-                # that aren't marked for re-execution — which would cause the entire tree
-                # (including children) to be silently skipped.
-                #
-                # Must persist to DB (not just in-memory) because child task execution
-                # calls expire_all() which discards unpersisted dirty changes. Without
-                # this, the parent reverts to "in_progress" and is skipped by
-                # _check_task_execution_preconditions.
-                await task_repository.update_task(task_id=task_id, status="pending")
-
-                # Execute
                 await task_executor.execute_task_tree(
-                    task_tree=task_tree,
-                    root_task_id=task_id,
+                    task_tree=run_tree,
+                    root_task_id=run_id,
                     use_streaming=False,
                     db_session=db_session,
                 )
 
-                # Get result — capture status/error before complete_scheduled_run
-                # resets the task object via SQLAlchemy identity map
-                task = await task_repository.get_task_by_id(task_id)
-                if task is None:
+                # Capture the run instance's terminal state.
+                run = await task_repository.get_task_by_id(run_id)
+                if run is None:
                     return {
                         "success": False,
-                        "error": "Task disappeared during execution",
+                        "error": "Run instance disappeared during execution",
                         "task_id": task_id,
                     }
-                task_status = task.status
-                task_result = task.result
-                task_error = task.error
+                task_status = run.status
+                task_result = run.result
+                task_error = run.error
                 execution_success = task_status == "completed"
 
                 # Collect children results for visibility
                 children_results = []
-                if getattr(task, "has_children", False):
-                    children = await task_repository.get_child_tasks_by_parent_id(task_id)
+                if getattr(run, "has_children", False):
+                    children = await task_repository.get_child_tasks_by_parent_id(run_id)
                     for child in children:
                         children_results.append(
                             {
@@ -377,7 +370,7 @@ class WebhookGateway:
                             }
                         )
 
-                # Complete scheduled run (update schedule tracking for next run)
+                # Advance the definition's schedule for the next run.
                 await task_repository.complete_scheduled_run(
                     task_id=task_id,
                     success=execution_success,
@@ -389,6 +382,7 @@ class WebhookGateway:
                     "success": execution_success,
                     "status": task_status,
                     "task_id": task_id,
+                    "run_id": run_id,
                     "result": task_result,
                     "error": task_error,
                     "children": children_results,

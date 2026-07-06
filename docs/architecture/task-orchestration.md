@@ -113,6 +113,59 @@ tree = await task_creator.from_mixed(
 
 ---
 
+## System-generated Origin: `scheduled_run`
+
+The five modes above are **user-initiated**. There is one additional `TaskOriginType`
+value that only the **scheduler** produces: `scheduled_run`.
+
+The scheduler follows a **clone-per-fire** model. Each time a scheduled task fires, the
+**definition is cloned into a fresh run instance** and that instance executes — the
+definition itself never runs. This matches how distributed schedulers work (Argo creates
+a Workflow per cron hit, Kubernetes a Job per CronJob hit) and, critically, matches the
+distributed execution stack's assumption that a `task_id` is executed **once** (lease,
+idempotency, and checkpoint all key on `task_id`). A recurring in-place task would violate
+that assumption; a fresh clone per fire honors it.
+
+```python
+# Emitted internally by the scheduler on each fire — not a public creation mode.
+run = await task_creator.instantiate_scheduled_run(definition)   # fresh pending clone
+# ... the scheduler then executes `run`, not `definition` ...
+```
+
+- Reuses `_clone_task_tree` (the same engine behind Copy/Mixed) — no new clone logic.
+- Stamps `origin_type=scheduled_run` to distinguish scheduler runs from user copies.
+- Resets execution state to a fresh **pending** run (`status`, `result`, `error`,
+  `progress`, `token_usage` cleared) and **clears** all `schedule_*` fields, `run_count`,
+  `max_runs`, so the run instance is never itself picked up by the poll loop.
+- Points back to the definition via `original_task_id`, giving a queryable history.
+
+**Single-node vs distributed — one model.** The single-node scheduler executes the clone
+in-process. In a cluster, the elected leader runs a *dispatch-only* scheduler
+(`apflow worker --scheduler`): it instantiates the same pending clone but leaves it for a
+worker to lease and execute. Only the execution venue differs — the clone-per-fire model
+is identical, so there is no model change at the distributed boundary.
+
+### Why no `is_template` / `template_id` columns
+
+Supporting run history needs neither a template flag nor a template foreign key:
+
+| Concern | Handled by (existing) |
+|---|---|
+| "This row is the recurring definition, poll it" | `schedule_enabled=true` (the poll query already filters on it) |
+| "This row is a run instance, do not re-fire it" | the instance has `schedule_enabled=false` → auto-excluded from polling |
+| "Which definition did this run come from?" | `original_task_id` (populated by the clone engine) |
+| "Distinguish scheduler runs from manual copies" | `origin_type=scheduled_run` |
+
+**History query:** `WHERE original_task_id=<definition> AND origin_type='scheduled_run'`.
+
+**Edge case:** the clone engine sets `original_task_id` to the *most original* ancestor.
+When the scheduled definition was itself created fresh (`origin_type=create`, the common
+case) this is exactly the definition; if the definition is itself a copy, runs group under
+that ancestor instead. Promote to a dedicated `template_id` column only if precise
+provenance for copied-then-scheduled definitions is required.
+
+---
+
 ## Execution Model
 
 ### Priority + Dependency Hybrid

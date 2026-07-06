@@ -1302,3 +1302,110 @@ class TestTaskCreator:
 
         result = await creator.create_task_tree_from_array(tasks)
         assert result is not None
+
+
+class TestInstantiateScheduledRun:
+    """Test clone-per-fire run instances (origin_type=scheduled_run)."""
+
+    @pytest.mark.asyncio
+    async def test_instantiate_resets_execution_and_clears_schedule(self, sync_db_session):
+        """A run instance is a fresh pending clone with all schedule fields cleared."""
+        repo = TaskRepository(sync_db_session)
+        creator = TaskCreator(sync_db_session)
+        definition = await repo.create_task(
+            name="daily-report",
+            user_id="user_1",
+            status="completed",
+            result={"value": 42},
+            token_usage={"input": 10, "output": 20, "total": 30},
+            schedule_type="cron",
+            schedule_expression="0 9 * * *",
+            schedule_enabled=True,
+            run_count=5,
+        )
+        sync_db_session.commit()
+        sync_db_session.refresh(definition)
+
+        run = await creator.instantiate_scheduled_run(definition)
+
+        # Provenance: a distinct row pointing back to the definition.
+        assert run.task.origin_type == TaskOriginType.scheduled_run
+        assert run.task.original_task_id == definition.id
+        assert run.task.id != definition.id
+        # Fresh execution state — the instance is about to run, not a record.
+        assert run.task.status == "pending"
+        assert run.task.result is None
+        assert run.task.error is None
+        assert run.task.token_usage is None
+        # Schedule cleared so the poll loop never picks up the run instance.
+        assert run.task.schedule_enabled is False
+        assert run.task.schedule_type is None
+        assert run.task.next_run_at is None
+        assert run.task.run_count == 0
+        # The definition itself keeps its schedule untouched and never becomes a run.
+        sync_db_session.refresh(definition)
+        assert definition.schedule_enabled is True
+        assert definition.origin_type != TaskOriginType.scheduled_run
+
+    @pytest.mark.asyncio
+    async def test_list_scheduled_runs_returns_history_only(self, sync_db_session):
+        """list_scheduled_runs returns run instances for a definition, excluding manual copies."""
+        repo = TaskRepository(sync_db_session)
+        creator = TaskCreator(sync_db_session)
+        definition = await repo.create_task(
+            name="hourly-sync",
+            user_id="user_1",
+            status="completed",
+            result={"n": 1},
+        )
+        sync_db_session.commit()
+        sync_db_session.refresh(definition)
+
+        # Two scheduled fires produce two run rows.
+        await creator.instantiate_scheduled_run(definition)
+        await creator.instantiate_scheduled_run(definition)
+        # A manual copy of the same definition must NOT be counted as a run.
+        await creator.from_copy(_original_task=definition, _save=True, _recursive=False)
+
+        runs = await repo.list_scheduled_runs(definition.id)
+        assert len(runs) == 2
+        assert all(r.origin_type == TaskOriginType.scheduled_run for r in runs)
+        assert all(r.original_task_id == definition.id for r in runs)
+
+    @pytest.mark.asyncio
+    async def test_fire_cycle_keeps_definition_schedulable(self, sync_db_session):
+        """A fire cycle (instantiate run + advance schedule) keeps the definition
+        a schedulable definition and the run a separate instance."""
+        from datetime import datetime, timezone
+
+        repo = TaskRepository(sync_db_session)
+        creator = TaskCreator(sync_db_session)
+        definition = await repo.create_task(
+            name="nightly",
+            status="pending",
+            schedule_type="interval",
+            schedule_expression="3600",
+            schedule_enabled=True,
+            next_run_at=datetime.now(timezone.utc),
+            run_count=0,
+        )
+        sync_db_session.commit()
+        sync_db_session.refresh(definition)
+
+        # Fire: spawn a run instance, then advance the definition's schedule.
+        run = await creator.instantiate_scheduled_run(definition)
+        await repo.complete_scheduled_run(task_id=definition.id, success=True)
+
+        sync_db_session.refresh(definition)
+        # Definition stays schedulable, advanced by one fire, never becomes a run.
+        assert definition.schedule_enabled is True
+        assert definition.run_count == 1
+        assert definition.origin_type != TaskOriginType.scheduled_run
+        # The run instance is separate and does not carry the schedule.
+        assert run.task.id != definition.id
+        assert run.task.origin_type == TaskOriginType.scheduled_run
+        assert run.task.schedule_enabled is False
+        # History finds exactly this one run.
+        runs = await repo.list_scheduled_runs(definition.id)
+        assert len(runs) == 1
+        assert runs[0].id == run.task.id

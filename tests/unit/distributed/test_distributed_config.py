@@ -69,6 +69,27 @@ class TestDistributedConfigFromEnv:
             assert config.node_id == "worker-42"
             assert config.node_role == "worker"
 
+    def test_scheduling_disabled_by_default(self) -> None:
+        """Leader-side scheduling is off unless explicitly enabled."""
+        from apflow.core.distributed.config import DistributedConfig
+
+        assert DistributedConfig().scheduling_enabled is False
+        with patch.dict(os.environ, {}, clear=True):
+            assert DistributedConfig.from_env().scheduling_enabled is False
+
+    def test_from_env_scheduling_enabled(self) -> None:
+        """from_env() reads APFLOW_CLUSTER_SCHEDULING and the scheduler poll interval."""
+        from apflow.core.distributed.config import DistributedConfig
+
+        env = {
+            "APFLOW_CLUSTER_SCHEDULING": "true",
+            "APFLOW_SCHEDULER_POLL_INTERVAL": "15",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            config = DistributedConfig.from_env()
+            assert config.scheduling_enabled is True
+            assert config.scheduler_poll_interval_seconds == 15
+
     def test_from_env_numeric_values(self) -> None:
         """from_env() reads numeric configuration."""
         from apflow.core.distributed.config import DistributedConfig

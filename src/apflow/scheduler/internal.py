@@ -1,17 +1,24 @@
 """
 Internal Scheduler Implementation
 
-Built-in scheduler for apflow that polls for due tasks and executes them
+Built-in scheduler for apflow that polls for due tasks and fires them
 in-process against the database. Uses asyncio for lightweight scheduling
 without external dependencies.
 
-Consistency model (single-node): one poll loop runs in one process, so there
-is no cross-process contention. Re-execution is prevented by
-``mark_scheduled_task_running`` (atomic status transition) plus the in-process
-``_active_task_ids`` set. Run it inside the server process (``serve
---scheduler``) so it shares the single SQLite writer. For multi-node clusters
-use ``apflow worker`` instead, whose distributed runtime leases tasks atomically
-via PostgreSQL — that is the supported path for distributed coordination.
+Clone-per-fire model: each fire clones the scheduled definition into a fresh
+pending run instance (origin_type=scheduled_run) and executes that instance;
+the definition itself never executes, it only advances its schedule. The set of
+run instances is the history (see TaskRepository.list_scheduled_runs). This is
+also the distributed-native model — a future worker bridge would lease the
+run instances instead of executing them in-process.
+
+Consistency model (single-node): one poll loop runs in one process, so there is
+no cross-process contention. Duplicate fires are prevented by the in-process
+``_active_task_ids`` set (a task already firing is skipped). Run it inside the
+server process (``serve --scheduler``) so it shares the single SQLite writer.
+For multi-node clusters use ``apflow worker`` instead, whose distributed runtime
+leases tasks atomically via PostgreSQL — that is the supported path for
+distributed coordination.
 """
 
 from __future__ import annotations
@@ -55,8 +62,18 @@ class InternalScheduler(BaseScheduler):
         apflow scheduler --poll-interval 60 --max-concurrent 5
     """
 
-    def __init__(self, config: Optional[SchedulerConfig] = None, verbose: bool = False):
+    def __init__(
+        self,
+        config: Optional[SchedulerConfig] = None,
+        verbose: bool = False,
+        dispatch_only: bool = False,
+    ):
         super().__init__(config)
+        # Dispatch-only (distributed) mode: each fire instantiates a pending run
+        # instance and advances the definition's schedule, but does NOT execute
+        # the run in-process — distributed workers lease and execute it. Used by
+        # the leader node in a cluster so scheduling and execution are decoupled.
+        self._dispatch_only: bool = dispatch_only
         self._poll_task: Optional[asyncio.Task[None]] = None
         # asyncio.Event/Semaphore constructors do not bind a loop on 3.10+, so
         # they are safe to create here (non-Optional); start() re-creates fresh
@@ -365,78 +382,91 @@ class InternalScheduler(BaseScheduler):
             self.stats.active_tasks = len(self._active_task_ids)
 
     async def _execute_task_via_db(self, task_id: str) -> None:
-        """Execute a task via direct database access."""
+        """Fire a scheduled task via direct database access (clone-per-fire).
+
+        Each fire clones the scheduled definition into a fresh pending run
+        instance (origin_type=scheduled_run) and executes that instance. The
+        definition itself never executes — it only advances its schedule. Run
+        history is the set of instances (see TaskRepository.list_scheduled_runs).
+        """
         success = False
         result = None
         error = None
+        run_id: Optional[str] = None
         task_name = self._task_names.pop(task_id, "")
 
         try:
-            logger.debug(f"Executing scheduled task via DB: {task_id}")
+            logger.debug(f"Firing scheduled task via DB: {task_id}")
 
             from apflow.core.storage import create_pooled_session
             from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
+            from apflow.core.execution.task_creator import TaskCreator
             from apflow.core.execution.task_executor import TaskExecutor
 
-            # Mark task as running
+            # Spawn a fresh run instance from the definition. The definition is
+            # never executed in place — the clone is what runs, giving isolated
+            # per-fire history and matching the distributed one-task-id-per-run
+            # model.
             async with create_pooled_session() as db_session:
                 task_repository = TaskRepository(db_session)
-                task = await task_repository.mark_scheduled_task_running(task_id)
-
-                if not task:
-                    logger.debug(f"Task {task_id} not found or not ready for execution")
+                definition = await task_repository.get_task_by_id(task_id)
+                if not definition:
+                    logger.debug(f"Scheduled task {task_id} not found")
                     return
+                task_name = task_name or getattr(definition, "name", "")
+                run_tree = await TaskCreator(db_session).instantiate_scheduled_run(definition)
+                run_id = str(run_tree.task.id)
 
-            # Execute the task
+            if self._dispatch_only:
+                # Distributed mode: leave the run instance pending for a worker to
+                # lease and execute. The dispatch (fire) itself succeeded; the run's
+                # own outcome is recorded by whichever worker executes it. The finally
+                # block still advances the definition's schedule.
+                success = True
+                self.stats.tasks_executed += 1
+                self.stats.tasks_succeeded += 1
+                logger.info(
+                    f"Dispatched run {run_id} for schedule {task_id} (pending worker execution)"
+                )
+                self._print_task_result(task_id, task_name, "dispatched", error=None)
+                return
+
+            # Execute the run instance in-process (single-node mode).
             task_executor = TaskExecutor()
 
             async with create_pooled_session() as db_session:
                 task_repository = TaskRepository(db_session)
 
-                # Get task to determine execution mode
-                task = await task_repository.get_task_by_id(task_id)
-                if not task:
-                    logger.error(f"Task {task_id} not found")
+                run = await task_repository.get_task_by_id(run_id)
+                if not run:
+                    logger.error(f"Run instance {run_id} not found for schedule {task_id}")
                     return
 
-                # Always load task tree from DB — unified with tree execution model.
-                # For root tasks this returns the complete tree;
-                # for subtasks this returns the subtask's subtree.
-                # Dependency cascade is handled by execute_after_task.
-                task_tree = await task_repository.get_task_tree_for_api(task)
-                logger.debug(f"Loaded task tree for {task_id}: {len(task_tree.children)} children")
+                # Load the run tree from DB — unified with the tree execution model.
+                run_tree = await task_repository.get_task_tree_for_api(run)
+                logger.debug(
+                    f"Executing run {run_id} for schedule {task_id}: "
+                    f"{len(run_tree.children)} children"
+                )
 
-                # Reset root task status for executor compatibility.
-                # mark_scheduled_task_running already set it to in_progress for
-                # duplicate prevention, but execute_task_tree skips in_progress
-                # tasks that aren't marked for re-execution.
-                #
-                # Must persist to DB (not just in-memory) because child task execution
-                # calls expire_all() which discards unpersisted dirty changes. Without
-                # this, the parent reverts to "in_progress" and is skipped by
-                # _check_task_execution_preconditions.
-                await task_repository.update_task(task_id=task_id, status="pending")
-
-                # Execute the task tree
                 await task_executor.execute_task_tree(
-                    task_tree=task_tree,
-                    root_task_id=task_id,
+                    task_tree=run_tree,
+                    root_task_id=run_id,
                     use_streaming=False,
                     db_session=db_session,
                 )
 
-                # Refresh task to get result
-                task = await task_repository.get_task_by_id(task_id)
-                if task:
-                    success = task.status == "completed"
-                    result = task.result
-                    task_name = task_name or getattr(task, "name", "")
-                    if task.error:
-                        error = task.error
+                # Refresh the run instance to get its result.
+                run = await task_repository.get_task_by_id(run_id)
+                if run:
+                    success = run.status == "completed"
+                    result = run.result
+                    if run.error:
+                        error = run.error
 
                     # Print children results in verbose mode
-                    if self._console and getattr(task, "has_children", False):
-                        children = await task_repository.get_child_tasks_by_parent_id(task_id)
+                    if self._console and getattr(run, "has_children", False):
+                        children = await task_repository.get_child_tasks_by_parent_id(run_id)
                         for child in children:
                             self._print_task_result(
                                 child.id,
@@ -448,13 +478,13 @@ class InternalScheduler(BaseScheduler):
             self.stats.tasks_executed += 1
             if success:
                 self.stats.tasks_succeeded += 1
-                logger.info(f"Task {task_id} completed successfully")
+                logger.info(f"Scheduled task {task_id} run {run_id} completed successfully")
             elif error:
                 self.stats.tasks_failed += 1
-                logger.warning(f"Task {task_id} failed: {error}")
+                logger.warning(f"Scheduled task {task_id} run {run_id} failed: {error}")
             else:
                 self.stats.tasks_failed += 1
-                logger.debug(f"Task {task_id} not completed via DB")
+                logger.debug(f"Scheduled task {task_id} run {run_id} not completed")
 
             self._print_task_result(
                 task_id, task_name, "completed" if success else "failed", error=error
@@ -465,11 +495,11 @@ class InternalScheduler(BaseScheduler):
             error = str(e)
             self.stats.tasks_executed += 1
             self.stats.tasks_failed += 1
-            logger.error(f"Error executing task {task_id}: {e}", exc_info=True)
+            logger.error(f"Error firing scheduled task {task_id}: {e}", exc_info=True)
             self._print_task_result(task_id, task_name, "failed", error=error)
 
         finally:
-            # Complete the scheduled run (calculate next execution time)
+            # Advance the definition's schedule (next run time, run_count).
             try:
                 from apflow.core.storage import create_pooled_session
                 from apflow.core.storage.sqlalchemy.task_repository import TaskRepository

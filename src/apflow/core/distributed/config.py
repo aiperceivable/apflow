@@ -85,6 +85,12 @@ class DistributedConfig:
     poll_interval_seconds: int = 5
     max_parallel_tasks_per_node: int = 4
 
+    # Leader-side scheduling: when enabled, the leader runs a dispatch-only
+    # scheduler that turns due schedules into pending run instances for workers
+    # to lease and execute. Exactly one node (the leader) dispatches.
+    scheduling_enabled: bool = False
+    scheduler_poll_interval_seconds: int = 30
+
     # Node health monitoring
     heartbeat_interval_seconds: int = 10
     node_stale_threshold_seconds: int = 30
@@ -103,6 +109,8 @@ class DistributedConfig:
             lease_cleanup_interval_seconds=_int_env("APFLOW_LEASE_CLEANUP_INTERVAL", "10"),
             poll_interval_seconds=_int_env("APFLOW_POLL_INTERVAL", "5"),
             max_parallel_tasks_per_node=_int_env("APFLOW_MAX_PARALLEL_TASKS", "4"),
+            scheduling_enabled=os.getenv("APFLOW_CLUSTER_SCHEDULING", "false").lower() == "true",
+            scheduler_poll_interval_seconds=_int_env("APFLOW_SCHEDULER_POLL_INTERVAL", "30"),
             heartbeat_interval_seconds=_int_env("APFLOW_HEARTBEAT_INTERVAL", "10"),
             node_stale_threshold_seconds=_int_env("APFLOW_NODE_STALE_THRESHOLD", "30"),
             node_dead_threshold_seconds=_int_env("APFLOW_NODE_DEAD_THRESHOLD", "120"),

@@ -6,7 +6,7 @@ import asyncio
 import logging
 from datetime import timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -63,6 +63,7 @@ def _make_runtime(
     runtime._lease_token = None
     runtime._lease_expires_at = None
     runtime._worker_runtime = None
+    runtime._scheduler = None
     runtime._background_tasks = []
     runtime._shutdown_event = asyncio.Event()
     return runtime
@@ -535,3 +536,31 @@ class TestIsLeaderIsPure:
         runtime._role = "leader"
         runtime._lease_expires_at = _utcnow().timestamp() + 100.0
         assert runtime.is_leader is True
+
+
+class TestLeaderScheduler:
+    """Leader-side dispatch scheduler wiring."""
+
+    @pytest.mark.asyncio
+    async def test_scheduler_not_started_when_disabled(self) -> None:
+        runtime = _make_runtime(_make_config(scheduling_enabled=False))
+        await runtime._start_leader_scheduler()
+        assert runtime._scheduler is None
+
+    @pytest.mark.asyncio
+    async def test_scheduler_started_dispatch_only_and_stopped(self) -> None:
+        runtime = _make_runtime(_make_config(scheduling_enabled=True))
+        fake = MagicMock()
+        fake.start = AsyncMock()
+        fake.stop = AsyncMock()
+
+        with patch("apflow.scheduler.internal.InternalScheduler", return_value=fake) as ctor:
+            await runtime._start_leader_scheduler()
+            # Must construct the scheduler in dispatch-only mode.
+            assert ctor.call_args.kwargs.get("dispatch_only") is True
+            fake.start.assert_awaited_once()
+            assert runtime._scheduler is fake
+
+            await runtime._stop_leader_scheduler()
+            fake.stop.assert_awaited_once()
+            assert runtime._scheduler is None

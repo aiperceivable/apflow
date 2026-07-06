@@ -1340,6 +1340,42 @@ class TaskRepository:
 
         return True
 
+    async def list_scheduled_runs(
+        self,
+        task_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[TaskModelType]:
+        """
+        List the frozen run-history snapshots of a scheduled task, newest first.
+
+        Returns the root row of each scheduled run (origin_type=scheduled_run)
+        that points back to the given definition via original_task_id. Child
+        rows of a run point to their own ancestors, so filtering on
+        original_task_id uniquely selects run roots. Each returned row carries
+        that fire's result, status, error, and token_usage.
+
+        Args:
+            task_id: The scheduled definition ID.
+            limit: Maximum number of runs to return.
+            offset: Number of runs to skip (for pagination).
+
+        Returns:
+            List of snapshot root tasks ordered by created_at descending.
+        """
+        stmt = (
+            select(self.task_model_class)
+            .filter(
+                self.task_model_class.original_task_id == task_id,
+                self.task_model_class.origin_type == TaskOriginType.scheduled_run,
+            )
+            .order_by(self.task_model_class.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
+
     def add_tasks_in_db(self, tasks: List[TaskModelType]) -> None:
         """add tasks from database to get latest state"""
         for task in tasks:

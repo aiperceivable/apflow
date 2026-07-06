@@ -43,6 +43,7 @@ class TaskOriginType(StrEnum):
     link = auto()  # Task linked from another
     copy = auto()  # Task copied from another (can be modified)
     archive = auto()  # Task archived from another (can not be modified)
+    scheduled_run = auto()  # Frozen run record snapshotted by the scheduler on each fire
 
 
 class ScheduleType(StrEnum):
