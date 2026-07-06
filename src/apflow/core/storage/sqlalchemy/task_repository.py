@@ -882,9 +882,14 @@ class TaskRepository:
         """
         Mark a scheduled task as running (in_progress) and reset for clean re-execution.
 
-        This is called by the scheduler before executing a task. It resets
-        execution state (status, result, error, progress, timestamps) so the
-        task starts fresh, just like a new tasks.execute call. Also resets
+        NOTE: No longer used by the built-in scheduler, which moved to the
+        clone-per-fire model (each fire instantiates a fresh run instance instead
+        of resetting and re-running the definition in place). Kept as a general
+        storage primitive (e.g. for an external pull-execute integration); safe to
+        remove with its tests if no such caller materializes.
+
+        Resets execution state (status, result, error, progress, timestamps) so
+        the task starts fresh, just like a new tasks.execute call. Also resets
         child tasks if the task has children.
 
         If the task is already in_progress, returns None to avoid double-execution.
@@ -937,6 +942,7 @@ class TaskRepository:
         success: bool = True,
         error: Optional[str] = None,
         calculate_next_run: bool = True,
+        count_run: bool = True,
     ) -> Optional[TaskModelType]:
         """
         Complete a scheduled task run and update schedule tracking.
@@ -961,6 +967,10 @@ class TaskRepository:
             success: Whether the execution was successful
             error: Optional error message (if failed)
             calculate_next_run: If True, calculate and set next_run_at
+            count_run: If True, increment run_count. Pass False when advancing the
+                schedule for a fire that did NOT produce a run here (e.g. a
+                duplicate dispatch already handled by another node) so run_count
+                is not double-counted while next_run_at still moves forward.
 
         Returns:
             Updated task, or None if task not found
@@ -976,7 +986,8 @@ class TaskRepository:
 
             # Update schedule tracking
             task.last_run_at = now
-            task.run_count = (task.run_count or 0) + 1
+            if count_run:
+                task.run_count = (task.run_count or 0) + 1
 
             # Handle pre-execution failure: task never reached executor
             if not success and task.status == "in_progress":
@@ -1126,7 +1137,10 @@ class TaskRepository:
 
         except Exception as e:
             logger.error(f"Error saving task tree to database: {e}")
-            self.db.rollback()
+            # Must be awaited: self.db is an async session proxy, so a bare
+            # rollback() returns an un-awaited coroutine and leaves the session
+            # stuck in a pending-rollback state for the next operation.
+            await self.db.rollback()
             return False
 
     async def _save_task_tree_recursive(self, parent_node: "TaskTreeNode") -> List[TaskModelType]:

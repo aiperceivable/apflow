@@ -1327,6 +1327,7 @@ class TestInstantiateScheduledRun:
         sync_db_session.refresh(definition)
 
         run = await creator.instantiate_scheduled_run(definition)
+        assert run is not None
 
         # Provenance: a distinct row pointing back to the definition.
         assert run.task.origin_type == TaskOriginType.scheduled_run
@@ -1394,6 +1395,7 @@ class TestInstantiateScheduledRun:
 
         # Fire: spawn a run instance, then advance the definition's schedule.
         run = await creator.instantiate_scheduled_run(definition)
+        assert run is not None
         await repo.complete_scheduled_run(task_id=definition.id, success=True)
 
         sync_db_session.refresh(definition)
@@ -1409,3 +1411,59 @@ class TestInstantiateScheduledRun:
         runs = await repo.list_scheduled_runs(definition.id)
         assert len(runs) == 1
         assert runs[0].id == run.task.id
+
+    @pytest.mark.asyncio
+    async def test_idempotency_key_stamped_on_root_only(self, sync_db_session):
+        """The occurrence key lands on the run root, never on child rows."""
+        repo = TaskRepository(sync_db_session)
+        creator = TaskCreator(sync_db_session)
+        parent = await repo.create_task(name="p", user_id="u1", status="completed")
+        child = await repo.create_task(
+            name="c", user_id="u1", status="completed", parent_id=parent.id
+        )
+        parent.has_children = True
+        child.parent_id = parent.id
+        sync_db_session.commit()
+
+        run = await creator.instantiate_scheduled_run(parent, idempotency_key="occ-key-1")
+
+        assert run is not None
+        assert run.task.idempotency_key == "occ-key-1"
+        run_children = await repo.get_child_tasks_by_parent_id(run.task.id)
+        assert len(run_children) == 1
+        assert run_children[0].idempotency_key is None
+
+    @pytest.mark.asyncio
+    async def test_duplicate_dispatch_of_same_slot_is_rejected(self, sync_db_session):
+        """Two dispatches of the same slot (leader handoff) share one occurrence
+        key; the second is rejected by the unique constraint (effectively-once at
+        the orchestration layer)."""
+        from datetime import datetime, timezone
+
+        from apflow.scheduler.internal import scheduled_dispatch_key
+
+        repo = TaskRepository(sync_db_session)
+        creator = TaskCreator(sync_db_session)
+        definition = await repo.create_task(
+            name="charge",
+            user_id="u1",
+            status="pending",
+            schedule_type="cron",
+            schedule_expression="0 9 * * *",
+            schedule_enabled=True,
+            next_run_at=datetime(2026, 7, 6, 9, 0, tzinfo=timezone.utc),
+        )
+        sync_db_session.commit()
+        sync_db_session.refresh(definition)
+
+        key = scheduled_dispatch_key(definition)
+        assert key is not None
+        r1 = await creator.instantiate_scheduled_run(definition, idempotency_key=key)
+        r2 = await creator.instantiate_scheduled_run(definition, idempotency_key=key)
+
+        # First dispatch wins; the duplicate is rejected → only one run exists.
+        assert r1 is not None
+        assert r1.task.idempotency_key == key
+        assert r2 is None
+        runs = await repo.list_scheduled_runs(definition.id)
+        assert len(runs) == 1

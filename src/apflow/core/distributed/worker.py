@@ -139,11 +139,19 @@ class WorkerRuntime:
     def _find_executable_tasks(self) -> list[TaskModel]:
         """Query for tasks that are pending and ready for execution.
 
+        Scheduled definitions (schedule_enabled=true) are excluded: they are
+        recurring templates, not runnable units. The leader's dispatch scheduler
+        turns each due definition into a fresh pending run instance
+        (schedule_enabled=false) — those run instances are what workers execute.
+
         On PostgreSQL, uses SELECT FOR UPDATE SKIP LOCKED so concurrent
         workers get non-overlapping task batches, reducing contention.
         """
         with self._session_factory() as session:
-            query = session.query(TaskModel).filter(TaskModel.status == "pending")
+            query = session.query(TaskModel).filter(
+                TaskModel.status == "pending",
+                TaskModel.schedule_enabled.isnot(True),
+            )
             if is_postgresql(session):
                 query = query.with_for_update(skip_locked=True)
             query = query.limit(self._config.max_parallel_tasks_per_node)

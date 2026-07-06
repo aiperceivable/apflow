@@ -1,7 +1,44 @@
 # Changelog
 
 
-## [0.22.0] - 2026-06-25
+
+## [0.22.0] - 2026-07-06
+
+### Added
+
+- **Clone-per-fire scheduler + run history** — the scheduler no longer executes a scheduled
+  task in place (which overwrote the previous result). Each fire clones the definition into a
+  fresh **run instance** (`origin_type=scheduled_run`) and executes that; the definition never
+  executes, it only advances its schedule. The set of run instances is the history, each
+  carrying its own `result`/`status`/`token_usage`, queryable via
+  `TaskRepository.list_scheduled_runs(task_id)`. Reuses the existing Copy/Mixed clone engine —
+  no new table, no `is_template`/`template_id` columns.
+
+- **Distributed scheduling (`apflow worker --scheduler`)** — the elected leader runs a
+  *dispatch-only* scheduler that turns due schedules into pending run instances for workers to
+  lease and execute. Because leadership is single-holder, exactly one node dispatches. Same
+  clone-per-fire model as single-node; only the execution venue differs. Config:
+  `DistributedConfig.scheduling_enabled` / `scheduler_poll_interval_seconds`
+  (`APFLOW_CLUSTER_SCHEDULING` / `APFLOW_SCHEDULER_POLL_INTERVAL`).
+
+- **Effectively-once dispatch** — each run root is stamped with a deterministic occurrence key
+  `sched-<sha256(definition_id | next_run_at)>` in `idempotency_key`. A partial unique index
+  (`WHERE idempotency_key IS NOT NULL`, migration `005`) rejects a duplicate dispatch of the
+  same slot at INSERT (e.g. during a leader handoff), so the duplicate never becomes a run. The
+  stable key is also available to the business/executor step for its own optimistic lock.
+
+### Fixed
+
+- **Distributed worker executed scheduled definitions** — `WorkerRuntime._find_executable_tasks`
+  polled `status=pending` and would have leased and run the recurring definition itself (which
+  stays pending). It now excludes `schedule_enabled=true` rows; only run instances and plain
+  tasks are executed.
+- **`save_task_tree` left the session unusable on save failure** — its rollback was not awaited
+  on the async session proxy, leaving the session stuck in a pending-rollback state for the next
+  operation. Now awaited.
+- **Rejected duplicate dispatch double-counted `run_count`** — a duplicate dispatch that was
+  rejected still advances `next_run_at` (progress guarantee) but no longer increments
+  `run_count` (`complete_scheduled_run(count_run=False)`), so `max_runs` accounting stays correct.
 
 ### Added
 

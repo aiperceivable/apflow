@@ -1107,7 +1107,8 @@ class TaskCreator:
         self,
         _definition_task: TaskModelType,
         _save: bool = True,
-    ) -> TaskTreeNode:
+        idempotency_key: Optional[str] = None,
+    ) -> Optional[TaskTreeNode]:
         """
         Instantiate a fresh run from a scheduled definition (clone-per-fire).
 
@@ -1126,6 +1127,14 @@ class TaskCreator:
         Args:
             _definition_task: The scheduled definition to instantiate a run from.
             _save: If True, persist the run tree.
+            idempotency_key: Optional business idempotency key for the scheduled
+                occurrence, stamped on the run ROOT only. Duplicate dispatches of
+                the same scheduled slot (e.g. during a leader handoff) should pass
+                the SAME deterministic key so the run instances are recognizable
+                as the same logical occurrence — the business/executor layer can
+                then dedupe (unique constraint / optimistic lock) and stay
+                effectively-once. Manual/ad-hoc triggers should pass None so each
+                run is distinct.
 
         Returns:
             TaskTreeNode rooted at the fresh pending run instance.
@@ -1140,6 +1149,9 @@ class TaskCreator:
             "started_at": None,
             "completed_at": None,
             "token_usage": None,
+            # Cleared here; re-stamped on the ROOT only below (keeps it unique per
+            # occurrence rather than duplicated across every node of the tree).
+            "idempotency_key": None,
             # Clear scheduling so the run instance is never re-fired by the poll loop.
             "schedule_type": None,
             "schedule_expression": None,
@@ -1154,8 +1166,26 @@ class TaskCreator:
 
         original_tree = await self.task_repository.build_task_tree(_definition_task)
         task_tree = await self._clone_task_tree(original_tree, reset_kwargs)
+        # Stamp the occurrence idempotency key on the run root only.
+        if idempotency_key is not None:
+            task_tree.task.idempotency_key = idempotency_key
         if _save:
-            await self.task_repository.save_task_tree(task_tree)
+            # save_task_tree swallows errors and returns False (it rolls the
+            # session back internally). The common failure here is the occurrence
+            # idempotency_key already being taken by a concurrent/duplicate
+            # dispatch of the same scheduled slot (unique constraint) — report
+            # "not created" so the caller skips the duplicate.
+            saved = await self.task_repository.save_task_tree(task_tree)
+            if not saved:
+                # Most often the occurrence key was already taken (duplicate
+                # dispatch rejected by the unique index); it can also be any other
+                # save failure, which save_task_tree has already logged in detail.
+                logger.info(
+                    f"Scheduled run for definition '{_definition_task.id}' with key "
+                    f"'{idempotency_key}' not created (duplicate occurrence or save "
+                    f"failure); skipping"
+                )
+                return None
             # Keep the definition's reference flag consistent with the new run rows.
             await self.task_repository._set_original_task_has_reference_to_true(
                 str(_definition_task.id)

@@ -67,4 +67,4 @@ class TestCLI:
         runner = CliRunner()
         result = runner.invoke(cli, ["--version"])
         assert result.exit_code == 0
-        assert "0.21" in result.output
+        assert "0.22" in result.output

@@ -229,12 +229,12 @@ the database** (the built-in scheduler has no API/RPC mode):
     `--log-level`.
 - **Push (external scheduler):** cron / Kubernetes CronJob / Temporal trigger a task by URL or
   registry call — either `POST /webhook/trigger/{task_id}` (see [Inbound Webhook](#inbound-webhook))
-  or the `schedule.trigger` module. Both reuse `WebhookGateway` (mark running → execute tree →
-  advance next run).
+  or the `schedule.trigger` module. Both reuse `WebhookGateway` (spawn a fresh run instance →
+  execute it → advance the definition's next run).
 
-**Consistency model.** Re-execution is prevented by `mark_scheduled_task_running` (atomic
-status transition) plus the in-process `_active_task_ids` set, so a single poll loop never
-double-runs a task. For **multi-node clusters** use `apflow worker` instead — its distributed
+**Consistency model.** The scheduler uses a clone-per-fire model: each fire spawns an isolated
+run instance, so there is no shared-row contention, and the in-process `_active_task_ids` set
+stops a single poll loop from double-firing a task. For **multi-node clusters** use `apflow worker` instead — its distributed
 runtime leases tasks atomically (leader election + PostgreSQL row locks), which is the
 supported path for distributed coordination. (The old v1 "route scheduler ops through the API
 server for locking" mode has been removed; that indirection is unnecessary now that single-node
@@ -283,8 +283,8 @@ emit ready-to-use crontab lines and CronJob manifests pointing at this endpoint.
   SSE (streaming + non-streaming fallback).
 - `tests/api/test_combined.py` — mount assembly, `_serve_all_async` wiring, push-notification
   and webhook threading, combined JWT auth threading, and in-process scheduler start/stop.
-- `tests/scheduler/test_scheduler.py` — the in-process poll loop, due-task handling, and the
-  `mark_scheduled_task_running` dedup (the removed v1 API mode leaves no `_use_api`/`_rpc_call`).
+- `tests/scheduler/test_scheduler.py` — the in-process poll loop, due-task handling, and
+  in-process `_active_task_ids` dedup (the removed v1 API mode leaves no `_use_api`/`_rpc_call`).
 - `tests/api/test_auth.py` — REST `AuthMiddleware` gating (401/200), exempt paths, webhook
   exemption, HS256 vs RS256 key resolution, and an RS256 sign/verify round-trip.
 - `tests/api/test_webhook.py` — `POST /webhook/trigger/{task_id}` routing, 404/200 status

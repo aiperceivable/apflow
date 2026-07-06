@@ -9,20 +9,24 @@
 
 ## Overview
 
-apflow's built-in scheduler polls the database for scheduled tasks that are due and
-executes them in-process via direct database access, using asyncio for lightweight
-single-node scheduling without external dependencies.
+apflow's built-in scheduler polls the database for scheduled tasks that are due and fires
+them via direct database access, using asyncio for lightweight single-node scheduling
+without external dependencies.
 
-The scheduler operates as a **pull-based** loop: it wakes at a configurable interval,
-fetches tasks whose `next_run_at` has passed, and executes each task tree atomically.
-This complements the **push-based** path: external tools (cron, Kubernetes CronJob,
-Temporal) call `POST /modules/schedule.trigger` or the `POST /webhook/trigger/{task_id}`
-endpoint to start a task on demand.
+The scheduler uses a **clone-per-fire** model: each due schedule is cloned into a fresh
+pending **run instance** and that instance is executed — the recurring definition itself
+never executes, it only advances its schedule (see [Run History](#run-history-clone-per-fire)).
+This gives per-fire history and matches the distributed one-task-id-per-run model.
 
-**Consistency model (single-node):** one poll loop runs in one process. Duplicate
-execution is prevented by the `mark_scheduled_task_running` atomic status transition
-combined with an in-process active-task set. For multi-node clusters, use `apflow worker`
-(PostgreSQL lease-based coordination) instead.
+The scheduler operates as a **pull-based** loop: it wakes at a configurable interval and
+fetches tasks whose `next_run_at` has passed. This complements the **push-based** path:
+external tools (cron, Kubernetes CronJob, Temporal) call `POST /modules/schedule.trigger` or
+the `POST /webhook/trigger/{task_id}` endpoint to fire a task on demand.
+
+**Consistency model (single-node):** one poll loop runs in one process. Duplicate fires are
+prevented by the in-process active-task set; each fire produces an isolated run instance, so
+there is no shared-row contention. For multi-node clusters, use `apflow worker`
+(PostgreSQL lease-based coordination) — see [Distributed Scheduling](#distributed-scheduling-cluster).
 
 ---
 
@@ -122,11 +126,11 @@ that want to poll and execute tasks themselves.
 
 ### `schedule.trigger`
 
-Trigger a scheduled task to execute now. This is the registry-native form of the
+Trigger a scheduled task to fire now. This is the registry-native form of the
 inbound webhook: external schedulers (cron, Kubernetes CronJob, Temporal) call it
-to push-trigger a task, complementing the built-in poll loop's pull model. Internally
-reuses `WebhookGateway`, which marks the task running, executes its tree, and advances
-the next run time.
+to push-fire a task, complementing the built-in poll loop's pull model. Internally
+reuses `WebhookGateway`, which spawns a fresh run instance, executes it, and advances
+the definition's next run time (the returned payload includes the `run_id`).
 
 **Inputs:**
 
@@ -136,7 +140,7 @@ the next run time.
 | `user_id` | string | no | Optional owner check; rejects tasks owned by others |
 | `async_execution` | boolean | no (default: `false`) | Return immediately and run in the background |
 
-**Returns (synchronous):** `{"success": bool, "status": str, "task_id": str, "result": ..., "error": str|null, "children": [...]}`.
+**Returns (synchronous):** `{"success": bool, "status": str, "task_id": str, "run_id": str, "result": ..., "error": str|null, "children": [...]}` — `task_id` is the definition, `run_id` is the executed run instance.
 
 **Returns (async):** `{"success": true, "status": "triggered", "task_id": str, "message": "..."}`.
 
@@ -268,8 +272,30 @@ PostgreSQL `--db` (the coordination primitives need its atomic guarantees).
 
 **Boundary:** distributed execution of a run *tree* (children, cross-node dependency
 ordering) is the worker runtime's existing responsibility; the scheduler only produces the
-pending run instances. Duplicate-fire safety across the cluster comes from single-leader
-dispatch; a compare-and-swap claim on `next_run_at` is a possible future hardening.
+pending run instances.
+
+### Duplicate-dispatch safety (effectively-once)
+
+Two independent layers keep scheduling safe:
+
+1. **No duplicate execution** — a run instance is a distinct `task_id`, leased by exactly
+   one worker (proven by `test_lease_prevents_double_execution`). So a run never executes
+   twice.
+2. **Effectively-once dispatch** — in the rare leader-handoff window two nodes could both
+   dispatch the same due slot. Each dispatch stamps a **deterministic occurrence key** on
+   the run root: `sched-<sha256(definition_id | next_run_at)>` (`scheduled_dispatch_key`),
+   stored in the `idempotency_key` column. A **partial unique index**
+   (`uq_<table>_idempotency_key WHERE idempotency_key IS NOT NULL`, migration `005`) then
+   **rejects the second dispatch at INSERT** — `instantiate_scheduled_run` returns `None`
+   and the scheduler skips it. So the duplicate never even becomes a run. This is
+   enforcement at the orchestration layer, on top of the standard *at-least-once delivery +
+   idempotent consumer* idea; the same stable key is also available to the business/executor
+   step for its own optimistic lock if it wants defence in depth. Ad-hoc / manual triggers
+   pass no key (each is intentionally distinct, and NULL keys are not constrained).
+
+A compare-and-swap claim on `next_run_at` (to avoid even *creating* the losing duplicate
+rather than rejecting it at INSERT) remains a possible efficiency-only hardening, not
+required for correctness.
 
 ---
 

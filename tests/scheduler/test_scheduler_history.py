@@ -308,3 +308,137 @@ class TestDistributedDispatchOnly:
         assert len(runs) == 2
         assert all(r.status == "pending" for r in runs)
         assert len({r.id for r in runs}) == 2
+
+
+class TestScheduledDispatchKey:
+    """Deterministic occurrence idempotency key (dimension B)."""
+
+    def test_key_is_deterministic_and_slot_sensitive(self) -> None:
+        from datetime import datetime, timezone
+
+        from apflow.scheduler.internal import scheduled_dispatch_key
+
+        class _Defn:
+            def __init__(self, id_, nr):
+                self.id = id_
+                self.next_run_at = nr
+
+        slot_a = datetime(2026, 7, 6, 9, 0, tzinfo=timezone.utc)
+        slot_b = datetime(2026, 7, 6, 10, 0, tzinfo=timezone.utc)
+
+        # Same definition + same slot → same key (idempotent across dispatches).
+        assert scheduled_dispatch_key(_Defn("d1", slot_a)) == scheduled_dispatch_key(
+            _Defn("d1", slot_a)
+        )
+        # Different slot → different key (distinct occurrences).
+        assert scheduled_dispatch_key(_Defn("d1", slot_a)) != scheduled_dispatch_key(
+            _Defn("d1", slot_b)
+        )
+        # Different definition → different key.
+        assert scheduled_dispatch_key(_Defn("d1", slot_a)) != scheduled_dispatch_key(
+            _Defn("d2", slot_a)
+        )
+        # No slot → no key (ad-hoc fires are each distinct).
+        assert scheduled_dispatch_key(_Defn("d1", None)) is None
+
+    @pytest.mark.asyncio
+    async def test_fire_stamps_occurrence_key_on_run(self, use_test_db_session):
+        from datetime import datetime, timezone
+
+        from apflow.scheduler.internal import scheduled_dispatch_key
+
+        repo = TaskRepository(use_test_db_session, task_model_class=get_task_model_class())
+        definition = await repo.create_task(
+            name="charge",
+            user_id="u1",
+            status="pending",
+            inputs={"resource": "cpu"},
+            schemas={"method": "aggregate_results_executor"},
+            schedule_type="cron",
+            schedule_expression="0 9 * * *",
+            schedule_enabled=True,
+            next_run_at=datetime(2026, 7, 6, 9, 0, tzinfo=timezone.utc),
+        )
+        expected_key = scheduled_dispatch_key(definition)
+
+        await InternalScheduler(dispatch_only=True)._execute_task_via_db(definition.id)
+
+        runs = await repo.list_scheduled_runs(definition.id)
+        assert len(runs) == 1
+        assert runs[0].idempotency_key == expected_key
+
+
+class TestDuplicateDispatchAccounting:
+    """F1: a rejected duplicate dispatch advances next_run_at but does not
+    double-count run_count."""
+
+    @pytest.mark.asyncio
+    async def test_complete_scheduled_run_count_run_false(self, use_test_db_session):
+        from datetime import datetime, timezone
+
+        repo = TaskRepository(use_test_db_session, task_model_class=get_task_model_class())
+        definition = await repo.create_task(
+            name="sched",
+            user_id="u1",
+            status="pending",
+            schedule_type="interval",
+            schedule_expression="3600",
+            schedule_enabled=True,
+            next_run_at=datetime(2026, 7, 6, 9, 0, tzinfo=timezone.utc),
+            run_count=5,
+        )
+
+        # count_run=False advances the schedule without bumping run_count.
+        updated = await repo.complete_scheduled_run(definition.id, count_run=False)
+        assert updated is not None
+        assert updated.run_count == 5
+        assert updated.next_run_at is not None
+        assert updated.next_run_at != datetime(2026, 7, 6, 9, 0, tzinfo=timezone.utc)
+
+        # Default (count_run=True) still increments.
+        updated2 = await repo.complete_scheduled_run(definition.id)
+        assert updated2 is not None
+        assert updated2.run_count == 6
+
+    @pytest.mark.asyncio
+    async def test_rejected_duplicate_advances_but_does_not_count(self, use_test_db_session):
+        from datetime import datetime, timezone
+
+        from apflow.core.execution.task_creator import TaskCreator
+        from apflow.scheduler.internal import scheduled_dispatch_key
+
+        repo = TaskRepository(use_test_db_session, task_model_class=get_task_model_class())
+        definition = await repo.create_task(
+            name="charge",
+            user_id="u1",
+            status="pending",
+            inputs={"resource": "cpu"},
+            schemas={"method": "aggregate_results_executor"},
+            schedule_type="interval",
+            schedule_expression="3600",
+            schedule_enabled=True,
+            next_run_at=datetime(2026, 7, 6, 9, 0, tzinfo=timezone.utc),
+            run_count=0,
+        )
+        key = scheduled_dispatch_key(definition)
+
+        # A peer node already dispatched this occurrence (occupies the key).
+        prior = await TaskCreator(use_test_db_session).instantiate_scheduled_run(
+            definition, idempotency_key=key
+        )
+        assert prior is not None
+        before = await repo.get_task_by_id(definition.id)
+        assert before is not None
+        prev_next = before.next_run_at
+
+        # This node fires the same slot → instantiate collides → skip.
+        await InternalScheduler(dispatch_only=True)._execute_task_via_db(definition.id)
+
+        after = await repo.get_task_by_id(definition.id)
+        assert after is not None
+        # No duplicate run created.
+        assert len(await repo.list_scheduled_runs(definition.id)) == 1
+        # run_count NOT double-counted by the rejected dispatch.
+        assert after.run_count == 0
+        # ...but next_run_at DID advance (progress guaranteed even on rejection).
+        assert after.next_run_at != prev_next

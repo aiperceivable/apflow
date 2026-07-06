@@ -12,6 +12,8 @@ from sqlalchemy import (
     Boolean,
     Numeric,
     ForeignKey,
+    Index,
+    text,
 )
 from sqlalchemy.sql import func
 from sqlalchemy.orm import declarative_base
@@ -82,6 +84,21 @@ class TaskModel(Base):
     """
 
     __tablename__ = TASK_TABLE_NAME  # Configurable table name (default: "apflow_tasks")
+
+    # Partial unique index on idempotency_key: enforces effectively-once dispatch
+    # for scheduled runs (a duplicate dispatch of the same occurrence carries the
+    # same deterministic key and is rejected at INSERT). Only rows that set a key
+    # are constrained — regular tasks and manual triggers leave it NULL and are
+    # unaffected.
+    __table_args__ = (
+        Index(
+            f"uq_{TASK_TABLE_NAME}_idempotency_key",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL"),
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
+    )
 
     # === Task Definition Identity ===
     id = Column(

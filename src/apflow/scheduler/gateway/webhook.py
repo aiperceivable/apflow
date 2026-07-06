@@ -320,6 +320,12 @@ class WebhookGateway:
                 # per-fire history (origin_type=scheduled_run) and matching the
                 # distributed one-task-id-per-run model.
                 run_tree = await TaskCreator(db_session).instantiate_scheduled_run(definition)
+                if run_tree is None:
+                    return {
+                        "success": False,
+                        "error": "Run instance could not be created (duplicate occurrence)",
+                        "task_id": task_id,
+                    }
                 run_id = str(run_tree.task.id)
 
                 # Load the run tree from DB — unified with the tree execution model.

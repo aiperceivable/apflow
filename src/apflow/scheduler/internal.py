@@ -24,6 +24,7 @@ distributed coordination.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
 
@@ -36,6 +37,23 @@ from apflow.scheduler.base import (
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def scheduled_dispatch_key(definition: Any) -> Optional[str]:
+    """Deterministic idempotency key for one scheduled occurrence.
+
+    Derived from the definition id and its due slot time (``next_run_at``), so
+    duplicate dispatches of the SAME slot — e.g. during a leader handoff where two
+    nodes briefly both dispatch — produce run instances carrying the SAME key. The
+    business/executor layer can then dedupe (unique constraint / optimistic lock)
+    and stay effectively-once. Returns None when there is no scheduled slot (an
+    ad-hoc fire has nothing to dedupe on, so each run should be distinct).
+    """
+    next_run_at = getattr(definition, "next_run_at", None)
+    if next_run_at is None:
+        return None
+    digest = hashlib.sha256(f"{definition.id}|{next_run_at.isoformat()}".encode()).hexdigest()
+    return f"sched-{digest}"
 
 
 class InternalScheduler(BaseScheduler):
@@ -393,6 +411,7 @@ class InternalScheduler(BaseScheduler):
         result = None
         error = None
         run_id: Optional[str] = None
+        count_this_run = True
         task_name = self._task_names.pop(task_id, "")
 
         try:
@@ -414,7 +433,22 @@ class InternalScheduler(BaseScheduler):
                     logger.debug(f"Scheduled task {task_id} not found")
                     return
                 task_name = task_name or getattr(definition, "name", "")
-                run_tree = await TaskCreator(db_session).instantiate_scheduled_run(definition)
+                # Stamp a deterministic occurrence key so a duplicate dispatch of
+                # this same slot (e.g. a leader handoff) is recognizable and can be
+                # deduped by the business layer (effectively-once).
+                run_tree = await TaskCreator(db_session).instantiate_scheduled_run(
+                    definition, idempotency_key=scheduled_dispatch_key(definition)
+                )
+                if run_tree is None:
+                    # This slot's occurrence was already dispatched (duplicate
+                    # rejected by the unique key). Nothing runs here. The finally
+                    # block still advances next_run_at (guaranteeing progress even
+                    # if this was a persistent save failure rather than a genuine
+                    # duplicate) but does NOT count the run — the winning node
+                    # already counted it.
+                    logger.info(f"Scheduled task {task_id} occurrence already dispatched; skipping")
+                    count_this_run = False
+                    return
                 run_id = str(run_tree.task.id)
 
             if self._dispatch_only:
@@ -511,6 +545,7 @@ class InternalScheduler(BaseScheduler):
                         success=success,
                         error=error,
                         calculate_next_run=True,
+                        count_run=count_this_run,
                     )
             except Exception as e:
                 logger.error(f"Failed to complete scheduled run for {task_id}: {e}")

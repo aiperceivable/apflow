@@ -49,7 +49,7 @@ class TestPreservedImports:
     def test_version(self):
         from apflow import __version__
 
-        assert __version__.startswith("0.21")
+        assert __version__.startswith("0.22")
 
 
 class TestDeletedImportsFail:

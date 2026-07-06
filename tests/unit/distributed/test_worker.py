@@ -600,3 +600,42 @@ class TestIdempotencyKeyIncorporatesInputs:
 
         expected = IdempotencyManager.generate_key("task-1", 0, {"a": 1})
         assert idem.check_cached_result.call_args.args[0] == expected
+
+
+class TestExecutableTaskFiltering:
+    """_find_executable_tasks excludes scheduled definitions (runnable units only)."""
+
+    def test_excludes_scheduled_definitions(self) -> None:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+
+        from apflow.core.storage.sqlalchemy.models import Base, TaskModel
+
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+        try:
+            with session_factory() as s:
+                # A recurring definition — must NOT be executed by workers.
+                s.add(TaskModel(id="defn", name="d", status="pending", schedule_enabled=True))
+                # A dispatched run instance — executable.
+                s.add(TaskModel(id="run", name="r", status="pending", schedule_enabled=False))
+                # A plain pending task — executable.
+                s.add(TaskModel(id="plain", name="p", status="pending"))
+                # A completed task — not pending.
+                s.add(TaskModel(id="done", name="x", status="completed", schedule_enabled=False))
+                s.commit()
+
+            worker = _make_worker(
+                config=_make_config(max_parallel_tasks_per_node=10),
+                session_factory=session_factory,
+            )
+            ids = {t.id for t in worker._find_executable_tasks()}
+            assert ids == {"run", "plain"}
+        finally:
+            engine.dispose()
