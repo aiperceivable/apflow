@@ -10,6 +10,7 @@ from apflow.bridge.schedule_modules import (
     ScheduleCompleteModule,
     ScheduleDueModule,
     ScheduleExportICalModule,
+    ScheduleHistoryModule,
     ScheduleSetModule,
     ScheduleTriggerModule,
 )
@@ -31,6 +32,21 @@ def _task(**overrides: Any) -> SimpleNamespace:
     task = SimpleNamespace(**base)
     task.to_dict = lambda: dict(base)
     return task
+
+
+def _run(**overrides: Any) -> SimpleNamespace:
+    base = {
+        "id": "run1",
+        "status": "completed",
+        "result": {"ok": True},
+        "error": None,
+        "token_usage": {"total_tokens": 42},
+        "created_at": "2026-07-06T09:00:00",
+        "started_at": "2026-07-06T09:00:01",
+        "completed_at": "2026-07-06T09:00:02",
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
 
 
 @pytest.mark.asyncio
@@ -131,6 +147,45 @@ async def test_schedule_complete_existing_task_op_failure_is_not_keyerror() -> N
     repo.complete_scheduled_run.return_value = None  # op failed for an existing task
     with pytest.raises(RuntimeError):
         await ScheduleCompleteModule(repo).execute({"task_id": "t1"})
+
+
+@pytest.mark.asyncio
+async def test_schedule_history_lists_runs_newest_first() -> None:
+    repo = AsyncMock()
+    repo.get_task_by_id.return_value = _task()
+    repo.list_scheduled_runs.return_value = [_run(), _run(id="run2")]
+    out = await ScheduleHistoryModule(repo).execute({"task_id": "t1"})
+    repo.list_scheduled_runs.assert_awaited_once_with("t1", limit=100, offset=0)
+    assert out["count"] == 2
+    assert [r["id"] for r in out["runs"]] == ["run1", "run2"]
+    assert out["runs"][0]["result"] == {"ok": True}
+    assert out["runs"][0]["token_usage"] == {"total_tokens": 42}
+
+
+@pytest.mark.asyncio
+async def test_schedule_history_clamps_limit_and_offset() -> None:
+    repo = AsyncMock()
+    repo.get_task_by_id.return_value = _task()
+    repo.list_scheduled_runs.return_value = []
+    await ScheduleHistoryModule(repo).execute({"task_id": "t1", "limit": "9999", "offset": "-5"})
+    kwargs = repo.list_scheduled_runs.await_args.kwargs
+    assert kwargs["limit"] == 1000  # clamped to max
+    assert kwargs["offset"] == 0  # clamped to min
+
+
+@pytest.mark.asyncio
+async def test_schedule_history_missing_task_raises_keyerror() -> None:
+    repo = AsyncMock()
+    repo.get_task_by_id.return_value = None
+    with pytest.raises(KeyError):
+        await ScheduleHistoryModule(repo).execute({"task_id": "x"})
+    repo.list_scheduled_runs.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_schedule_history_requires_task_id() -> None:
+    with pytest.raises(ValueError):
+        await ScheduleHistoryModule(AsyncMock()).execute({"task_id": ""})
 
 
 @pytest.mark.asyncio

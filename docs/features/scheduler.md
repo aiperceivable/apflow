@@ -171,6 +171,27 @@ the task exists but the schedule completion fails (e.g. corrupt schedule configu
 
 ---
 
+### `schedule.history`
+
+List a scheduled definition's run-history snapshots (see
+[Run History](#run-history-clone-per-fire)), newest first.
+
+**Inputs:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `task_id` | string | yes | Scheduled task definition ID |
+| `limit` | integer (1–1000) | no (default: 100) | Max runs to return |
+| `offset` | integer (≥0) | no (default: 0) | Number of runs to skip (pagination) |
+
+**Returns:** `{"runs": [{"id", "status", "result", "error", "token_usage", "created_at", "started_at", "completed_at"}, ...], "count": int}`.
+
+**Behavior:** Raises `KeyError` if the definition does not exist.
+
+**Annotations:** readonly, idempotent, paginated.
+
+---
+
 ### `schedule.export_ical`
 
 Export scheduled tasks as an iCalendar (`.ics`) feed for display in calendar
@@ -232,8 +253,10 @@ WHERE original_task_id = :definition_id AND origin_type = 'scheduled_run'
 ORDER BY created_at DESC;
 ```
 
-`TaskRepository.list_scheduled_runs(task_id, limit, offset)` wraps this query. Each row
-carries that fire's `result`, `status`, `error`, and `token_usage`.
+`TaskRepository.list_scheduled_runs(task_id, limit, offset)` wraps this query, exposed as
+the [`schedule.history`](#schedulehistory) module (and therefore as `apflow schedule
+history`, plus REST/MCP/A2A). Each row carries that fire's `result`, `status`, `error`,
+and `token_usage`.
 
 **Storage note:** history accumulates one run-tree per fire. High-frequency schedules
 should apply a retention policy (prune by age or keep the most recent N) rather than

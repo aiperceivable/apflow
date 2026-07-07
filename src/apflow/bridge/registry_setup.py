@@ -24,6 +24,7 @@ from apflow.bridge.schedule_modules import (
     ScheduleCompleteModule,
     ScheduleDueModule,
     ScheduleExportICalModule,
+    ScheduleHistoryModule,
     ScheduleSetModule,
     ScheduleTriggerModule,
 )
@@ -113,6 +114,7 @@ def create_apflow_registry(
         "schedule.due": ScheduleDueModule(task_repository),
         "schedule.trigger": ScheduleTriggerModule(task_repository),
         "schedule.complete": ScheduleCompleteModule(task_repository),
+        "schedule.history": ScheduleHistoryModule(task_repository),
         "schedule.export_ical": ScheduleExportICalModule(),
     }
     for action, module in task_modules.items():

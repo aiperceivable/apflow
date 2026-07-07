@@ -8,6 +8,7 @@ appear as REST endpoints, MCP tools, A2A skills, and CLI commands:
     schedule.due          -> list scheduled tasks whose next run has arrived
     schedule.trigger      -> execute a scheduled task now (inbound webhook)
     schedule.complete     -> record a run complete + advance the next run
+    schedule.history      -> list a scheduled task's past run instances
     schedule.export_ical  -> export scheduled tasks as an iCalendar feed
 
 The long-running scheduler daemon (start/stop/pause) is intentionally NOT a
@@ -191,6 +192,73 @@ class ScheduleCompleteModule:
                 "(check the task's schedule configuration)"
             )
         return task.to_dict()
+
+
+class ScheduleHistoryModule:
+    """List the run-history snapshots of a scheduled task (clone-per-fire model)."""
+
+    description = (
+        "List the run-history snapshots of a scheduled task, newest first — each "
+        "row is one fire's isolated execution outcome (result, status, error, "
+        "token_usage)."
+    )
+    annotations = ModuleAnnotations(readonly=True, idempotent=True, paginated=True)
+
+    def __init__(self, task_repository: Any) -> None:
+        self._repo = task_repository
+        self.input_schema = _make_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Scheduled task definition ID",
+                    },
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0},
+                },
+                "required": ["task_id"],
+            }
+        )
+        self.output_schema = _make_schema(
+            {
+                "type": "object",
+                "properties": {"runs": {"type": "array"}, "count": {"type": "integer"}},
+            }
+        )
+
+    async def execute(self, inputs: dict[str, Any], _context: Any = None) -> dict[str, Any]:
+        task_id = inputs.get("task_id", "")
+        if not task_id:
+            raise ValueError("task_id must be non-empty")
+
+        # Confirm the definition exists so a typo'd task_id surfaces as a clear
+        # 404 rather than a silently empty run list.
+        if await self._repo.get_task_by_id(task_id) is None:
+            raise KeyError(f"Task '{task_id}' not found")
+
+        runs = await self._repo.list_scheduled_runs(
+            task_id,
+            limit=_coerce_int(inputs.get("limit"), 100, minimum=1, maximum=1000),
+            offset=_coerce_int(inputs.get("offset"), 0, minimum=0),
+        )
+        return {
+            "runs": [
+                {
+                    "id": r.id,
+                    "status": r.status,
+                    "result": r.result,
+                    "error": r.error,
+                    "token_usage": r.token_usage,
+                    "created_at": str(r.created_at) if r.created_at else None,
+                    "started_at": str(r.started_at) if r.started_at else None,
+                    "completed_at": str(r.completed_at) if r.completed_at else None,
+                }
+                for r in runs
+            ],
+            "count": len(runs),
+        }
 
 
 class ScheduleTriggerModule:
