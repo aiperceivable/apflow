@@ -16,6 +16,8 @@ from typing import Any
 
 from apcore import Change, ModuleAnnotations, PreviewResult
 
+from apflow.bridge.errors import invalid_input_error, not_found_error
+
 
 def _make_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Return a deep copy to prevent class-level mutation by apcore."""
@@ -42,7 +44,7 @@ def _coerce_int(
         result = default
     elif isinstance(value, bool):
         # bool is an int subclass; reject it explicitly as a non-integer.
-        raise ValueError("expected an integer, got a boolean")
+        raise invalid_input_error("expected an integer, got a boolean")
     elif isinstance(value, int):
         result = value
     elif isinstance(value, float) and value.is_integer():
@@ -50,7 +52,7 @@ def _coerce_int(
     elif isinstance(value, str) and value.strip().lstrip("-").isdigit():
         result = int(value.strip())
     else:
-        raise ValueError(f"expected an integer, got {type(value).__name__}")
+        raise invalid_input_error(f"expected an integer, got {type(value).__name__}")
     if minimum is not None:
         result = max(minimum, result)
     if maximum is not None:
@@ -71,7 +73,7 @@ def _filter_reuse_overrides(overrides: Any) -> dict[str, Any]:
     if overrides is None:
         return {}
     if not isinstance(overrides, dict):
-        raise ValueError("overrides must be an object")
+        raise invalid_input_error("overrides must be an object")
     return _coerce_int_fields(
         {k: v for k, v in overrides.items() if k in _OVERRIDABLE_REUSE_FIELDS}
     )
@@ -194,7 +196,7 @@ class TaskCreateModule:
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         name = inputs.get("name", "")
         if not name:
-            raise ValueError("Task name must be non-empty")
+            raise invalid_input_error("Task name must be non-empty")
 
         task_data: dict[str, Any] = {"name": name}
         for field in [
@@ -268,14 +270,14 @@ class TaskExecuteModule:
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         task_id = inputs.get("task_id", "")
         if not task_id:
-            raise ValueError("task_id must be non-empty")
+            raise invalid_input_error("task_id must be non-empty")
         return await self._new_executor().execute_task_by_id(task_id)
 
     async def stream(self, inputs: dict[str, Any], context: Any) -> AsyncIterator[dict[str, Any]]:
         """Execute the task, relaying engine progress events as they occur."""
         task_id = inputs.get("task_id", "")
         if not task_id:
-            raise ValueError("task_id must be non-empty")
+            raise invalid_input_error("task_id must be non-empty")
 
         events: asyncio.Queue = asyncio.Queue()
         run = asyncio.create_task(
@@ -372,11 +374,11 @@ class TaskGetModule:
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         task_id = inputs.get("task_id", "")
         if not task_id:
-            raise ValueError("task_id must be non-empty")
+            raise invalid_input_error("task_id must be non-empty")
 
         task = await self._repo.get_task_by_id(task_id)
         if task is None:
-            raise KeyError(f"Task '{task_id}' not found")
+            raise not_found_error(f"Task '{task_id}' not found")
 
         return task.to_dict()
 
@@ -414,11 +416,11 @@ class TaskDeleteModule:
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         task_id = inputs.get("task_id", "")
         if not task_id:
-            raise ValueError("task_id must be non-empty")
+            raise invalid_input_error("task_id must be non-empty")
 
         task = await self._repo.get_task_by_id(task_id)
         if task is None:
-            raise KeyError(f"Task '{task_id}' not found")
+            raise not_found_error(f"Task '{task_id}' not found")
 
         await self._repo.delete_task(task_id)
         return {"task_id": task_id, "deleted": True}
@@ -505,16 +507,16 @@ class TaskCreateTreeModule:
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         raw_tasks = inputs.get("tasks", [])
         if not isinstance(raw_tasks, list):
-            raise ValueError("tasks must be an array")
+            raise invalid_input_error("tasks must be an array")
         if not raw_tasks:
-            raise ValueError("tasks array must be non-empty")
+            raise invalid_input_error("tasks array must be non-empty")
 
         tasks: list[dict[str, Any]] = []
         for index, t in enumerate(raw_tasks):
             if not isinstance(t, dict):
-                raise ValueError(f"tasks[{index}] must be an object")
+                raise invalid_input_error(f"tasks[{index}] must be an object")
             if not t.get("name"):
-                raise ValueError("Each task must have a non-empty 'name'")
+                raise invalid_input_error("Each task must have a non-empty 'name'")
             tasks.append(_filter_task_tree_item(t))
 
         tree = await self._creator.create_task_tree_from_array(tasks)
@@ -591,11 +593,11 @@ class TaskLinkModule:
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         task_id = inputs.get("task_id", "")
         if not task_id:
-            raise ValueError("task_id must be non-empty")
+            raise invalid_input_error("task_id must be non-empty")
 
         task = await self._repo.get_task_by_id(task_id)
         if task is None:
-            raise KeyError(f"Task '{task_id}' not found")
+            raise not_found_error(f"Task '{task_id}' not found")
 
         overrides = _filter_reuse_overrides(inputs.get("overrides"))
         tree = await self._creator.from_link(
@@ -631,11 +633,11 @@ class TaskCopyModule:
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         task_id = inputs.get("task_id", "")
         if not task_id:
-            raise ValueError("task_id must be non-empty")
+            raise invalid_input_error("task_id must be non-empty")
 
         task = await self._repo.get_task_by_id(task_id)
         if task is None:
-            raise KeyError(f"Task '{task_id}' not found")
+            raise not_found_error(f"Task '{task_id}' not found")
 
         overrides = _filter_reuse_overrides(inputs.get("overrides"))
         tree = await self._creator.from_copy(
@@ -672,11 +674,11 @@ class TaskArchiveModule:
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         task_id = inputs.get("task_id", "")
         if not task_id:
-            raise ValueError("task_id must be non-empty")
+            raise invalid_input_error("task_id must be non-empty")
 
         task = await self._repo.get_task_by_id(task_id)
         if task is None:
-            raise KeyError(f"Task '{task_id}' not found")
+            raise not_found_error(f"Task '{task_id}' not found")
 
         tree = await self._creator.from_archive(
             task,
@@ -728,17 +730,23 @@ class TaskCloneMixedModule:
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         task_id = inputs.get("task_id", "")
         if not task_id:
-            raise ValueError("task_id must be non-empty")
+            raise invalid_input_error("task_id must be non-empty")
 
         task = await self._repo.get_task_by_id(task_id)
         if task is None:
-            raise KeyError(f"Task '{task_id}' not found")
+            raise not_found_error(f"Task '{task_id}' not found")
 
         overrides = _filter_reuse_overrides(inputs.get("overrides"))
+        link_task_ids = inputs.get("link_task_ids", [])
+        # Validate the array up front (inputs aren't schema-checked before execute):
+        # a non-list would silently degrade the mixed clone to a full copy (string
+        # iterated per-character) or raise an unclean 500 inside from_mixed.
+        if not isinstance(link_task_ids, list):
+            raise invalid_input_error("link_task_ids must be an array")
         tree = await self._creator.from_mixed(
             task,
             _recursive=inputs.get("recursive", True),
-            _link_task_ids=inputs.get("link_task_ids", []),
+            _link_task_ids=link_task_ids,
             **overrides,
         )
 
@@ -801,11 +809,11 @@ class TaskUpdateModule:
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         task_id = inputs.get("task_id", "")
         if not task_id:
-            raise ValueError("task_id must be non-empty")
+            raise invalid_input_error("task_id must be non-empty")
 
         task = await self._repo.get_task_by_id(task_id)
         if task is None:
-            raise KeyError(f"Task '{task_id}' not found")
+            raise not_found_error(f"Task '{task_id}' not found")
 
         update_fields = {
             field: inputs[field]
@@ -873,9 +881,9 @@ class TaskCancelModule:
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         task_ids = inputs.get("task_ids", [])
         if not isinstance(task_ids, list):
-            raise ValueError("task_ids must be an array")
+            raise invalid_input_error("task_ids must be an array")
         if not task_ids:
-            raise ValueError("task_ids must be non-empty")
+            raise invalid_input_error("task_ids must be non-empty")
 
         error_message = inputs.get("error_message", "Cancelled via API")
         results = []
@@ -906,11 +914,11 @@ class TaskTreeModule:
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         task_id = inputs.get("task_id", "")
         if not task_id:
-            raise ValueError("task_id must be non-empty")
+            raise invalid_input_error("task_id must be non-empty")
 
         task = await self._repo.get_task_by_id(task_id)
         if task is None:
-            raise KeyError(f"Task '{task_id}' not found")
+            raise not_found_error(f"Task '{task_id}' not found")
 
         tree = await self._repo.build_task_tree(task)
         return tree.output()
@@ -935,7 +943,7 @@ class TaskChildrenModule:
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
         task_id = inputs.get("task_id", "")
         if not task_id:
-            raise ValueError("task_id must be non-empty")
+            raise invalid_input_error("task_id must be non-empty")
 
         children = await self._repo.get_child_tasks_by_parent_id(task_id)
         return {

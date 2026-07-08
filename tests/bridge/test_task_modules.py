@@ -3,6 +3,7 @@
 import asyncio
 
 import pytest
+from apcore.errors import ModuleError
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from apflow.bridge.task_modules import (
@@ -60,13 +61,13 @@ class TestTaskCreateModule:
     @pytest.mark.asyncio
     async def test_create_empty_name_raises(self):
         module = TaskCreateModule(MagicMock(), MagicMock())
-        with pytest.raises(ValueError, match="non-empty"):
+        with pytest.raises(ModuleError, match="non-empty"):
             await module.execute({"name": ""})
 
     @pytest.mark.asyncio
     async def test_create_missing_name_raises(self):
         module = TaskCreateModule(MagicMock(), MagicMock())
-        with pytest.raises(ValueError, match="non-empty"):
+        with pytest.raises(ModuleError, match="non-empty"):
             await module.execute({})
 
     @pytest.mark.asyncio
@@ -94,7 +95,7 @@ class TestTaskCreateModule:
     @pytest.mark.asyncio
     async def test_create_invalid_priority_raises_valueerror(self):
         module = TaskCreateModule(MagicMock(), MagicMock())
-        with pytest.raises(ValueError):
+        with pytest.raises(ModuleError):
             await module.execute({"name": "t", "priority": "not-a-number"})
 
 
@@ -149,7 +150,7 @@ class TestTaskExecuteModule:
     @pytest.mark.asyncio
     async def test_execute_empty_id_raises(self):
         module = TaskExecuteModule(MagicMock())
-        with pytest.raises(ValueError):
+        with pytest.raises(ModuleError):
             await module.execute({"task_id": ""})
 
     @pytest.mark.asyncio
@@ -174,7 +175,7 @@ class TestTaskExecuteModule:
     @pytest.mark.asyncio
     async def test_stream_empty_id_raises(self):
         module = TaskExecuteModule(MagicMock())
-        with pytest.raises(ValueError):
+        with pytest.raises(ModuleError):
             async for _event in module.stream({"task_id": ""}, None):
                 pass
 
@@ -271,13 +272,13 @@ class TestTaskGetModule:
         repo = _mock_repo(task=None)
 
         module = TaskGetModule(repo)
-        with pytest.raises(KeyError, match="not found"):
+        with pytest.raises(ModuleError, match="not found"):
             await module.execute({"task_id": "nonexistent"})
 
     @pytest.mark.asyncio
     async def test_get_empty_id_raises(self):
         module = TaskGetModule(MagicMock())
-        with pytest.raises(ValueError):
+        with pytest.raises(ModuleError):
             await module.execute({"task_id": ""})
 
 
@@ -296,7 +297,7 @@ class TestTaskDeleteModule:
         repo = _mock_repo(task=None)
 
         module = TaskDeleteModule(repo)
-        with pytest.raises(KeyError, match="not found"):
+        with pytest.raises(ModuleError, match="not found"):
             await module.execute({"task_id": "nonexistent"})
 
 
@@ -309,7 +310,7 @@ class TestTaskListInputValidation:
     @pytest.mark.asyncio
     async def test_list_non_numeric_limit_raises_valueerror_not_typeerror(self):
         module = TaskListModule(_mock_repo())
-        with pytest.raises(ValueError, match="integer"):
+        with pytest.raises(ModuleError, match="integer"):
             await module.execute({"limit": "abc"})
 
     @pytest.mark.asyncio
@@ -339,13 +340,13 @@ class TestTaskCreateTreeInputValidation:
     @pytest.mark.asyncio
     async def test_create_tree_non_dict_element_raises_valueerror(self):
         module = TaskCreateTreeModule(MagicMock(), MagicMock())
-        with pytest.raises(ValueError, match="object"):
+        with pytest.raises(ModuleError, match="object"):
             await module.execute({"tasks": ["build", "test"]})
 
     @pytest.mark.asyncio
     async def test_create_tree_non_list_raises_valueerror(self):
         module = TaskCreateTreeModule(MagicMock(), MagicMock())
-        with pytest.raises(ValueError, match="array"):
+        with pytest.raises(ModuleError, match="array"):
             await module.execute({"tasks": "not-a-list"})
 
 
@@ -419,7 +420,7 @@ class TestTaskCreateTreeFieldWhitelist:
         (Review CRITICAL #14)
         """
         module = TaskCreateTreeModule(MagicMock(), MagicMock())
-        with pytest.raises(ValueError):
+        with pytest.raises(ModuleError):
             await module.execute({"tasks": [{"name": "Task A", "priority": "not-a-number"}]})
 
 
@@ -461,7 +462,7 @@ class TestTaskUpdateFieldWhitelist:
         repo.update_task = AsyncMock(return_value=None)
 
         module = TaskUpdateModule(repo)
-        with pytest.raises(ValueError):
+        with pytest.raises(ModuleError):
             await module.execute({"task_id": "t1", "priority": "not-a-number"})
 
 
@@ -470,13 +471,13 @@ class TestTaskCancelModuleGuards:
     async def test_string_task_ids_raises(self):
         """A non-list task_ids (e.g. a bare string) must raise, not iterate char-by-char."""
         module = TaskCancelModule(MagicMock())
-        with pytest.raises(ValueError, match="array"):
+        with pytest.raises(ModuleError, match="array"):
             await module.execute({"task_ids": "abc123"})
 
     @pytest.mark.asyncio
     async def test_empty_task_ids_raises(self):
         module = TaskCancelModule(MagicMock())
-        with pytest.raises(ValueError, match="non-empty"):
+        with pytest.raises(ModuleError, match="non-empty"):
             await module.execute({"task_ids": []})
 
 
@@ -515,7 +516,7 @@ class TestTaskReuseOverrideAllowlist:
         creator = MagicMock()
         repo = _mock_repo(task=_mock_task())
         module = TaskCopyModule(creator, repo)
-        with pytest.raises(ValueError, match="overrides must be an object"):
+        with pytest.raises(ModuleError, match="overrides must be an object"):
             await module.execute({"task_id": "t1", "overrides": "nope"})
 
     @pytest.mark.asyncio
@@ -526,7 +527,7 @@ class TestTaskReuseOverrideAllowlist:
         creator = MagicMock()
         repo = _mock_repo(task=_mock_task())
         module = TaskCopyModule(creator, repo)
-        with pytest.raises(ValueError):
+        with pytest.raises(ModuleError):
             await module.execute({"task_id": "t1", "overrides": {"priority": "not-a-number"}})
 
 

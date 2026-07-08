@@ -23,6 +23,7 @@ from typing import Any
 
 from apcore import ModuleAnnotations
 
+from apflow.bridge.errors import invalid_input_error, not_found_error
 from apflow.bridge.task_modules import _coerce_int, _make_schema
 
 
@@ -68,7 +69,7 @@ class ScheduleSetModule:
         schedule_type = inputs.get("schedule_type", "")
         schedule_expression = inputs.get("schedule_expression", "")
         if not task_id or not schedule_type or not schedule_expression:
-            raise ValueError("task_id, schedule_type and schedule_expression are required")
+            raise invalid_input_error("task_id, schedule_type and schedule_expression are required")
 
         # Validate the schedule BEFORE persisting, so an invalid type/expression never
         # leaves a half-applied schedule on the task and surfaces a clear error rather
@@ -77,13 +78,13 @@ class ScheduleSetModule:
         try:
             ScheduleCalculator.calculate_next_run(schedule_type, schedule_expression)
         except ValueError as exc:
-            raise ValueError(f"Invalid schedule: {exc}") from exc
+            raise invalid_input_error(f"Invalid schedule: {exc}") from exc
 
         # Confirm the task exists before mutating: a genuine miss raises KeyError here,
         # so a later None from initialize_schedule can only mean an internal operation
         # failure (e.g. a corrupt stored schedule), never a lookup miss.
         if await self._repo.get_task_by_id(task_id) is None:
-            raise KeyError(f"Task '{task_id}' not found")
+            raise not_found_error(f"Task '{task_id}' not found")
 
         fields: dict[str, Any] = {
             "schedule_type": schedule_type,
@@ -175,14 +176,14 @@ class ScheduleCompleteModule:
     async def execute(self, inputs: dict[str, Any], _context: Any = None) -> dict[str, Any]:
         task_id = inputs.get("task_id", "")
         if not task_id:
-            raise ValueError("task_id must be non-empty")
+            raise invalid_input_error("task_id must be non-empty")
 
         # complete_scheduled_run returns None for BOTH a missing task and a swallowed
         # failure (e.g. a corrupt stored schedule). Check existence first so an existing
         # task is never misreported as "not found"; a None after that is an operation
         # failure, surfaced distinctly rather than as a 404.
         if await self._repo.get_task_by_id(task_id) is None:
-            raise KeyError(f"Task '{task_id}' not found")
+            raise not_found_error(f"Task '{task_id}' not found")
 
         task = await self._repo.complete_scheduled_run(
             task_id=task_id,
@@ -235,12 +236,12 @@ class ScheduleHistoryModule:
     async def execute(self, inputs: dict[str, Any], _context: Any = None) -> dict[str, Any]:
         task_id = inputs.get("task_id", "")
         if not task_id:
-            raise ValueError("task_id must be non-empty")
+            raise invalid_input_error("task_id must be non-empty")
 
         # Confirm the definition exists so a typo'd task_id surfaces as a clear
         # 404 rather than a silently empty run list.
         if await self._repo.get_task_by_id(task_id) is None:
-            raise KeyError(f"Task '{task_id}' not found")
+            raise not_found_error(f"Task '{task_id}' not found")
 
         runs = await self._repo.list_scheduled_runs(
             task_id,
@@ -314,13 +315,13 @@ class ScheduleTriggerModule:
 
         task_id = inputs.get("task_id", "")
         if not task_id:
-            raise ValueError("task_id must be non-empty")
+            raise invalid_input_error("task_id must be non-empty")
 
         # Surface a genuine miss as a distinct KeyError (REST maps it to 404) rather
         # than the gateway's generic {"success": False} payload. A task's own
         # execution failure is a valid result (success=False), not a lookup error.
         if await self._repo.get_task_by_id(task_id) is None:
-            raise KeyError(f"Task '{task_id}' not found")
+            raise not_found_error(f"Task '{task_id}' not found")
 
         gateway = WebhookGateway()
         return await gateway.trigger_task(

@@ -5,6 +5,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from apcore.errors import ModuleError
 
 from apflow.bridge.schedule_modules import (
     ScheduleCompleteModule,
@@ -74,7 +75,7 @@ async def test_schedule_set_updates_then_initializes() -> None:
 
 @pytest.mark.asyncio
 async def test_schedule_set_requires_type_and_expression() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ModuleError):
         await ScheduleSetModule(AsyncMock()).execute({"task_id": "t1"})
 
 
@@ -84,7 +85,7 @@ async def test_schedule_set_invalid_schedule_rejected_without_write() -> None:
     # (no partial write) — not a misleading "task not found".
     repo = AsyncMock()
     with patch(_CALC, side_effect=ValueError("Unknown schedule type: bogus")):
-        with pytest.raises(ValueError, match="Invalid schedule"):
+        with pytest.raises(ModuleError, match="Invalid schedule"):
             await ScheduleSetModule(repo).execute(
                 {"task_id": "t1", "schedule_type": "bogus", "schedule_expression": "x"}
             )
@@ -113,7 +114,7 @@ async def test_schedule_set_missing_task_raises_keyerror() -> None:
     repo = AsyncMock()
     repo.get_task_by_id.return_value = None  # task does not exist
     with patch(_CALC, return_value=None):
-        with pytest.raises(KeyError):
+        with pytest.raises(ModuleError):
             await ScheduleSetModule(repo).execute(
                 {"task_id": "x", "schedule_type": "cron", "schedule_expression": "* * * * *"}
             )
@@ -149,7 +150,7 @@ async def test_schedule_complete_coerces_and_calls_repo() -> None:
 async def test_schedule_complete_missing_task_raises_keyerror() -> None:
     repo = AsyncMock()
     repo.get_task_by_id.return_value = None
-    with pytest.raises(KeyError):
+    with pytest.raises(ModuleError):
         await ScheduleCompleteModule(repo).execute({"task_id": "x"})
     repo.complete_scheduled_run.assert_not_awaited()
 
@@ -193,14 +194,14 @@ async def test_schedule_history_clamps_limit_and_offset() -> None:
 async def test_schedule_history_missing_task_raises_keyerror() -> None:
     repo = AsyncMock()
     repo.get_task_by_id.return_value = None
-    with pytest.raises(KeyError):
+    with pytest.raises(ModuleError):
         await ScheduleHistoryModule(repo).execute({"task_id": "x"})
     repo.list_scheduled_runs.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_schedule_history_requires_task_id() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ModuleError):
         await ScheduleHistoryModule(AsyncMock()).execute({"task_id": ""})
 
 
@@ -231,14 +232,14 @@ async def test_schedule_trigger_missing_task_raises_keyerror() -> None:
     repo = AsyncMock()
     repo.get_task_by_id.return_value = None
     with patch("apflow.scheduler.gateway.webhook.WebhookGateway") as gateway_cls:
-        with pytest.raises(KeyError):
+        with pytest.raises(ModuleError):
             await ScheduleTriggerModule(repo).execute({"task_id": "x"})
     gateway_cls.return_value.trigger_task.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_schedule_trigger_requires_task_id() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ModuleError):
         await ScheduleTriggerModule(AsyncMock()).execute({"task_id": ""})
 
 
