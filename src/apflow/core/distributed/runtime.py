@@ -182,14 +182,20 @@ class DistributedRuntime:
 
         await self._stop_leader_scheduler()
 
+        worker_deregistered = self._worker_runtime is not None
         if self._worker_runtime is not None:
+            # WorkerRuntime.shutdown() already deregisters this node.
             await self._worker_runtime.shutdown()
 
         if self._role == "leader" and self._lease_token is not None:
             self._leader_election.release_leadership(self._node_id, self._lease_token)
             logger.info("Leadership released by node %s", self._node_id)
 
-        self._node_registry.deregister_node(self._node_id)
+        # Deregister the node exactly once. When a worker runtime ran (worker or a
+        # demoted leader), it already deregistered; a second deregister here would
+        # raise NodeNotFoundError and abort the graceful shutdown.
+        if not worker_deregistered:
+            self._node_registry.deregister_node(self._node_id)
         logger.info("Node %s shut down gracefully", self._node_id)
 
     async def _select_role(self) -> None:

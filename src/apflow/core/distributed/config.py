@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Any, Union
 
 from sqlalchemy.orm import Session
 
@@ -28,6 +28,15 @@ def _int_env(key: str, default: str) -> int:
         return int(value)
     except ValueError:
         return int(default)
+
+
+def _csv_env(key: str, default: list[str]) -> list[str]:
+    """Read a comma-separated list from environment, else the default."""
+    raw = os.getenv(key)
+    if not raw:
+        return list(default)
+    items = [item.strip() for item in raw.split(",") if item.strip()]
+    return items or list(default)
 
 
 # All datetime values in the distributed module use timezone-aware UTC
@@ -96,6 +105,13 @@ class DistributedConfig:
     node_stale_threshold_seconds: int = 30
     node_dead_threshold_seconds: int = 120
 
+    # Executor types / capabilities this node advertises. Placement constraints
+    # (require_executors / require_capabilities) are matched against these, so a
+    # node must declare what it can actually run — otherwise any task with a
+    # non-default constraint is ineligible on every node and starves silently.
+    node_executor_types: list[str] = field(default_factory=lambda: ["default"])
+    node_capabilities: dict[str, Any] = field(default_factory=dict)
+
     @classmethod
     def from_env(cls) -> DistributedConfig:
         """Load configuration from environment variables."""
@@ -114,6 +130,7 @@ class DistributedConfig:
             heartbeat_interval_seconds=_int_env("APFLOW_HEARTBEAT_INTERVAL", "10"),
             node_stale_threshold_seconds=_int_env("APFLOW_NODE_STALE_THRESHOLD", "30"),
             node_dead_threshold_seconds=_int_env("APFLOW_NODE_DEAD_THRESHOLD", "120"),
+            node_executor_types=_csv_env("APFLOW_NODE_EXECUTOR_TYPES", ["default"]),
         )
 
     def validate_and_initialize(self) -> None:

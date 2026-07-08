@@ -24,12 +24,6 @@ from apflow.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Registered for every node until node capability declaration is supported;
-# shared between register_node() and the placement self-check below so they
-# never drift apart.
-_DEFAULT_EXECUTOR_TYPES = ["default"]
-_DEFAULT_CAPABILITIES: dict[str, Any] = {}
-
 
 class WorkerRuntime:
     """Worker execution loop with lease lifecycle management.
@@ -66,8 +60,8 @@ class WorkerRuntime:
         """Start worker: register node, launch polling + heartbeat loops."""
         self._node_registry.register_node(
             node_id=self._node_id,
-            executor_types=_DEFAULT_EXECUTOR_TYPES,
-            capabilities=_DEFAULT_CAPABILITIES,
+            executor_types=self._config.node_executor_types,
+            capabilities=self._config.node_capabilities,
         )
         logger.info("Worker %s started", self._node_id)
 
@@ -183,17 +177,33 @@ class WorkerRuntime:
         """
         self_node = DistributedNode(
             node_id=self._node_id,
-            executor_types=_DEFAULT_EXECUTOR_TYPES,
-            capabilities=_DEFAULT_CAPABILITIES,
+            executor_types=self._config.node_executor_types,
+            capabilities=self._config.node_capabilities,
             status="healthy",
             heartbeat_at=utcnow(),
         )
+        constraints = cast("dict[str, Any] | None", task.placement_constraints)
         eligible = self._placement_engine.find_eligible_nodes(
-            cast("dict[str, Any] | None", task.placement_constraints),
+            constraints,
             [self_node],
             active_leases_by_node={},
             max_parallel_per_node=self._config.max_parallel_tasks_per_node,
         )
+        if not eligible and constraints:
+            # Make the silent-starvation case observable: a constrained task this
+            # node cannot satisfy is left pending. If no node in the cluster
+            # advertises the required profile it will never run — surface it rather
+            # than hanging quietly. Configure APFLOW_NODE_EXECUTOR_TYPES /
+            # config.node_capabilities so nodes advertise what they actually run.
+            logger.warning(
+                "Task %s not eligible on node %s: placement_constraints=%s vs node "
+                "executor_types=%s capabilities=%s",
+                task.id,
+                self._node_id,
+                constraints,
+                self._config.node_executor_types,
+                self._config.node_capabilities,
+            )
         return len(eligible) > 0
 
     async def _execute_task(self, task: TaskModel) -> None:
@@ -204,6 +214,13 @@ class WorkerRuntime:
         async with self._semaphore:
             lease = self._lease_manager.acquire_lease(task_id, self._node_id)
             if lease is None:
+                # Lost the acquire race (another worker holds it, or it completed
+                # while we waited on the semaphore). _poll_loop registered this
+                # task in _running_tasks before spawning us; pop it here or the
+                # entry leaks forever AND _poll_loop's in-flight skip permanently
+                # blocks this worker from re-attempting the task after its lease
+                # expires and it reverts to pending.
+                self._running_tasks.pop(task_id, None)
                 return
 
             token = cast(str, lease.lease_token)
