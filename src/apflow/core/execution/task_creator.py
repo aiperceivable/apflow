@@ -13,6 +13,7 @@ This module validates that dependencies exist in the array and hierarchy is corr
 """
 
 from typing import List, Dict, Any, Optional, Set, TypeVar
+import copy
 import uuid
 import os
 from sqlalchemy.orm import Session
@@ -177,8 +178,12 @@ class TaskCreator:
 
         all_ids = {task["id"] for task in tasks}
 
-        # Step 4: Detect circular dependencies and validate dependent task inclusion (reuse existing helpers)
-        # All references are now ids, so pass only id sets
+        # Step 4: Detect cycles and validate dependent task inclusion.
+        # detect_circular_dependencies only covers the dependency DAG; parent_id
+        # forms the structure tree and needs its own acyclicity check, or a self-
+        # or mutually-parented task would persist (parent_id has no FK) and later
+        # make the DB-backed tree walk recurse without bound.
+        self._validate_parent_ids_acyclic(tasks)
         detect_circular_dependencies(tasks=tasks)
         validate_dependent_task_inclusion(tasks)
 
@@ -331,68 +336,6 @@ class TaskCreator:
                 existing_task = await self.task_repository.get_task_by_id(provided_id)
                 if existing_task:
                     raise ValueError(f"Task id already exists in database (id: {provided_id}).")
-
-    def _validate_dependencies(
-        self,
-        dependencies: List[Any],
-        task_name: str,
-        task_index: int,
-        provided_ids: Set[str],
-        id_to_index: Dict[str, int],
-        task_names: Set[str],
-        name_to_index: Dict[str, int],
-    ) -> None:
-        """
-        Validate dependencies exist in the array and hierarchy is correct
-
-        Args:
-            dependencies: Dependencies list from task data
-            task_name: Name of the task (for error messages)
-            task_index: Index of the task in the array
-            provided_ids: Set of all provided task IDs
-            id_to_index: Map of id -> index in array
-            task_names: Set of all task names (for name-based references)
-            name_to_index: Map of name -> index in array
-
-        Raises:
-            ValueError: If dependencies are invalid
-        """
-        for dep in dependencies:
-            if isinstance(dep, dict):
-                # Support both "id" and "name" for dependency reference
-                dep_ref = dep.get("id") or dep.get("name")
-                if not dep_ref:
-                    raise ValueError(
-                        f"Task '{task_name}' dependency must have 'id' or 'name' field"
-                    )
-
-                # Validate dependency exists in the array (as id or name)
-                dep_index = None
-                if dep_ref in provided_ids:
-                    dep_index = id_to_index.get(dep_ref)
-                elif dep_ref in task_names:
-                    dep_index = name_to_index.get(dep_ref)
-                else:
-                    raise ValueError(
-                        f"Task '{task_name}' at index {task_index} has dependency reference '{dep_ref}' "
-                        f"which is not in the tasks array (not found as id or name)"
-                    )
-
-                # Validate hierarchy: dependency should be at an earlier index (or same level)
-                if dep_index is not None and dep_index >= task_index:
-                    # This is allowed for same-level dependencies, but log a warning
-                    logger.debug(
-                        f"Task '{task_name}' at index {task_index} depends on task at index {dep_index}. "
-                        f"This is allowed but may indicate a potential issue."
-                    )
-            else:
-                # Simple string dependency (can be id or name)
-                dep_ref = str(dep)
-                if dep_ref not in provided_ids and dep_ref not in task_names:
-                    raise ValueError(
-                        f"Task '{task_name}' at index {task_index} has dependency '{dep_ref}' "
-                        f"which is not in the tasks array (not found as id or name)"
-                    )
 
     def build_task_trees_from_task_models(self, tasks: List[TaskModelType]) -> List[TaskTreeNode]:
         """
@@ -655,271 +598,6 @@ class TaskCreator:
             return new_node
 
         return build_minimal_subtree(root_tree)
-
-    def _tree_to_task_array(self, node: TaskTreeNode) -> List[Dict[str, Any]]:
-        """
-        Convert TaskTreeNode to flat task array compatible with tasks.create API.
-
-        Uses TaskModelType's actual fields via get_task_model_class().
-        Since tasks are not saved yet, uses name-based references instead of id.
-        Ensures all names are unique.
-
-        Args:
-            node: Task tree node
-
-        Returns:
-            List of task dictionaries compatible with tasks.create format
-        """
-        # Get all column names from TaskModelType
-        task_columns = set(self.task_model_class.__table__.columns.keys())
-
-        tasks = []
-        name_counter = {}  # Track name usage for uniqueness
-        task_to_name = {}  # task object id -> unique name
-
-        # First pass: assign unique names to all tasks
-        def assign_names(current_node: TaskTreeNode):
-            task = current_node.task
-            original_name = task.name
-
-            # Generate unique name if needed
-            if original_name not in name_counter:
-                name_counter[original_name] = 0
-                unique_name = original_name
-            else:
-                name_counter[original_name] += 1
-                unique_name = f"{original_name}_{name_counter[original_name]}"
-
-            task_to_name[id(task)] = unique_name
-
-            # Recursively process children
-            for child in current_node.children:
-                assign_names(child)
-
-        assign_names(node)
-
-        # Build mappings for dependencies conversion
-        # Map original task.id and original_task_id to new generated id and name
-        task_id_to_new_id: Dict[str, str] = {}  # original task.id -> new generated id
-        task_id_to_name: Dict[str, str] = {}  # original task.id -> name (for name-based refs)
-
-        # First pass: map all task.id to their names
-        def build_id_mappings(current_node: TaskTreeNode):
-            task = current_node.task
-            task_id_to_name[str(task.id)] = task_to_name[id(task)]
-            for child in current_node.children:
-                build_id_mappings(child)
-
-        build_id_mappings(node)
-
-        # Second pass: map original_task_id to name (for name-based refs fallback)
-        # This allows dependencies that reference original task IDs to be converted correctly
-        def map_original_task_ids(current_node: TaskTreeNode):
-            task = current_node.task
-            if task.original_task_id:
-                original_id = str(task.original_task_id)
-                # Only map if not already in the mapping (avoid overwriting existing mappings)
-                # This ensures that if original_task_id matches another task's id in the tree,
-                # we use that task's name, not the current task's name
-                if original_id not in task_id_to_name:
-                    task_id_to_name[original_id] = task_to_name[id(task)]
-            for child in current_node.children:
-                map_original_task_ids(child)
-
-        map_original_task_ids(node)
-
-        # Third pass: pre-generate all new IDs for all tasks (needed for dependency conversion)
-        def pre_generate_ids(current_node: TaskTreeNode):
-            task = current_node.task
-            task_id_str = str(task.id)
-            # Check if this task.id has already been mapped (should not happen in a valid tree)
-            if task_id_str in task_id_to_new_id:
-                # This should not happen, but if it does, reuse the existing mapping
-                # This ensures we don't create duplicate IDs
-                return
-            new_task_id = str(uuid.uuid4())
-            # Map task.id to new id
-            task_id_to_new_id[task_id_str] = new_task_id
-            # Also map original_task_id to new id (if exists) for dependency conversion
-            # This ensures dependencies that reference original_task_id can be converted correctly
-            if task.original_task_id:
-                original_id = str(task.original_task_id)
-                # Only map if not already mapped (avoid overwriting if multiple tasks have same original_task_id)
-                if original_id not in task_id_to_new_id:
-                    task_id_to_new_id[original_id] = new_task_id
-
-            # IMPORTANT: Dependencies in the copied task may reference original task IDs
-            # We need to map those original IDs to the new IDs of the copied tasks
-            # Iterate through all tasks in the tree to build a complete mapping
-            dependencies = getattr(task, "dependencies", None)
-            if dependencies:
-                for dep in dependencies:
-                    if isinstance(dep, dict) and "id" in dep:
-                        dep_id = str(dep["id"])
-                        # If this dependency ID is not yet mapped, we need to find which copied task
-                        # corresponds to this original dependency ID
-                        if dep_id not in task_id_to_new_id:
-                            # Find the task in the tree that has this ID as its original_task_id
-                            # or as its task.id (if it's a direct reference)
-                            # This will be handled by iterating through all tasks
-                            pass  # Will be handled in a separate pass
-            for child in current_node.children:
-                pre_generate_ids(child)
-
-        pre_generate_ids(node)
-
-        # Fourth pass: map dependency IDs that reference original task IDs
-        # Dependencies in copied tasks may reference original task IDs from the original tree
-        # We need to map those original IDs to the new IDs of the corresponding copied tasks
-        # Strategy: For each dependency ID that's not yet mapped, find the task in the new tree
-        # that corresponds to that original ID (by checking original_task_id or task.id)
-        def find_task_by_original_id(
-            current_node: TaskTreeNode, target_original_id: str
-        ) -> Optional[TaskTreeNode]:
-            """Find a task in the tree that corresponds to the given original task ID"""
-            task = current_node.task
-            # Check if this task's original_task_id matches, or if task.id matches (for direct references)
-            if (task.original_task_id and str(task.original_task_id) == target_original_id) or str(
-                task.id
-            ) == target_original_id:
-                return current_node
-            # Recursively check children
-            for child in current_node.children:
-                result = find_task_by_original_id(child, target_original_id)
-                if result:
-                    return result
-            return None
-
-        def map_dependency_ids(current_node: TaskTreeNode):
-            """Map all dependency IDs in the tree to new task IDs"""
-            task = current_node.task
-            dependencies = getattr(task, "dependencies", None)
-            if dependencies:
-                for dep in dependencies:
-                    if isinstance(dep, dict) and "id" in dep:
-                        dep_id = str(dep["id"])
-                        # If this dependency ID is not yet mapped, find the corresponding task in the new tree
-                        if dep_id not in task_id_to_new_id:
-                            found_node = find_task_by_original_id(node, dep_id)
-                            if found_node:
-                                # Map the dependency ID to the new ID of the found task
-                                found_new_id = task_id_to_new_id[str(found_node.task.id)]
-                                task_id_to_new_id[dep_id] = found_new_id
-                            # If not found, it will raise an error during conversion (which is correct)
-            for child in current_node.children:
-                map_dependency_ids(child)
-
-        map_dependency_ids(node)
-
-        # Fourth pass: build task array with id and name-based references
-        def collect_tasks(
-            current_node: TaskTreeNode,
-            parent_name: Optional[str] = None,
-            parent_id: Optional[str] = None,
-        ):
-            task = current_node.task
-            unique_name = task_to_name[id(task)]
-
-            # Build task dict using TaskModelType's actual fields
-            task_dict: Dict[str, Any] = {}
-
-            # Get pre-generated UUID for this task (for save=False, tasks.create needs complete data)
-            new_task_id = task_id_to_new_id[str(task.id)]
-            task_dict["id"] = new_task_id
-
-            # Handle parent_id separately (before the loop, since we skip it in the loop)
-            # Use parent id (since all tasks have id now)
-            # parent_id parameter is the new generated id of the parent task
-            if parent_id is not None:
-                task_dict["parent_id"] = parent_id
-            # else: don't set parent_id (root task) - this is correct
-
-            # Get all TaskModelType fields and their values
-            for column_name in task_columns:
-                # Skip id (already set above), parent_id (handled separately above), created_at, updated_at, has_references (auto-generated or not needed for create)
-                if column_name in ("id", "parent_id", "created_at", "updated_at", "has_references"):
-                    continue
-
-                # Get value from task
-                value = getattr(task, column_name, None)
-
-                # Handle special cases
-                if column_name == "name":
-                    # Use unique name
-                    task_dict["name"] = unique_name
-                elif column_name == "progress":
-                    # Convert Numeric to float
-                    task_dict["progress"] = float(value) if value is not None else 0.0
-                elif column_name == "dependencies" and value is not None:
-                    # Convert dependencies: replace original id references with new generated id
-                    # Since all tasks have id now, dependencies must use id references
-                    if isinstance(value, list):
-                        converted_deps = []
-                        for dep in value:
-                            if isinstance(dep, dict):
-                                dep_copy = dep.copy()
-                                # Convert id to new generated id (required for id-based mode)
-                                if "id" in dep_copy:
-                                    dep_id = str(dep_copy["id"])
-                                    if dep_id in task_id_to_new_id:
-                                        # Use new generated id
-                                        dep_copy["id"] = task_id_to_new_id[dep_id]
-                                    else:
-                                        # If not found, this is an error - dependency must be in the tree
-                                        raise ValueError(
-                                            f"Dependency id '{dep_id}' not found in task tree. "
-                                            f"All dependencies must reference tasks within the copied tree."
-                                        )
-                                # If dependency has "name" but no "id", try to find it by name
-                                elif "name" in dep_copy:
-                                    dep_name = dep_copy["name"]
-                                    # Find task with this name and use its new id
-                                    found = False
-                                    for orig_id, new_id in task_id_to_new_id.items():
-                                        if task_id_to_name.get(orig_id) == dep_name:
-                                            dep_copy["id"] = new_id
-                                            del dep_copy["name"]
-                                            found = True
-                                            break
-                                    if not found:
-                                        raise ValueError(
-                                            f"Dependency name '{dep_name}' not found in task tree. "
-                                            f"All dependencies must reference tasks within the copied tree."
-                                        )
-                                converted_deps.append(dep_copy)
-                            else:
-                                # String or other format - try to convert
-                                dep_str = str(dep)
-                                if dep_str in task_id_to_new_id:
-                                    converted_deps.append({"id": task_id_to_new_id[dep_str]})
-                                else:
-                                    # Try to find by name
-                                    found = False
-                                    for orig_id, new_id in task_id_to_new_id.items():
-                                        if task_id_to_name.get(orig_id) == dep_str:
-                                            converted_deps.append({"id": new_id})
-                                            found = True
-                                            break
-                                    if not found:
-                                        raise ValueError(
-                                            f"Dependency '{dep_str}' not found in task tree. "
-                                            f"All dependencies must reference tasks within the copied tree."
-                                        )
-                        task_dict["dependencies"] = converted_deps
-                    else:
-                        task_dict["dependencies"] = value
-                elif value is not None:
-                    # Include non-None values
-                    task_dict[column_name] = value
-
-            tasks.append(task_dict)
-
-            # Recursively collect children
-            for child in current_node.children:
-                collect_tasks(child, unique_name, new_task_id)
-
-        collect_tasks(node, None, None)  # Root task has no parent
-        return tasks
 
     async def _get_original_task_for_link(self, task: TaskModelType) -> TaskModelType:
         """
@@ -1566,33 +1244,24 @@ class TaskCreator:
 
         new_tree = await _reset_task_recursive(new_tree, reset_kwargs)
 
-        if new_tree.task.parent_id is not None:
-            new_tree.task.parent_id = None  # Promote to independent tree
+        # Promote to an independent tree. Resetting parent_id alone is not enough:
+        # copy()/to_dict() carries the source's task_tree_id verbatim, so without
+        # re-deriving it the clone and the source would share one task_tree_id and
+        # a tree_id-keyed load (build_task_tree_by_tree_id) would merge the two.
+        new_tree.task.parent_id = None
+        new_root_tree_id = str(new_tree.task.id)
+
+        def _stamp_tree_id(node: TaskTreeNode) -> None:
+            node.task.task_tree_id = new_root_tree_id
+            for child in node.children:
+                _stamp_tree_id(child)
+
+        _stamp_tree_id(new_tree)
 
         # Fix dependencies in the new tree
         await self._clone_task_tree_dependency_fix(new_tree, id_mapping)
 
         return new_tree
-
-    def _reset_task_fields(
-        self,
-        task: TaskModelType,
-        reset_kwargs: Dict[str, Any],
-    ) -> None:
-        """
-        Reset specified fields on a task to their reset_kwargs values
-
-        Args:
-            task: Task to reset fields on
-            field_names: List of field names to reset
-        """
-        # This method is called after the task is created with reset_kwargs
-        # The reset_kwargs are already applied during task creation via _extract_field_overrides
-        # This is a placeholder for any post-creation field resets if needed
-
-        for field_name, field_value in reset_kwargs.items():
-            if hasattr(task, field_name):
-                setattr(task, field_name, field_value)
 
     async def _clone_task(
         self,
@@ -1625,6 +1294,15 @@ class TaskCreator:
             task = original_task.copy(fields)
         else:
             task = original_task.update_from_dict(fields)
+
+        # copy()/to_dict() shares mutable JSON columns by reference, so the clone's
+        # dependencies/inputs/params/schemas are the SAME objects as the source's.
+        # _clone_task_tree_dependency_fix later rewrites dep ids in place; deep-copy
+        # here so that in-place mutation of the clone can never reach the source.
+        for json_field in ("dependencies", "inputs", "params", "schemas"):
+            value = getattr(task, json_field, None)
+            if value is not None:
+                setattr(task, json_field, copy.deepcopy(value))
 
         if fields.get("origin_type") == TaskOriginType.link:
             task = task.convert_to_link()
@@ -1665,33 +1343,6 @@ class TaskCreator:
             f"Validated task '{task.name}' (id: {task.id}) subtree has no external dependencies"
         )
 
-    async def _promote_to_independent_tree(self, root_task: TaskModelType) -> None:
-        """
-        Promote a task subtree to an independent tree
-
-        Args:
-            root_task: Root task of the subtree to promote
-        """
-        # Set root's parent_id to None (making it a true root)
-        root_task.parent_id = None
-
-        # Set task_tree_id for root and all descendants
-        all_tasks = await self._collect_subtree_tasks(root_task.id)
-        new_tree_id = root_task.id
-
-        for task in all_tasks:
-            task.task_tree_id = new_tree_id
-
-        # Commit changes
-        await self.db.commit()
-        for task in all_tasks:
-            await self.db.refresh(task)
-
-        logger.info(
-            f"Promoted task '{root_task.name}' (id: {root_task.id}) to independent tree "
-            f"with {len(all_tasks)} total tasks"
-        )
-
     async def _collect_subtree_tasks(self, root_task_id: str) -> List[TaskModelType]:
         """
         Collect all tasks in a subtree rooted at the given task
@@ -1720,6 +1371,28 @@ class TaskCreator:
 
         await collect_children(root_task_id)
         return all_tasks
+
+    def _validate_parent_ids_acyclic(self, tasks: List[Dict[str, Any]]) -> None:
+        """Reject self-referential or cyclic parent_id chains in a task array.
+
+        parent_id references are already resolved to ids at this point. A cycle
+        (A.parent=B, B.parent=A) or a self-parent (A.parent=A) has no root; because
+        parent_id has no foreign key it would be persisted and later crash the
+        DB-backed tree walk (get_child_tasks_by_parent_id has no cycle guard) with
+        unbounded recursion.
+        """
+        parent_of: Dict[str, Any] = {task["id"]: task.get("parent_id") for task in tasks}
+        for start_id in parent_of:
+            seen: Set[str] = set()
+            node: Any = start_id
+            while node is not None:
+                if node in seen:
+                    raise ValueError(
+                        f"Task '{start_id}' is part of a parent_id cycle "
+                        "(self-reference or circular parent chain); parent_id must form a tree."
+                    )
+                seen.add(node)
+                node = parent_of.get(node)
 
     def _update_task_tree_id_for_task_dics(
         self,
