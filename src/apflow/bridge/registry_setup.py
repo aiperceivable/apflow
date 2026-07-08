@@ -69,7 +69,9 @@ def create_apflow_registry(
         Populated apcore Registry.
 
     Raises:
-        RuntimeError: If APCore initialization fails.
+        RuntimeError: If APCore initialization fails, or if a built-in
+            task/schedule module fails to register (e.g. a discovered
+            executor's id collides with the reserved namespace).
         ValueError: If namespace is empty.
     """
     if not namespace:
@@ -123,7 +125,13 @@ def create_apflow_registry(
             client.register(module_id, module)
             logger.debug(f"Registered task module: {module_id}")
         except Exception as e:
-            logger.warning(f"Failed to register {module_id}: {e}")
+            # These are apflow's own built-in capabilities, not optional
+            # extensions like the discovered executor modules above — a
+            # failure here (most commonly a discovered executor's id
+            # colliding with this reserved task.*/schedule.* namespace) must
+            # not be silently swallowed, or the built-in capability just
+            # disappears from the registry with no signal to the operator.
+            raise RuntimeError(f"Failed to register built-in module '{module_id}': {e}") from e
 
     total = len(list(registry.list()))
     logger.info(f"apcore Registry populated with {total} modules (namespace: {namespace})")

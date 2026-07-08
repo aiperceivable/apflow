@@ -376,13 +376,23 @@ class WebhookGateway:
                             }
                         )
 
-                # Advance the definition's schedule for the next run.
-                await task_repository.complete_scheduled_run(
+                # Advance the definition's schedule for the next run. A None
+                # return means this failed (e.g. corrupt stored schedule)
+                # even though the task run itself just executed — surface it
+                # distinctly so an external poller doesn't see the task still
+                # due and re-trigger it (undermines effectively-once dispatch).
+                schedule_result = await task_repository.complete_scheduled_run(
                     task_id=task_id,
                     success=execution_success,
                     error=task_error,
                     calculate_next_run=True,
                 )
+                schedule_advanced = schedule_result is not None
+                if not schedule_advanced:
+                    logger.error(
+                        f"Failed to advance schedule for task '{task_id}' after run "
+                        f"{run_id} completed — task may incorrectly remain due for re-trigger"
+                    )
 
                 return {
                     "success": execution_success,
@@ -392,6 +402,7 @@ class WebhookGateway:
                     "result": task_result,
                     "error": task_error,
                     "children": children_results,
+                    "schedule_advanced": schedule_advanced,
                 }
 
         except Exception as e:

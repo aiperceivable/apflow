@@ -88,7 +88,12 @@ def _create_adapter_from_metadata(
     try:
         module = importlib.import_module(metadata.module_path)
         executor_class = getattr(module, metadata.class_name)
-    except (ImportError, AttributeError) as e:
+    except Exception as e:
+        # Importing a module can run its @executor_register() decorator at
+        # class-definition time, which raises TypeError for a class that
+        # doesn't implement the Extension interface — not just ImportError
+        # or AttributeError. One broken discovered executor must not crash
+        # discovery/bootstrap for every other executor; skip it instead.
         logger.warning(f"Cannot import executor {executor_id} ({metadata.module_path}): {e}")
         return None
 

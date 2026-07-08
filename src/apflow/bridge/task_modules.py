@@ -72,7 +72,9 @@ def _filter_reuse_overrides(overrides: Any) -> dict[str, Any]:
         return {}
     if not isinstance(overrides, dict):
         raise ValueError("overrides must be an object")
-    return {k: v for k, v in overrides.items() if k in _OVERRIDABLE_REUSE_FIELDS}
+    return _coerce_int_fields(
+        {k: v for k, v in overrides.items() if k in _OVERRIDABLE_REUSE_FIELDS}
+    )
 
 
 # Per-task fields an external agent may set when creating a task tree from a raw
@@ -92,10 +94,29 @@ _TASK_TREE_ITEM_FIELDS = (
     "max_attempts",
 )
 
+# (minimum, maximum) bounds for integer fields accepted from external MCP/A2A
+# callers, mirroring each field's schema. These arrive without schema
+# validation (apcore-mcp validate_inputs=False), so — unlike sibling
+# limit/offset/max_runs fields, which already go through _coerce_int — they
+# must be coerced/validated here before ever reaching persistence.
+_INT_FIELD_BOUNDS: dict[str, tuple[int | None, int | None]] = {
+    "priority": (0, 3),
+    "token_budget": (0, None),
+    "max_attempts": (1, 100),
+}
+
+
+def _coerce_int_fields(data: dict[str, Any]) -> dict[str, Any]:
+    """Coerce/validate priority, token_budget, and max_attempts in place."""
+    for field, (minimum, maximum) in _INT_FIELD_BOUNDS.items():
+        if field in data and data[field] is not None:
+            data[field] = _coerce_int(data[field], data[field], minimum=minimum, maximum=maximum)
+    return data
+
 
 def _filter_task_tree_item(task: dict[str, Any]) -> dict[str, Any]:
     """Restrict a raw task-array item to the schema-advertised allowlist."""
-    return {k: v for k, v in task.items() if k in _TASK_TREE_ITEM_FIELDS}
+    return _coerce_int_fields({k: v for k, v in task.items() if k in _TASK_TREE_ITEM_FIELDS})
 
 
 _TASK_CREATE_INPUT = {
@@ -188,6 +209,7 @@ class TaskCreateModule:
         ]:
             if field in inputs and inputs[field] is not None:
                 task_data[field] = inputs[field]
+        _coerce_int_fields(task_data)
 
         tasks = await self._creator.create_task_trees_from_array([task_data])
         root = tasks[0] if tasks else None
@@ -748,7 +770,8 @@ class TaskUpdateModule:
 
     description = (
         "Update one or more fields on an existing task. Can update name, status, priority, "
-        "inputs, params, error, result, and scheduling fields."
+        "inputs, params, error, result, and progress. Use schedule.set to configure a task's "
+        "schedule (schedule_type, schedule_expression, etc.) — those fields are not writable here."
     )
 
     def __init__(self, task_repository: Any) -> None:
@@ -789,6 +812,7 @@ class TaskUpdateModule:
             for field in self._UPDATABLE_FIELDS
             if inputs.get(field) is not None
         }
+        _coerce_int_fields(update_fields)
         if update_fields:
             await self._repo.update_task(task_id=task_id, **update_fields)
 

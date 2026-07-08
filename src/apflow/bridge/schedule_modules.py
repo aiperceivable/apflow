@@ -80,7 +80,8 @@ class ScheduleSetModule:
             raise ValueError(f"Invalid schedule: {exc}") from exc
 
         # Confirm the task exists before mutating: a genuine miss raises KeyError here,
-        # so a later None from initialize_schedule can only mean a real lookup miss.
+        # so a later None from initialize_schedule can only mean an internal operation
+        # failure (e.g. a corrupt stored schedule), never a lookup miss.
         if await self._repo.get_task_by_id(task_id) is None:
             raise KeyError(f"Task '{task_id}' not found")
 
@@ -95,7 +96,10 @@ class ScheduleSetModule:
         await self._repo.update_task(task_id=task_id, **fields)
         task = await self._repo.initialize_schedule(task_id)
         if task is None:
-            raise KeyError(f"Task '{task_id}' not found")
+            raise RuntimeError(
+                f"Failed to initialize schedule for task '{task_id}' "
+                "(check the schedule configuration)"
+            )
         return task.to_dict()
 
 

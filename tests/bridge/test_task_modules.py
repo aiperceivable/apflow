@@ -69,6 +69,34 @@ class TestTaskCreateModule:
         with pytest.raises(ValueError, match="non-empty"):
             await module.execute({})
 
+    @pytest.mark.asyncio
+    async def test_create_coerces_numeric_string_int_fields(self):
+        """Regression: priority/token_budget/max_attempts from external MCP/A2A
+        callers were passed straight through with no type coercion, unlike
+        sibling limit/offset/max_runs fields (which already use _coerce_int).
+        A numeric string must be coerced to int before reaching the creator.
+        (Review CRITICAL #14)
+        """
+        creator = MagicMock()
+        creator.create_task_trees_from_array = AsyncMock(return_value=[_mock_task()])
+        repo = _mock_repo()
+
+        module = TaskCreateModule(creator, repo)
+        await module.execute(
+            {"name": "t", "priority": "1", "token_budget": "500", "max_attempts": "5"}
+        )
+
+        (sent_tasks,), _ = creator.create_task_trees_from_array.call_args
+        assert sent_tasks[0]["priority"] == 1
+        assert sent_tasks[0]["token_budget"] == 500
+        assert sent_tasks[0]["max_attempts"] == 5
+
+    @pytest.mark.asyncio
+    async def test_create_invalid_priority_raises_valueerror(self):
+        module = TaskCreateModule(MagicMock(), MagicMock())
+        with pytest.raises(ValueError):
+            await module.execute({"name": "t", "priority": "not-a-number"})
+
 
 class _FakeTaskExecutor:
     """Stand-in for TaskExecutor that returns a canned result and (optionally)
@@ -384,6 +412,16 @@ class TestTaskCreateTreeFieldWhitelist:
         assert sent_tasks[0]["priority"] == 1
         assert sent_tasks[0]["dependencies"] == []
 
+    @pytest.mark.asyncio
+    async def test_invalid_priority_in_task_item_raises_valueerror(self):
+        """Regression: per-task priority/token_budget/max_attempts values were
+        never validated/coerced, unlike sibling limit/offset/max_runs fields.
+        (Review CRITICAL #14)
+        """
+        module = TaskCreateTreeModule(MagicMock(), MagicMock())
+        with pytest.raises(ValueError):
+            await module.execute({"tasks": [{"name": "Task A", "priority": "not-a-number"}]})
+
 
 class TestTaskUpdateFieldWhitelist:
     """Regression: only schema-advertised fields may be written; an arbitrary key
@@ -412,6 +450,19 @@ class TestTaskUpdateFieldWhitelist:
         await module.execute(inputs)
         # task_id must remain in the caller's dict (no .pop mutation).
         assert inputs["task_id"] == "t1"
+
+    @pytest.mark.asyncio
+    async def test_update_invalid_priority_raises_valueerror(self):
+        """Regression: priority was never validated/coerced before reaching
+        update_task, unlike sibling limit/offset/max_runs fields. (Review
+        CRITICAL #14)
+        """
+        repo = _mock_repo(task=_mock_task())
+        repo.update_task = AsyncMock(return_value=None)
+
+        module = TaskUpdateModule(repo)
+        with pytest.raises(ValueError):
+            await module.execute({"task_id": "t1", "priority": "not-a-number"})
 
 
 class TestTaskCancelModuleGuards:
@@ -466,6 +517,17 @@ class TestTaskReuseOverrideAllowlist:
         module = TaskCopyModule(creator, repo)
         with pytest.raises(ValueError, match="overrides must be an object"):
             await module.execute({"task_id": "t1", "overrides": "nope"})
+
+    @pytest.mark.asyncio
+    async def test_invalid_priority_override_raises_valueerror(self):
+        """Regression: overrides["priority"] was never validated/coerced
+        before reaching the creator. (Review CRITICAL #14)
+        """
+        creator = MagicMock()
+        repo = _mock_repo(task=_mock_task())
+        module = TaskCopyModule(creator, repo)
+        with pytest.raises(ValueError):
+            await module.execute({"task_id": "t1", "overrides": {"priority": "not-a-number"}})
 
 
 class TestTaskRunningListModuleClamp:

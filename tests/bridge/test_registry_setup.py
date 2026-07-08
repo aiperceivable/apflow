@@ -1,8 +1,9 @@
 """Tests for registry_setup integration"""
 
 import pytest
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock, AsyncMock, patch
 from apflow.bridge.registry_setup import create_apflow_registry
+from apflow.bridge.module_adapter import ExecutableTaskModuleAdapter
 
 
 def _mock_dependencies():
@@ -13,6 +14,20 @@ def _mock_dependencies():
     repo.list_tasks.return_value = []
     repo.count_tasks.return_value = 0
     return manager, creator, repo
+
+
+def _colliding_adapter(executor_id: str) -> ExecutableTaskModuleAdapter:
+    class DummyExecutor:
+        pass
+
+    return ExecutableTaskModuleAdapter(
+        executor_class=DummyExecutor,
+        executor_id=executor_id,
+        executor_name="Colliding",
+        executor_description="test",
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+    )
 
 
 class TestCreateApflowRegistry:
@@ -51,3 +66,18 @@ class TestCreateApflowRegistry:
         manager, creator, repo = _mock_dependencies()
         with pytest.raises(ValueError, match="non-empty"):
             create_apflow_registry(manager, creator, repo, namespace="")
+
+    def test_builtin_module_collision_raises_instead_of_silently_disabling(self):
+        """Regression: a discovered executor's id colliding with the built-in
+        task.*/schedule.* namespace made the built-in module's registration
+        fail — but the broad except-and-warn around it silently absorbed
+        that failure, leaving the built-in capability missing from the
+        registry with no signal to the operator. (Review CRITICAL #9)
+        """
+        manager, creator, repo = _mock_dependencies()
+        with patch(
+            "apflow.bridge.registry_setup.discover_executor_modules",
+            return_value=[_colliding_adapter("task.create")],
+        ):
+            with pytest.raises(RuntimeError, match="task.create"):
+                create_apflow_registry(manager, creator, repo)

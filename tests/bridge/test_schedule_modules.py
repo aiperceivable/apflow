@@ -93,6 +93,22 @@ async def test_schedule_set_invalid_schedule_rejected_without_write() -> None:
 
 
 @pytest.mark.asyncio
+async def test_schedule_set_existing_task_op_failure_is_not_keyerror() -> None:
+    # An existing task whose initialize_schedule fails internally (e.g. a
+    # corrupt stored schedule) must NOT be reported as "not found" (KeyError
+    # -> REST 404) — mirrors ScheduleCompleteModule's identical handling of
+    # the same "op failed for a task confirmed to exist" scenario.
+    repo = AsyncMock()
+    repo.get_task_by_id.return_value = _task()
+    repo.initialize_schedule.return_value = None  # op failed for an existing task
+    with patch(_CALC, return_value=None):
+        with pytest.raises(RuntimeError):
+            await ScheduleSetModule(repo).execute(
+                {"task_id": "t1", "schedule_type": "cron", "schedule_expression": "0 9 * * *"}
+            )
+
+
+@pytest.mark.asyncio
 async def test_schedule_set_missing_task_raises_keyerror() -> None:
     repo = AsyncMock()
     repo.get_task_by_id.return_value = None  # task does not exist
