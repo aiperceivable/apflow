@@ -42,6 +42,27 @@ def _migrate_schema_if_needed(engine: Engine) -> None:
         raise
 
 
+def _migrate_schema_for_async_engine(connection_string: str, dialect: str) -> None:
+    """Run schema migrations for an async-mode engine.
+
+    MigrationManager.run_pending() uses blocking SQLAlchemy Core calls
+    (inspect(), engine.begin()) and cannot run against an AsyncEngine, so this
+    opens a short-lived sync engine on the same database, runs migrations on
+    it, and disposes it — without ever touching the caller's async engine or
+    session.
+    """
+    if dialect != "postgresql":
+        logger.debug(f"Skipping schema migration for unsupported async dialect '{dialect}'")
+        return
+
+    sync_connection_string = normalize_postgresql_url(connection_string, async_mode=False)
+    sync_engine = create_engine(sync_connection_string)
+    try:
+        _migrate_schema_if_needed(sync_engine)
+    finally:
+        sync_engine.dispose()
+
+
 def _apply_sqlite_pragmas(engine: Engine) -> None:
     """Apply PRAGMA statements for WAL mode on SQLite connections."""
     if "sqlite" in str(engine.url):
@@ -319,8 +340,11 @@ class SessionPoolManager:
             if self._engine:
                 try:
                     if async_mode:
-                        # For async, tables will be created on first use
+                        # Tables are created on first use, but migrations run now
+                        # on a separate short-lived sync engine (MigrationManager
+                        # can't run against an AsyncEngine).
                         logger.debug("Async engine created, tables will be created on first use")
+                        _migrate_schema_for_async_engine(connection_string, dialect)
                     else:
                         Base.metadata.create_all(self._engine)
                         # Auto-migrate schema for existing users
@@ -406,13 +430,40 @@ class SessionPoolManager:
             # Close before removing from tracking
             try:
                 if isinstance(session, AsyncSession):
-                    # Async session cleanup will be handled by context manager
-                    pass
+                    self._schedule_async_session_close(session)
                 else:
                     session.close()
             except Exception as e:
                 logger.warning(f"Error closing expired session: {str(e)}")
             del self._active_sessions[session]
+
+    @staticmethod
+    def _schedule_async_session_close(session: AsyncSession) -> None:
+        """Schedule an expired AsyncSession's close() on the running event loop.
+
+        _cleanup_expired_sessions runs under a sync threading.Lock and cannot
+        await directly. Previously the expired session was dropped from
+        tracking here without ever being closed, permanently leaking its
+        underlying connection.
+        """
+        import asyncio
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning(
+                "No running event loop; cannot close expired AsyncSession — "
+                "its connection will leak until garbage collection"
+            )
+            return
+
+        async def _close() -> None:
+            try:
+                await session.close()
+            except Exception as e:
+                logger.warning(f"Error closing expired async session: {str(e)}")
+
+        loop.create_task(_close())
 
     def get_active_session_count(self) -> int:
         """Get current number of active sessions"""
@@ -752,8 +803,14 @@ def create_session(
                         asyncio.run(create_tables_async())
                     except Exception as e:
                         logger.warning(f"Could not create tables automatically (async): {str(e)}")
+
+                # Migrations run on a separate short-lived sync engine regardless
+                # of event-loop state above: MigrationManager can't run against
+                # an AsyncEngine, and this never touches the async engine/session.
+                _migrate_schema_for_async_engine(connection_string, dialect)
             else:
                 Base.metadata.create_all(engine)
+                _migrate_schema_if_needed(engine)
         except Exception as e:
             logger.warning(f"Could not create tables automatically: {str(e)}")
 

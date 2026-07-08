@@ -8,8 +8,9 @@ to ensure proper session management, limits, and cleanup.
 import pytest
 import asyncio
 import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from apflow.core.storage.factory import (
@@ -191,6 +192,24 @@ class TestSessionPoolManager:
 
         # Restore original close for cleanup
         session.close = original_close
+
+    @pytest.mark.asyncio
+    async def test_expired_async_session_is_closed_not_leaked(self):
+        """Regression: an expired AsyncSession was previously dropped from
+        tracking without ever being closed, leaking its connection
+        (_cleanup_expired_sessions can't await directly under its sync lock)."""
+        manager = SessionPoolManager()
+        fake_session = MagicMock(spec=AsyncSession)
+        fake_session.close = AsyncMock()
+        manager._active_sessions[fake_session] = time.time() - manager._session_timeout - 1
+
+        manager._cleanup_expired_sessions()
+
+        assert fake_session not in manager._active_sessions
+        # The close() coroutine is scheduled via loop.create_task(), not awaited
+        # synchronously — give the loop a turn to run it.
+        await asyncio.sleep(0)
+        fake_session.close.assert_awaited_once()
 
 
 class TestTaskTreeSession:
