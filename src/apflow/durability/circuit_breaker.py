@@ -66,32 +66,54 @@ class CircuitBreaker:
         self._failure_count = 0
         self._last_failure_time: float = 0.0
         self._half_open_attempts = 0
+        self._half_open_entered_at: float = 0.0
         self._lock = Lock()
+
+    def _check_and_transition_state(self) -> None:
+        """Must be called with self._lock held.
+
+        Handles OPEN -> HALF_OPEN after the reset timeout, and HALF_OPEN
+        self-healing: if a test attempt's outcome is never recorded (e.g. a
+        cancelled call raises before either record_success() or
+        record_failure() runs), half_open_attempts stays at its cap forever
+        and can_execute() would otherwise return False indefinitely, with
+        nothing left to trigger the HALF_OPEN -> OPEN transition that
+        normally restarts the reset_timeout_seconds countdown. Treating a
+        stale HALF_OPEN the same way as a stale OPEN — allow a fresh test
+        attempt after the same timeout — keeps the breaker self-healing.
+        """
+        now = time.monotonic()
+        if self._state == CircuitState.OPEN:
+            elapsed = now - self._last_failure_time
+            if elapsed >= self._config.reset_timeout_seconds:
+                self._state = CircuitState.HALF_OPEN
+                self._half_open_attempts = 0
+                self._half_open_entered_at = now
+                logger.info(
+                    f"Circuit breaker {self._executor_id}: OPEN -> HALF_OPEN "
+                    f"(after {elapsed:.1f}s)"
+                )
+        elif self._state == CircuitState.HALF_OPEN:
+            stale = now - self._half_open_entered_at
+            if stale >= self._config.reset_timeout_seconds:
+                logger.warning(
+                    f"Circuit breaker {self._executor_id}: HALF_OPEN test attempt "
+                    f"outcome never recorded after {stale:.1f}s; allowing a fresh attempt"
+                )
+                self._half_open_attempts = 0
+                self._half_open_entered_at = now
 
     @property
     def state(self) -> CircuitState:
         """Current state, with automatic OPEN -> HALF_OPEN transition after timeout."""
         with self._lock:
-            if self._state == CircuitState.OPEN:
-                elapsed = time.monotonic() - self._last_failure_time
-                if elapsed >= self._config.reset_timeout_seconds:
-                    self._state = CircuitState.HALF_OPEN
-                    self._half_open_attempts = 0
-                    logger.info(
-                        f"Circuit breaker {self._executor_id}: OPEN -> HALF_OPEN "
-                        f"(after {elapsed:.1f}s)"
-                    )
+            self._check_and_transition_state()
             return self._state
 
     def can_execute(self) -> bool:
         """Whether execution is currently allowed."""
         with self._lock:
-            # Inline state check to avoid nested lock
-            if self._state == CircuitState.OPEN:
-                elapsed = time.monotonic() - self._last_failure_time
-                if elapsed >= self._config.reset_timeout_seconds:
-                    self._state = CircuitState.HALF_OPEN
-                    self._half_open_attempts = 0
+            self._check_and_transition_state()
 
             if self._state == CircuitState.CLOSED:
                 return True

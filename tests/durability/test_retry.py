@@ -151,3 +151,35 @@ class TestRetryManager:
         assert len(retry_calls) == 2
         assert retry_calls[0] == ("t1", 0)
         assert retry_calls[1] == ("t1", 1)
+
+    @pytest.mark.asyncio
+    async def test_on_retry_exception_does_not_abort_retries(self):
+        """Regression: an exception from the on_retry callback (e.g. a
+        checkpoint save or DB status update failing) previously propagated
+        straight out of execute_with_retry, aborting the retry sequence early
+        and masking the real execution failure with the callback's own
+        error. The original failure must still surface once attempts are
+        exhausted, and retries must continue in between.
+        (Review CRITICAL #56)
+        """
+        rm = RetryManager()
+        call_count = 0
+
+        async def on_retry(tid, attempt, exc):
+            raise RuntimeError("checkpoint save failed")
+
+        async def fn():
+            nonlocal call_count
+            call_count += 1
+            raise ValueError("real execution failure")
+
+        with pytest.raises(ValueError, match="real execution failure"):
+            await rm.execute_with_retry(
+                "t1",
+                RetryPolicy(max_attempts=3, backoff_base_seconds=0.1, jitter=False),
+                fn,
+                on_retry,
+            )
+
+        # All 3 attempts must have run despite on_retry failing every time.
+        assert call_count == 3

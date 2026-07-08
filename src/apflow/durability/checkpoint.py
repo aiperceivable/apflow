@@ -34,10 +34,22 @@ class CheckpointManager:
 
     async def _commit(self) -> None:
         db = self._db
-        if isinstance(db, AsyncSession):
-            await db.commit()
-        else:
-            db.commit()
+        try:
+            if isinstance(db, AsyncSession):
+                await db.commit()
+            else:
+                db.commit()
+        except Exception as e:
+            # This session is shared with the rest of the task's execution
+            # (see class docstring). Without a rollback here, a failed commit
+            # leaves it in a pending-rollback state that poisons every
+            # subsequent operation on it for the remainder of the task.
+            if isinstance(db, AsyncSession):
+                await db.rollback()
+            else:
+                db.rollback()
+            logger.error(f"Checkpoint commit failed, rolled back session: {e}")
+            raise
 
     async def save_checkpoint(
         self,

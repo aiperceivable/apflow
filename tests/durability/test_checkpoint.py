@@ -1,6 +1,7 @@
 """Tests for checkpoint module (async API, sync-session backed)."""
 
 import base64
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -119,3 +120,32 @@ class TestCheckpointManagerInit:
     def test_none_db_raises(self):
         with pytest.raises(TypeError, match="must not be None"):
             CheckpointManager(None)
+
+
+class TestCommitRollsBackOnFailure:
+    """Regression: _commit() never rolled back the session on a failed
+    commit, unlike the sibling TaskRepository pattern. This session is
+    shared with the rest of the task's execution (see class docstring), so a
+    failed commit left it in a pending-rollback state that poisoned every
+    subsequent operation on it for the remainder of the task.
+    (Review CRITICAL #54)
+    """
+
+    @pytest.mark.asyncio
+    async def test_commit_failure_rolls_back_and_reraises(
+        self, checkpoint_mgr, task_id, db_session
+    ):
+        with (
+            patch.object(
+                db_session, "commit", side_effect=RuntimeError("simulated commit failure")
+            ),
+            patch.object(db_session, "rollback", wraps=db_session.rollback) as mock_rollback,
+        ):
+            with pytest.raises(RuntimeError, match="simulated commit failure"):
+                await checkpoint_mgr.save_checkpoint(task_id, {"x": 1})
+            mock_rollback.assert_called_once()
+
+        # Outside the patch, commit/rollback are real again — the session
+        # itself must still be usable, not poisoned by the failed commit.
+        checkpoint_id = await checkpoint_mgr.save_checkpoint(task_id, {"x": 2})
+        assert checkpoint_id is not None

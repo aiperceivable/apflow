@@ -130,7 +130,16 @@ class RetryManager:
                     break
 
                 if on_retry is not None:
-                    await on_retry(task_id, attempt, e)
+                    try:
+                        await on_retry(task_id, attempt, e)
+                    except Exception as callback_error:
+                        # A failing callback (e.g. checkpoint save, DB status
+                        # update) must not abort the retry sequence or mask
+                        # the real execution failure (e) with its own error.
+                        logger.warning(
+                            f"Task {task_id}: on_retry callback failed on attempt "
+                            f"{attempt + 1}: {callback_error}"
+                        )
 
                 delay = policy.calculate_delay(attempt)
                 logger.debug(f"Task {task_id} retrying in {delay:.2f}s")

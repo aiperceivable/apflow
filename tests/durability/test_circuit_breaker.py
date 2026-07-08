@@ -95,6 +95,34 @@ class TestCircuitBreakerStates:
         with pytest.raises(ValueError, match="non-empty"):
             CircuitBreaker("", CircuitBreakerConfig())
 
+    def test_half_open_self_heals_when_test_outcome_never_recorded(self):
+        """Regression: a HALF_OPEN test attempt whose outcome is never
+        recorded (e.g. a cancelled call that raises before either
+        record_success() or record_failure() runs) previously wedged the
+        breaker in HALF_OPEN forever — half_open_attempts stayed at its cap
+        with nothing left to trigger a state transition. It must instead
+        allow a fresh attempt once reset_timeout_seconds has elapsed again,
+        the same way a stale OPEN circuit does. (Review CRITICAL #55)
+        """
+        cb = CircuitBreaker(
+            "exec1",
+            CircuitBreakerConfig(
+                failure_threshold=1, reset_timeout_seconds=1.0, half_open_max_attempts=1
+            ),
+        )
+        cb.record_failure()
+        time.sleep(1.1)
+        assert cb.state == CircuitState.HALF_OPEN
+
+        # Consume the single allowed test attempt, but never report its
+        # outcome (simulating a cancelled call).
+        assert cb.can_execute() is True
+        assert cb.can_execute() is False  # attempts exhausted, no outcome recorded
+
+        # Without self-healing this would stay False forever.
+        time.sleep(1.1)
+        assert cb.can_execute() is True
+
 
 class TestCircuitBreakerConfig:
     def test_threshold_zero_raises(self):
