@@ -52,3 +52,25 @@ def test_scheduler_db_binds_pool_before_running(monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     pool.initialize.assert_called_once_with(connection_string="sqlite:///:memory:")
+
+
+def test_scheduler_log_level_calls_setup_logging(monkeypatch) -> None:
+    """Regression: --log-level only called
+    logging.getLogger("apflow").setLevel(...) with no handler ever attached,
+    so DEBUG/INFO messages were silently dropped — apflow.logger.setup_logging()
+    (which correctly wires logging.basicConfig()) was never invoked, making
+    it dead code. (Review CRITICAL #16)
+    """
+
+    async def fake_run_scheduler(config: object, verbose: bool = False) -> None:  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("apflow.scheduler.internal.run_scheduler", fake_run_scheduler)
+
+    calls: list[object] = []
+    monkeypatch.setattr("apflow.logger.setup_logging", lambda level=None: calls.append(level))
+
+    result = CliRunner().invoke(scheduler, ["--log-level", "DEBUG"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["DEBUG"]

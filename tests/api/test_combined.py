@@ -97,6 +97,7 @@ async def test_serve_all_async_assembles_and_runs() -> None:
             log_level=None,
             explorer=False,
             metrics=False,
+            sys_modules=False,
             push_notifications=True,
             webhook=True,
             webhook_secret=None,
@@ -113,6 +114,63 @@ async def test_serve_all_async_assembles_and_runs() -> None:
     assert "/healthz" in paths  # REST routes lifted to root
     # webhook=True lifts the inbound trigger endpoint to the top level.
     assert "/webhook/trigger/{task_id}" in paths
+
+
+@pytest.mark.asyncio
+async def test_serve_all_threads_sys_modules() -> None:
+    """Regression: serve_all/_serve_all_async never accepted or forwarded
+    sys_modules to a2a_async_serve, so `apflow serve --all --sys-modules`
+    silently dropped the flag (the plain, non---all `serve` path already
+    threads it through to apcore_a2a's sync serve()). (Review CRITICAL #15)
+    """
+    served: dict = {}
+
+    async def fake_a2a_serve(registry: object, **_kw: object) -> Starlette:
+        served["a2a_kwargs"] = _kw
+        return Starlette()
+
+    class _FakeMcpCtx:
+        async def __aenter__(self) -> Starlette:
+            return Starlette()
+
+        async def __aexit__(self, *_exc: object) -> bool:
+            return False
+
+    def fake_mcp_serve(registry: object, **_kw: object) -> _FakeMcpCtx:
+        return _FakeMcpCtx()
+
+    class _FakeServer:
+        def __init__(self, config: object) -> None:
+            served["config"] = config
+
+        async def serve(self) -> None:
+            served["served"] = True
+
+    with (
+        patch("apcore_a2a.async_serve", fake_a2a_serve),
+        patch("apcore_mcp.async_serve", fake_mcp_serve),
+        patch("uvicorn.Server", _FakeServer),
+    ):
+        await _serve_all_async(
+            Registry(),
+            host="127.0.0.1",
+            port=9999,
+            title="apflow",
+            version="1.0",
+            description="d",
+            cors_origins=None,
+            log_level=None,
+            explorer=False,
+            metrics=False,
+            sys_modules=True,
+            push_notifications=False,
+            webhook=False,
+            webhook_secret=None,
+            auth=False,
+            scheduler=False,
+        )
+
+    assert served["a2a_kwargs"]["sys_modules"] is True
 
 
 @pytest.mark.asyncio
@@ -167,6 +225,7 @@ async def test_serve_all_threads_jwt_auth() -> None:
             log_level=None,
             explorer=False,
             metrics=False,
+            sys_modules=False,
             push_notifications=False,
             webhook=False,
             webhook_secret=None,
@@ -217,6 +276,7 @@ async def test_serve_all_raises_when_auth_requested_but_unconfigured() -> None:
                 log_level=None,
                 explorer=False,
                 metrics=False,
+                sys_modules=False,
                 push_notifications=False,
                 webhook=False,
                 webhook_secret=None,
@@ -271,6 +331,7 @@ async def test_serve_all_runs_in_process_scheduler() -> None:
             log_level=None,
             explorer=False,
             metrics=False,
+            sys_modules=False,
             push_notifications=False,
             webhook=False,
             webhook_secret=None,

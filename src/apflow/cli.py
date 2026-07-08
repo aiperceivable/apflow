@@ -257,6 +257,7 @@ def serve(
             log_level=log_level,
             explorer=explorer,
             metrics=metrics,
+            sys_modules=sys_modules,
             push_notifications=push_notifications,
             webhook=webhook,
             webhook_secret=webhook_secret,
@@ -511,9 +512,9 @@ def worker(db: str, node_id: Optional[str], scheduler: bool, log_level: Optional
     from apflow.app import create_app
 
     if log_level:
-        import logging
+        from apflow.logger import setup_logging
 
-        logging.getLogger("apflow").setLevel(log_level.upper())
+        setup_logging(log_level)
 
     click.echo(f"Starting worker node: {node_id or 'auto'}")
 
@@ -601,9 +602,9 @@ def scheduler(
     from apflow.scheduler.internal import run_scheduler
 
     if log_level:
-        import logging
+        from apflow.logger import setup_logging
 
-        logging.getLogger("apflow").setLevel(log_level.upper())
+        setup_logging(log_level)
 
     # The scheduler's direct-DB path uses the global pooled session, which binds
     # its connection on first use from APFLOW_DATABASE_URL / config — not from
