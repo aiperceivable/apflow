@@ -4,8 +4,8 @@ Helper utilities - demonstrates correct logging usage in utils modules
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Type
-from pydantic import BaseModel, HttpUrl
+from typing import Any, Dict, FrozenSet, List, Type
+from pydantic import BaseModel, HttpUrl, ValidationError
 from urllib.parse import urlparse, urlunparse, ParseResult
 
 # Use standard library logging directly
@@ -70,14 +70,19 @@ def resolve_schema_refs(schema: Dict[str, Any]) -> Dict[str, Any]:
 
     defs = schema.get("$defs", {})
 
-    def _resolve(node: Any) -> Any:
+    def _resolve(node: Any, expanding: FrozenSet[str]) -> Any:
         if isinstance(node, dict):
             # Handle $ref
             if "$ref" in node:
                 ref_path = node["$ref"]  # e.g. "#/$defs/AuthConfig"
                 ref_name = ref_path.rsplit("/", 1)[-1]
+                if ref_name in expanding:
+                    # Self-referential cycle (e.g. a recursive tree-node
+                    # model): stop inlining here instead of recursing forever
+                    # and leave this occurrence as an unresolved $ref.
+                    return node
                 if ref_name in defs:
-                    resolved = _resolve(dict(defs[ref_name]))
+                    resolved = _resolve(dict(defs[ref_name]), expanding | {ref_name})
                     # Merge any sibling keys (e.g. description alongside $ref)
                     extra = {k: v for k, v in node.items() if k != "$ref"}
                     if extra:
@@ -86,14 +91,14 @@ def resolve_schema_refs(schema: Dict[str, Any]) -> Dict[str, Any]:
                 return node
 
             # Handle anyOf/oneOf/allOf containing $ref
-            return {k: _resolve(v) for k, v in node.items()}
+            return {k: _resolve(v, expanding) for k, v in node.items()}
 
         if isinstance(node, list):
-            return [_resolve(item) for item in node]
+            return [_resolve(item, expanding) for item in node]
 
         return node
 
-    resolved = _resolve(schema)
+    resolved = _resolve(schema, frozenset())
 
     # Remove $defs from top-level
     resolved.pop("$defs", None)
@@ -180,8 +185,18 @@ def check_input_schema(
         param_info = get_input_schema(input_schema)
         required_params = [name for name, info in param_info.items() if info["required"]]
         missing_params = [param for param in required_params if param not in parameters]
+
+        # Only report "missing" when fields are actually absent — validation
+        # can also fail with every required field present (e.g. a type
+        # mismatch), in which case missing_params is empty and claiming
+        # fields are missing would be factually wrong.
+        if missing_params:
+            raise ValueError(
+                f"Missing required parameters: {missing_params}. Available parameters: {param_info}"
+            )
         raise ValueError(
-            f"Missing required parameters: {missing_params}. Available parameters: {param_info}"
+            f"Invalid parameters for schema. Provided keys: {sorted(parameters.keys())}. "
+            f"Expected parameters: {param_info}"
         )
 
 
@@ -189,18 +204,26 @@ def validate_input_schema(
     input_schema: Type[BaseModel] | Dict[str, Any], parameters: Dict[str, Any]
 ) -> bool:
     """validate parameters using Pydantic schema or JSON schema with field validators"""
+    if isinstance(input_schema, dict):
+        # Handle JSON schema validation
+        return validate_json_schema(input_schema, parameters)
+
+    # Use Pydantic's built-in validation with field validators. Only
+    # ValidationError is treated as "invalid user input" — any other
+    # exception means input_schema itself is broken (e.g. not a callable
+    # BaseModel), which is a programmer bug and must propagate rather than
+    # being reported as a validation failure.
     try:
-        if isinstance(input_schema, dict):
-            # Handle JSON schema validation
-            return validate_json_schema(input_schema, parameters)
-        else:
-            # Use Pydantic's built-in validation with field validators
-            input_schema(**parameters)
-            return True
-    except Exception as e:
-        # Log validation error for debugging
+        input_schema(**parameters)
+        return True
+    except ValidationError as e:
+        # Log which fields failed and why, but not the raw parameter values —
+        # they may contain secrets (tokens, api keys). str(e) is avoided too:
+        # pydantic's own formatting embeds the rejected value per error, so
+        # include_input=False is required to keep it out of the log.
         logger.error(
-            f"Parameter validation failed: {str(e)}, parameters: {parameters}, input_schema: {input_schema}"
+            f"Parameter validation failed for keys {sorted(parameters.keys())}: "
+            f"{e.errors(include_url=False, include_input=False)}"
         )
         return False
 
