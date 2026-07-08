@@ -97,6 +97,7 @@ async def _serve_all_async(
     A2A agent-card discovery exempt), while a parent AuthMiddleware guards the
     REST module routes. The parent exempts the /a2a and /mcp prefixes (handled
     by the sub-apps), the HMAC webhook, and the public REST metadata paths.
+    Raises RuntimeError if auth is requested without ``api.jwt_secret`` set.
     """
     import uvicorn
     from apcore_a2a import async_serve as a2a_async_serve
@@ -118,6 +119,13 @@ async def _serve_all_async(
 
         a2a_auth = build_a2a_authenticator()
         mcp_auth = build_mcp_authenticator()
+        if a2a_auth is None or mcp_auth is None:
+            # Both builders return None when api.jwt_secret is not configured.
+            # Pressing on here would silently leave A2A/MCP unauthenticated
+            # (auth=None/require_auth with no authenticator) and wrap REST in
+            # an AuthMiddleware backed by a None authenticator, crashing every
+            # request with a 500 — fail loudly instead, matching serve_rest.
+            raise RuntimeError("auth requested but api.jwt_secret is not configured")
 
     # CORS is applied once at the combined parent (assemble_combined), so the REST
     # sub-app is built without its own CORS layer here.

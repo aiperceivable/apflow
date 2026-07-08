@@ -270,6 +270,7 @@ class WebhookGateway:
                     return {
                         "success": False,
                         "error": f"Task {task_id} not found",
+                        "error_code": "TASK_NOT_FOUND",
                         "task_id": task_id,
                     }
 
@@ -333,6 +334,7 @@ class WebhookGateway:
                     return {
                         "success": False,
                         "error": "Task not found",
+                        "error_code": "TASK_NOT_FOUND",
                         "task_id": task_id,
                     }
 

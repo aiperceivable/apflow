@@ -96,7 +96,6 @@ async def test_serve_all_async_assembles_and_runs() -> None:
             cors_origins=None,
             log_level=None,
             explorer=False,
-
             metrics=False,
             push_notifications=True,
             webhook=True,
@@ -167,7 +166,6 @@ async def test_serve_all_threads_jwt_auth() -> None:
             cors_origins=None,
             log_level=None,
             explorer=False,
-
             metrics=False,
             push_notifications=False,
             webhook=False,
@@ -183,6 +181,48 @@ async def test_serve_all_threads_jwt_auth() -> None:
     # REST module routes are guarded: the served app is the AuthMiddleware wrapper,
     # not the bare combined Starlette.
     assert isinstance(served["config"].app, AuthMiddleware)
+
+
+@pytest.mark.asyncio
+async def test_serve_all_raises_when_auth_requested_but_unconfigured() -> None:
+    """Regression: when auth=True but no JWT secret is configured, the
+    authenticator builders return None — serve_all pressed on regardless,
+    silently leaving A2A/MCP unauthenticated (auth=None/authenticator=None)
+    and wrapping REST in an AuthMiddleware backed by a None authenticator
+    (crashes every request with a 500), unlike serve_rest which raises
+    immediately in this situation. (Review CRITICAL #7)
+    """
+
+    async def fake_a2a_serve(registry: object, **_kw: object) -> Starlette:
+        raise AssertionError("must not reach A2A serve when auth is misconfigured")
+
+    def fake_mcp_serve(registry: object, **_kw: object) -> Starlette:
+        raise AssertionError("must not reach MCP serve when auth is misconfigured")
+
+    with (
+        patch("apcore_a2a.async_serve", fake_a2a_serve),
+        patch("apcore_mcp.async_serve", fake_mcp_serve),
+        patch("apflow.api.auth.build_a2a_authenticator", lambda: None),
+        patch("apflow.api.auth.build_mcp_authenticator", lambda: None),
+    ):
+        with pytest.raises(RuntimeError, match="jwt_secret"):
+            await _serve_all_async(
+                Registry(),
+                host="127.0.0.1",
+                port=9999,
+                title="apflow",
+                version="1.0",
+                description="d",
+                cors_origins=None,
+                log_level=None,
+                explorer=False,
+                metrics=False,
+                push_notifications=False,
+                webhook=False,
+                webhook_secret=None,
+                auth=True,
+                scheduler=False,
+            )
 
 
 @pytest.mark.asyncio
@@ -230,7 +270,6 @@ async def test_serve_all_runs_in_process_scheduler() -> None:
             cors_origins=None,
             log_level=None,
             explorer=False,
-
             metrics=False,
             push_notifications=False,
             webhook=False,

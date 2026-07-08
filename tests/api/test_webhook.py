@@ -30,7 +30,12 @@ def test_webhook_triggers_task() -> None:
 
 
 def test_webhook_missing_task_maps_to_404() -> None:
-    result = {"success": False, "error": "Task t1 not found", "task_id": "t1"}
+    result = {
+        "success": False,
+        "error": "Task t1 not found",
+        "error_code": "TASK_NOT_FOUND",
+        "task_id": "t1",
+    }
     with patch(_TRIGGER, new=AsyncMock(return_value=result)):
         resp = _client().post("/webhook/trigger/t1")
     assert resp.status_code == 404
@@ -44,6 +49,25 @@ def test_webhook_executed_failure_is_still_200() -> None:
         resp = _client().post("/webhook/trigger/t1")
     assert resp.status_code == 200
     assert resp.json()["error"] == "boom during execution"
+
+
+def test_webhook_unrelated_not_found_in_error_text_is_still_200() -> None:
+    """Regression: the 404 mapping used to scan the error TEXT for the
+    substring "not found", so a task that executed but whose own business
+    logic failed with a message merely mentioning "not found" (e.g. an
+    upstream REST 404, or "User 42 not found") was misreported as a missing
+    scheduled task. Only the gateway's explicit error_code marker should
+    trigger 404. (Review CRITICAL #8)
+    """
+    result = {
+        "success": False,
+        "error": "Upstream API returned: User 42 not found",
+        "task_id": "t1",
+    }
+    with patch(_TRIGGER, new=AsyncMock(return_value=result)):
+        resp = _client().post("/webhook/trigger/t1")
+    assert resp.status_code == 200
+    assert resp.json()["error"] == "Upstream API returned: User 42 not found"
 
 
 def test_webhook_rejects_missing_signature_when_secret_set() -> None:

@@ -108,8 +108,12 @@ def build_webhook_routes(
         # A missing task is the only 404; an executed-but-failed task is a valid
         # 200 result (success=False) — external schedulers read the body, not
         # only the status — so the run is not treated as a transport error.
-        error = str(result.get("error", "")) if not result.get("success") else ""
-        if "not found" in error.lower():
+        # Matched via the gateway's explicit error_code marker, not a substring
+        # scan of the error text: the task's OWN execution can legitimately
+        # produce an error message that happens to contain "not found" (e.g. a
+        # REST executor's upstream 404, or business logic like "User 42 not
+        # found"), which must stay a 200 result, not be misreported as 404.
+        if result.get("error_code") == "TASK_NOT_FOUND":
             return JSONResponse(result, status_code=404)
         return JSONResponse(result, status_code=200)
 
