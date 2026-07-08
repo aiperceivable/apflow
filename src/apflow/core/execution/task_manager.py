@@ -964,8 +964,10 @@ class TaskManager:
                     logger.warning(f"Task {task_id}: failed to update token usage: {e}")
 
             # --- Durability: Record success, clean up checkpoints ---
-            if self._circuit_breaker_registry and task.name:
-                self._circuit_breaker_registry.get(task.name).record_success()
+            if self._circuit_breaker_registry:
+                executor_id = self._get_executor_id(task)
+                if executor_id:
+                    self._circuit_breaker_registry.get(executor_id).record_success()
             if self._checkpoint_manager:
                 try:
                     await self._checkpoint_manager.delete_checkpoints(task_id)
@@ -1088,10 +1090,11 @@ class TaskManager:
             logger.info(f"Task {task_id} execution - calling agent executor (name: {task.name})")
 
             # --- Durability: Circuit breaker pre-check ---
-            if self._circuit_breaker_registry and task.name:
-                cb = self._circuit_breaker_registry.get(task.name)
-                if not cb.can_execute():
-                    error_msg = f"Circuit breaker OPEN for executor '{task.name}'"
+            if self._circuit_breaker_registry:
+                executor_id = self._get_executor_id(task)
+                cb = self._circuit_breaker_registry.get(executor_id) if executor_id else None
+                if cb and not cb.can_execute():
+                    error_msg = f"Circuit breaker OPEN for executor '{executor_id}'"
                     logger.warning(f"Task {task_id}: {error_msg}")
                     await self.task_repository.update_task(
                         task_id=task_id,
@@ -1210,8 +1213,18 @@ class TaskManager:
                 logger.error(f"Error executing task {task_id}: {str(e)}", exc_info=True)
 
             # --- Durability: Record failure on circuit breaker ---
-            if self._circuit_breaker_registry and task.name:
-                self._circuit_breaker_registry.get(task.name).record_failure()
+            if self._circuit_breaker_registry:
+                executor_id = self._get_executor_id(task)
+                if executor_id:
+                    self._circuit_breaker_registry.get(executor_id).record_failure()
+
+            # Retries (if any) are now exhausted — clear the executor reference
+            # left in place by _execute_task_with_schemas so a retry callback
+            # could still read get_checkpoint() from it between attempts.
+            async with self._executor_lock:
+                executor = self._executor_instances.pop(task_id, None)
+            if executor and hasattr(executor, "clear_task_context"):
+                executor.clear_task_context()
 
             # Update task status
             if task_id:
@@ -1690,6 +1703,15 @@ class TaskManager:
                 self._executor_instances[task.id] = executor
             logger.debug(f"Stored executor instance for task {task.id} (supports cancellation)")
 
+        # --- Durability: restore executor state via the checkpoint contract ---
+        # Loaded earlier into inputs["_checkpoint"] (see _execute_single_task);
+        # invoke it through the documented resume_from_checkpoint()/
+        # supports_checkpoint() interface, which previously was never called.
+        checkpoint_data = inputs.get("_checkpoint") if inputs else None
+        if checkpoint_data is not None and executor.supports_checkpoint():
+            await executor.resume_from_checkpoint(checkpoint_data)
+            logger.info(f"Task {task.id}: restored executor state from checkpoint")
+
         # ============================================================
         # 4. execute executor (with hooks)
         # ============================================================
@@ -1840,12 +1862,12 @@ class TaskManager:
                     f"Error executing task {task.id} with executor {executor.__class__.__name__}: {e}",
                     exc_info=True,
                 )
-            # Explicitly clear task context on error to prevent memory leaks
-            if hasattr(executor, "clear_task_context"):
-                executor.clear_task_context()
-            # Clear executor reference on error
-            async with self._executor_lock:
-                self._executor_instances.pop(task.id, None)
+            # Note: the executor reference and its task context are deliberately
+            # NOT cleared here. A retry callback (see _execute_single_task's
+            # _on_retry) needs to read this same instance via get_checkpoint()
+            # between attempts; clearing it on every per-attempt failure made
+            # checkpoint-on-retry permanently unreachable. Final cleanup happens
+            # once the whole retry sequence resolves, in _execute_single_task.
             # Re-raise the exception to let TaskManager mark the task as failed
             raise
 
