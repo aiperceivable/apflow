@@ -4,6 +4,7 @@ Task executor for AIPartnerUpFlow that manages task tree execution
 
 import uuid
 import copy
+import threading
 from typing import Dict, Any, List, Optional, Union
 from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,39 +47,42 @@ class TaskExecutor:
 
     _instance = None
     _initialized = False
+    _lock = threading.Lock()
 
     def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(TaskExecutor, cls).__new__(cls)
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super(TaskExecutor, cls).__new__(cls)
         return cls._instance
 
     def __init__(self):
-        if not TaskExecutor._initialized:
-            # TaskTracker is singleton for shared state (running tasks)
-            self.task_tracker = TaskTracker()
-            # Read configuration from registry at initialization (static hooks)
-            # In production, hooks are registered at application startup
-            self.task_model_class = get_task_model_class()
-            self.pre_hooks = get_pre_hooks()
-            self.post_hooks = get_post_hooks()
-            # Store executor instances for cancellation (task_id -> executor)
-            # This allows cancel_task() to access executors created during execution
-            self._executor_instances: Dict[str, Any] = {}
+        with TaskExecutor._lock:
+            if not TaskExecutor._initialized:
+                # TaskTracker is singleton for shared state (running tasks)
+                self.task_tracker = TaskTracker()
+                # Read configuration from registry at initialization (static hooks)
+                # In production, hooks are registered at application startup
+                self.task_model_class = get_task_model_class()
+                self.pre_hooks = get_pre_hooks()
+                self.post_hooks = get_post_hooks()
+                # Store executor instances for cancellation (task_id -> executor)
+                # This allows cancel_task() to access executors created during execution
+                self._executor_instances: Dict[str, Any] = {}
 
-            # Distributed cluster support
-            from apflow.core.distributed.config import DistributedConfig
+                # Distributed cluster support
+                from apflow.core.distributed.config import DistributedConfig
 
-            self.distributed_config = DistributedConfig.from_env()
-            self.distributed_runtime: Optional[Any] = None
+                self.distributed_config = DistributedConfig.from_env()
+                self.distributed_runtime: Optional[Any] = None
 
-            TaskExecutor._initialized = True
-            logger.info(
-                f"Initialized TaskExecutor "
-                f"(TaskModel: {self.task_model_class.__name__}, "
-                f"pre_hooks: {len(self.pre_hooks)}, "
-                f"post_hooks: {len(self.post_hooks)}, "
-                f"distributed: {self.distributed_config.enabled})"
-            )
+                TaskExecutor._initialized = True
+                logger.info(
+                    f"Initialized TaskExecutor "
+                    f"(TaskModel: {self.task_model_class.__name__}, "
+                    f"pre_hooks: {len(self.pre_hooks)}, "
+                    f"post_hooks: {len(self.post_hooks)}, "
+                    f"distributed: {self.distributed_config.enabled})"
+                )
 
     def refresh_config(self):
         """

@@ -2,6 +2,8 @@
 Additional tests for TaskExecutor to increase coverage
 """
 
+import threading
+
 import pytest
 from apflow.core.execution.task_executor import TaskExecutor
 from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
@@ -257,6 +259,65 @@ class TestTaskExecutorAdditional:
 
         # Failed tasks should be marked for re-execution
         assert task.id in marked_ids
+
+
+class TestTaskExecutorSingletonThreadSafety:
+    """Regression: TaskExecutor's __new__/__init__ were unsynchronized, unlike
+    the sibling TaskTracker singleton in the same module. A race could
+    produce two instances, with one never receiving set_distributed_runtime()
+    and bypassing the leader-only execution guard. (Review CRITICAL #28)
+    """
+
+    def test_singleton_returns_same_instance(self):
+        executor1 = TaskExecutor()
+        executor2 = TaskExecutor()
+        assert executor1 is executor2
+
+    def test_singleton_thread_safe(self):
+        """Concurrent construction from many threads must all return the
+        exact same instance — mirrors TaskTracker's own thread-safety test."""
+        instances: list[TaskExecutor] = []
+        lock = threading.Lock()
+        barrier = threading.Barrier(10)
+
+        def create_instance() -> None:
+            barrier.wait()
+            instance = TaskExecutor()
+            with lock:
+                instances.append(instance)
+
+        threads = [threading.Thread(target=create_instance) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(instances) == 10
+        for instance in instances:
+            assert instance is instances[0]
+
+    def test_distributed_runtime_set_on_the_single_shared_instance(self):
+        """A distributed_runtime set on one reference must be visible via
+        every other reference obtained concurrently — proving there is only
+        ever one underlying instance to wire up."""
+        instances: list[TaskExecutor] = []
+        barrier = threading.Barrier(10)
+
+        def create_instance() -> None:
+            barrier.wait()
+            instances.append(TaskExecutor())
+
+        threads = [threading.Thread(target=create_instance) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        sentinel_runtime = object()
+        instances[0].set_distributed_runtime(sentinel_runtime)
+
+        for instance in instances:
+            assert instance.distributed_runtime is sentinel_runtime
 
 
 class TestTaskExecutorRequireExisting:
