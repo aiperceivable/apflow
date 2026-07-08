@@ -36,9 +36,7 @@ class MigrationHistoryTable:
         """
         try:
             with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        f"""
+                conn.execute(text(f"""
                         CREATE TABLE IF NOT EXISTS {MigrationHistoryTable.TABLE_NAME} (
                             id VARCHAR(100) PRIMARY KEY,
                             description TEXT NOT NULL,
@@ -46,9 +44,7 @@ class MigrationHistoryTable:
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
-                        """
-                    )
-                )
+                        """))
             logger.info(
                 f"✓ Ensured migration history table exists: {MigrationHistoryTable.TABLE_NAME}"
             )
@@ -174,14 +170,14 @@ class MigrationManager:
         # Get applied migrations
         applied = MigrationHistoryTable.get_applied(engine)
 
-        # Build set of all applied ids and aliases
-        applied_all: Set[str] = set(applied)
-        for migration in self._migrations:
-            aliases = getattr(migration, "aliases", [])
-            applied_all.update(aliases)
-
-        # Run pending migrations
-        pending = [m for m in self._migrations if m.id not in applied]
+        # A migration is pending only if neither its id nor any of its aliases is
+        # already recorded — so a migration recorded under an old alias id (after a
+        # rename) is not re-run.
+        pending = [
+            m
+            for m in self._migrations
+            if m.id not in applied and not any(a in applied for a in getattr(m, "aliases", []))
+        ]
 
         if not pending:
             logger.debug("✓ All migrations already applied")

@@ -279,6 +279,7 @@ class WebhookGateway:
                     return {
                         "success": False,
                         "error": "Permission denied",
+                        "error_code": "PERMISSION_DENIED",
                         "task_id": task_id,
                     }
 

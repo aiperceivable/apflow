@@ -115,6 +115,10 @@ def build_webhook_routes(
         # found"), which must stay a 200 result, not be misreported as 404.
         if result.get("error_code") == "TASK_NOT_FOUND":
             return JSONResponse(result, status_code=404)
+        # An authorization failure is a 403, consistent with validate_request's own
+        # rejections — not a 200 that an external monitor would read as success.
+        if result.get("error_code") == "PERMISSION_DENIED":
+            return JSONResponse(result, status_code=403)
         return JSONResponse(result, status_code=200)
 
     return [Route("/webhook/trigger/{task_id}", trigger, methods=["POST"])]

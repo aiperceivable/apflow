@@ -41,6 +41,20 @@ def test_webhook_missing_task_maps_to_404() -> None:
     assert resp.status_code == 404
 
 
+def test_webhook_permission_denied_maps_to_403() -> None:
+    """Regression: an owner-mismatch (authorization failure) must be 403, not the
+    200 that an external monitor would read as success."""
+    result = {
+        "success": False,
+        "error": "Permission denied",
+        "error_code": "PERMISSION_DENIED",
+        "task_id": "t1",
+    }
+    with patch(_TRIGGER, new=AsyncMock(return_value=result)):
+        resp = _client().post("/webhook/trigger/t1")
+    assert resp.status_code == 403
+
+
 def test_webhook_executed_failure_is_still_200() -> None:
     # A task that ran and failed is a valid result (success=False), not a transport
     # error — external schedulers read the body, so the status stays 200.

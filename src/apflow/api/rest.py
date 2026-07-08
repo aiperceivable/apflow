@@ -176,7 +176,7 @@ async def _execute(
         return _status_for_error(exc), {"error": exc.to_dict()}
     except Exception as exc:  # noqa: BLE001 — surface unexpected errors as 500
         logger.error("REST execute %s crashed: %s", module_id, exc, exc_info=True)
-        return 500, {"error": {"code": "INTERNAL_ERROR", "message": str(exc)}}
+        return 500, {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}}
     return 200, output
 
 
@@ -204,7 +204,9 @@ async def _stream_events(
         yield _sse_event({"error": exc.to_dict()}, event="error")
     except Exception as exc:  # noqa: BLE001 — surface as an SSE error event
         logger.error("REST stream %s crashed: %s", module_id, exc, exc_info=True)
-        yield _sse_event({"error": {"code": "INTERNAL_ERROR", "message": str(exc)}}, event="error")
+        yield _sse_event(
+            {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}}, event="error"
+        )
     yield _sse_event({}, event="done")
 
 

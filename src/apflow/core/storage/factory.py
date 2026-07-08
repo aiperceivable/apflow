@@ -4,6 +4,7 @@ Database session factory for creating database sessions
 
 from typing import Optional, Union, Dict, Any
 from pathlib import Path
+import asyncio
 import os
 import time
 from threading import Lock
@@ -22,6 +23,21 @@ from apflow.core.storage.migrate import MigrationManager
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _redact_connection_string(connection_string: Optional[str]) -> str:
+    """Return a connection string with any password redacted, for safe logging.
+
+    DB connection strings are deployment secrets; never log them verbatim.
+    """
+    if not connection_string:
+        return ""
+    try:
+        from sqlalchemy.engine import make_url
+
+        return make_url(connection_string).render_as_string(hide_password=True)
+    except Exception:
+        return "<redacted>"
 
 
 def _migrate_schema_if_needed(engine: Engine) -> None:
@@ -222,6 +238,34 @@ class SessionPoolManager:
         """Generate a unique key for database configuration"""
         return f"{connection_string or ''}:{path or ''}:{async_mode}"
 
+    def _dispose_current_engine(self) -> None:
+        """Dispose the current engine before it is replaced on reinit.
+
+        Without this, every reconfigure with a different config leaks the previous
+        engine's connection pool / SQLite file handles.
+        """
+        engine = self._engine
+        if engine is None:
+            return
+        try:
+            if isinstance(engine, AsyncEngine):
+                # dispose() is a coroutine on async engines; run it if a loop is
+                # available, otherwise the pool lingers until GC (rare reinit path).
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(engine.dispose())
+                except RuntimeError:
+                    logger.warning(
+                        "Async engine could not be disposed synchronously on reinit; "
+                        "its connection pool may linger until GC."
+                    )
+            else:
+                engine.dispose()
+        except Exception as exc:
+            logger.warning(f"Failed to dispose previous engine on reinit: {exc}")
+        finally:
+            self._engine = None
+
     def initialize(
         self,
         connection_string: Optional[str] = None,
@@ -249,10 +293,17 @@ class SessionPoolManager:
                     logger.debug("SessionPoolManager already initialized with matching config")
                     return
                 else:
+                    # Redact credentials: the config key embeds the raw connection
+                    # string (with password) for equality; never log it verbatim.
                     logger.warning(
-                        f"SessionPoolManager reinitializing with different config. "
-                        f"Old: {current_key}, New: {config_key}"
+                        "SessionPoolManager reinitializing with different config "
+                        "(old=%s, new=%s)",
+                        _redact_connection_string(self._connection_string),
+                        _redact_connection_string(connection_string),
                     )
+                    # Replace-with-different-config: dispose the old engine first
+                    # or its connection pool / file handles leak.
+                    self._dispose_current_engine()
 
             # Store configuration
             self._connection_string = connection_string
@@ -338,19 +389,32 @@ class SessionPoolManager:
 
             # Ensure tables exist
             if self._engine:
+                # Table creation is idempotent and best-effort (first use retries),
+                # so a failure here is not fatal.
+                if not async_mode:
+                    try:
+                        Base.metadata.create_all(self._engine)
+                    except Exception as e:
+                        logger.warning(
+                            f"Could not pre-create tables (will retry on first use): {e}"
+                        )
+                else:
+                    logger.debug("Async engine created, tables will be created on first use")
+
+                # Migrations must NOT be silently swallowed: a failed migration
+                # leaves an out-of-date schema and defers the real failure to later,
+                # opaque query errors. Log at error and let it propagate so startup
+                # fails loudly instead of running on a stale schema.
                 try:
                     if async_mode:
-                        # Tables are created on first use, but migrations run now
-                        # on a separate short-lived sync engine (MigrationManager
-                        # can't run against an AsyncEngine).
-                        logger.debug("Async engine created, tables will be created on first use")
                         _migrate_schema_for_async_engine(connection_string, dialect)
                     else:
-                        Base.metadata.create_all(self._engine)
-                        # Auto-migrate schema for existing users
                         _migrate_schema_if_needed(self._engine)
                 except Exception as e:
-                    logger.warning(f"Could not create tables automatically: {str(e)}")
+                    logger.error(
+                        f"Schema migration failed during initialization: {e}", exc_info=True
+                    )
+                    raise
 
     def create_session(self) -> Union[Session, AsyncSession]:
         """
