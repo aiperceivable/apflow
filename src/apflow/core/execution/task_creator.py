@@ -1010,14 +1010,19 @@ class TaskCreator:
             )
             task_tree = TaskTreeNode(task=new_task)
             if _save:
-                await self.task_repository.save_task_tree(task_tree)
+                saved = await self.task_repository.save_task_tree(task_tree)
+                if not saved:
+                    raise RuntimeError(
+                        f"Failed to save linked task '{new_task.id}'; see logs for details"
+                    )
             return task_tree
 
         # Build original subtree and augment with dependencies as needed
         original_tree = await self.task_repository.build_task_tree(_original_task)
         if _original_task.parent_id is not None:
-            # Validate no external dependencies if not root
-            await self._validate_no_external_dependencies(_original_task)
+            if not _auto_include_deps:
+                # Validate no external dependencies if not root and not auto-including
+                await self._validate_no_external_dependencies(_original_task)
             original_tree = await self._augment_subtree_with_dependencies(
                 original_tree,
                 _auto_include_deps,
@@ -1028,7 +1033,12 @@ class TaskCreator:
         # clone tree
         task_tree = await self._clone_task_tree(original_tree, reset_kwargs)
         if _save:
-            await self.task_repository.save_task_tree(task_tree)
+            saved = await self.task_repository.save_task_tree(task_tree)
+            if not saved:
+                raise RuntimeError(
+                    f"Failed to save linked task tree rooted at '{task_tree.task.id}'; "
+                    "see logs for details"
+                )
 
         return task_tree
 
@@ -1081,14 +1091,19 @@ class TaskCreator:
             )
             task_tree = TaskTreeNode(task=new_task)
             if _save:
-                await self.task_repository.save_task_tree(task_tree)
+                saved = await self.task_repository.save_task_tree(task_tree)
+                if not saved:
+                    raise RuntimeError(
+                        f"Failed to save copied task '{new_task.id}'; see logs for details"
+                    )
             return task_tree
 
         # Build original subtree and augment with dependencies as needed
         original_tree = await self.task_repository.build_task_tree(_original_task)
         if _original_task.parent_id is not None:
-            # Validate no external dependencies if not root
-            await self._validate_no_external_dependencies(_original_task)
+            if not _auto_include_deps:
+                # Validate no external dependencies if not root and not auto-including
+                await self._validate_no_external_dependencies(_original_task)
             original_tree = await self._augment_subtree_with_dependencies(
                 original_tree,
                 _auto_include_deps,
@@ -1099,7 +1114,12 @@ class TaskCreator:
         # clone tree
         task_tree = await self._clone_task_tree(original_tree, reset_kwargs)
         if _save:
-            await self.task_repository.save_task_tree(task_tree)
+            saved = await self.task_repository.save_task_tree(task_tree)
+            if not saved:
+                raise RuntimeError(
+                    f"Failed to save copied task tree rooted at '{task_tree.task.id}'; "
+                    "see logs for details"
+                )
 
         return task_tree
 
@@ -1245,8 +1265,9 @@ class TaskCreator:
         # Build original subtree and augment with dependencies as needed
         original_tree = await self.task_repository.build_task_tree(_original_task)
         if _original_task.parent_id is not None:
-            # Validate no external dependencies if not root
-            await self._validate_no_external_dependencies(_original_task)
+            if not _auto_include_deps:
+                # Validate no external dependencies if not root and not auto-including
+                await self._validate_no_external_dependencies(_original_task)
             original_tree = await self._augment_subtree_with_dependencies(
                 original_tree,
                 _auto_include_deps,
@@ -1313,7 +1334,11 @@ class TaskCreator:
             )
             task_tree = TaskTreeNode(task=new_task)
             if _save:
-                await self.task_repository.save_task_tree(task_tree)
+                saved = await self.task_repository.save_task_tree(task_tree)
+                if not saved:
+                    raise RuntimeError(
+                        f"Failed to save mixed task '{new_task.id}'; see logs for details"
+                    )
             return task_tree
 
         # Recursive mixed - validate and handle with dependency consideration
@@ -1325,15 +1350,15 @@ class TaskCreator:
         # Build original subtree
         original_tree = await self.task_repository.build_task_tree(_original_task)
 
-        if (
-            _link_task_ids
-            and "user_id" in reset_kwargs
-            and not check_tasks_user_ownership(original_tree, reset_kwargs.get("user_id"))
-        ):
-            raise ValueError("Deny linking to a different user's task.")
-
         # Separate tasks into copy and link sets
         link_set = set(str(id) for id in (_link_task_ids if _link_task_ids else []))
+
+        # Ownership only matters for the linked subset — copies are independent,
+        # modifiable clones that (like from_copy) permit cross-owner reassignment.
+        if _link_task_ids and "user_id" in reset_kwargs:
+            linked_tasks = [t for t in original_tree.to_list() if str(t.id) in link_set]
+            if not check_tasks_user_ownership(linked_tasks, reset_kwargs.get("user_id")):
+                raise ValueError("Deny linking to a different user's task.")
 
         # Augment subtree with dependencies for copied portions only
         # To do so, temporarily mark linked tasks in the subtree so they are not considered
@@ -1355,7 +1380,12 @@ class TaskCreator:
         task_tree = await self._clone_task_tree(mixed_tree, reset_kwargs, tasks_origin_type)
 
         if _save:
-            await self.task_repository.save_task_tree(task_tree)
+            saved = await self.task_repository.save_task_tree(task_tree)
+            if not saved:
+                raise RuntimeError(
+                    f"Failed to save mixed task tree rooted at '{task_tree.task.id}'; "
+                    "see logs for details"
+                )
 
         return task_tree
 

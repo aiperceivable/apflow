@@ -1,4 +1,6 @@
 # --- Origin Type Tests (from test_task_creator_origin_types.py, deduplicated) ---
+from unittest.mock import AsyncMock
+
 import pytest
 from apflow.core.storage.sqlalchemy.models import TaskOriginType
 from apflow.core.execution.task_creator import TaskCreator
@@ -400,6 +402,127 @@ class TestTaskCreatorOriginTypes:
         assert by_name["LinkedChild"].origin_type == TaskOriginType.link
         # The copied sibling must remain a copy, not be contaminated to link.
         assert by_name["CopiedChild"].origin_type == TaskOriginType.copy
+
+    @pytest.mark.asyncio
+    async def test_from_copy_auto_include_deps_reachable_for_non_root(self, sync_db_session):
+        """Regression: _validate_no_external_dependencies must not gate unconditionally
+        for non-root tasks. When _auto_include_deps=True (the default), a dependency
+        outside the copied subtree must be auto-included instead of raising."""
+        task_repository = TaskRepository(sync_db_session)
+        creator = TaskCreator(sync_db_session)
+        root = await task_repository.create_task(name="Root", user_id="user_123")
+        dep = await task_repository.create_task(
+            name="Dep", user_id="user_123", parent_id=root.id
+        )
+        child = await task_repository.create_task(
+            name="Child",
+            user_id="user_123",
+            parent_id=root.id,
+            dependencies=[{"id": dep.id, "required": True}],
+        )
+        root.has_children = True
+        sync_db_session.commit()
+        sync_db_session.refresh(dep)
+        sync_db_session.refresh(child)
+
+        # child is non-root and depends on its sibling `dep`, which is outside the
+        # subtree rooted at `child` itself. With _auto_include_deps=True (default)
+        # this must be auto-included rather than raising.
+        copied = await creator.from_copy(
+            _original_task=child, _save=True, _recursive=True, _auto_include_deps=True
+        )
+        assert isinstance(copied, TaskTreeNode)
+
+    @pytest.mark.asyncio
+    async def test_from_copy_external_dependency_still_raises_when_deps_not_included(
+        self, sync_db_session
+    ):
+        """The strict validation must still fire when auto-include is explicitly off."""
+        task_repository = TaskRepository(sync_db_session)
+        creator = TaskCreator(sync_db_session)
+        root = await task_repository.create_task(name="Root", user_id="user_123")
+        dep = await task_repository.create_task(
+            name="Dep", user_id="user_123", parent_id=root.id
+        )
+        child = await task_repository.create_task(
+            name="Child",
+            user_id="user_123",
+            parent_id=root.id,
+            dependencies=[{"id": dep.id, "required": True}],
+        )
+        root.has_children = True
+        sync_db_session.commit()
+        sync_db_session.refresh(dep)
+        sync_db_session.refresh(child)
+
+        with pytest.raises(ValueError, match="external dependencies"):
+            await creator.from_copy(
+                _original_task=child, _save=True, _recursive=True, _auto_include_deps=False
+            )
+
+    @pytest.mark.asyncio
+    async def test_from_copy_raises_when_save_fails(self, sync_db_session, monkeypatch):
+        """Regression: save_task_tree's boolean return must not be discarded — a
+        silent persist failure must surface as an error, not a false success."""
+        task_repository = TaskRepository(sync_db_session)
+        creator = TaskCreator(sync_db_session)
+        original_task = await task_repository.create_task(
+            name="Original Task", user_id="user_123", status="completed"
+        )
+        monkeypatch.setattr(
+            creator.task_repository, "save_task_tree", AsyncMock(return_value=False)
+        )
+        with pytest.raises(RuntimeError):
+            await creator.from_copy(_original_task=original_task, _save=True, _recursive=False)
+
+    @pytest.mark.asyncio
+    async def test_from_link_raises_when_save_fails(self, sync_db_session, monkeypatch):
+        task_repository = TaskRepository(sync_db_session)
+        creator = TaskCreator(sync_db_session)
+        original_task = await task_repository.create_task(
+            name="Original Task", user_id="user_123", status="completed"
+        )
+        monkeypatch.setattr(
+            creator.task_repository, "save_task_tree", AsyncMock(return_value=False)
+        )
+        with pytest.raises(RuntimeError):
+            await creator.from_link(_original_task=original_task, _save=True, _recursive=False)
+
+    @pytest.mark.asyncio
+    async def test_from_mixed_raises_when_save_fails(self, sync_db_session, monkeypatch):
+        task_repository = TaskRepository(sync_db_session)
+        creator = TaskCreator(sync_db_session)
+        original_task = await task_repository.create_task(
+            name="Original Task", user_id="user_123", status="completed"
+        )
+        monkeypatch.setattr(
+            creator.task_repository, "save_task_tree", AsyncMock(return_value=False)
+        )
+        with pytest.raises(RuntimeError):
+            await creator.from_mixed(_original_task=original_task, _save=True, _recursive=False)
+
+    @pytest.mark.asyncio
+    async def test_from_mixed_ownership_check_scoped_to_linked_subset(self, sync_db_session):
+        """Regression: from_mixed's ownership check must only apply to the linked
+        subset, not the entire tree — a copy-only sibling owned by a different user
+        must not block a valid link+copy operation (from_copy permits cross-owner)."""
+        task_repository = TaskRepository(sync_db_session)
+        creator = TaskCreator(sync_db_session)
+        root = await task_repository.create_task(name="Root Task", user_id="user_123")
+        await task_repository.create_task(
+            name="Other Owner Child", user_id="other_user", parent_id=root.id
+        )
+        root.has_children = True
+        sync_db_session.commit()
+
+        mixed_tree = await creator.from_mixed(
+            _original_task=root,
+            _save=True,
+            _recursive=True,
+            user_id="user_123",
+            _link_task_ids=[root.id],
+        )
+        assert isinstance(mixed_tree, TaskTreeNode)
 
 
 """

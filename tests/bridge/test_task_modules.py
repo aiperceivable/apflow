@@ -321,6 +321,70 @@ class TestTaskCreateTreeInputValidation:
             await module.execute({"tasks": "not-a-list"})
 
 
+class TestTaskCreateTreeFieldWhitelist:
+    """Regression: per-task fields in the tasks[] array must be restricted to the
+    schema-advertised allowlist. Without it, an external MCP/A2A agent can smuggle
+    origin_type=link/original_task_id/user_id straight into build_task(), bypassing
+    from_link's ownership and completion checks entirely. (Review #24)
+    """
+
+    @staticmethod
+    def _mock_tree():
+        tree = MagicMock()
+        tree.task.id = "root-1"
+        tree.children = []
+        return tree
+
+    @pytest.mark.asyncio
+    async def test_disallowed_fields_stripped_before_create(self):
+        creator = MagicMock()
+        creator.create_task_tree_from_array = AsyncMock(return_value=self._mock_tree())
+
+        module = TaskCreateTreeModule(creator, MagicMock())
+        await module.execute(
+            {
+                "tasks": [
+                    {
+                        "name": "Task A",
+                        "origin_type": "link",
+                        "original_task_id": "victim-task",
+                        "user_id": "attacker",
+                    }
+                ]
+            }
+        )
+
+        (sent_tasks,), _ = creator.create_task_tree_from_array.call_args
+        assert sent_tasks[0]["name"] == "Task A"
+        assert "origin_type" not in sent_tasks[0]
+        assert "original_task_id" not in sent_tasks[0]
+        assert "user_id" not in sent_tasks[0]
+
+    @pytest.mark.asyncio
+    async def test_allowed_fields_pass_through(self):
+        creator = MagicMock()
+        creator.create_task_tree_from_array = AsyncMock(return_value=self._mock_tree())
+
+        module = TaskCreateTreeModule(creator, MagicMock())
+        await module.execute(
+            {
+                "tasks": [
+                    {
+                        "id": "task-a",
+                        "name": "Task A",
+                        "priority": 1,
+                        "dependencies": [],
+                    }
+                ]
+            }
+        )
+
+        (sent_tasks,), _ = creator.create_task_tree_from_array.call_args
+        assert sent_tasks[0]["id"] == "task-a"
+        assert sent_tasks[0]["priority"] == 1
+        assert sent_tasks[0]["dependencies"] == []
+
+
 class TestTaskUpdateFieldWhitelist:
     """Regression: only schema-advertised fields may be written; an arbitrary key
     (e.g. user_id) from an external agent must NOT reach update_task. (Review W1)

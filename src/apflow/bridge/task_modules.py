@@ -75,6 +75,29 @@ def _filter_reuse_overrides(overrides: Any) -> dict[str, Any]:
     return {k: v for k, v in overrides.items() if k in _OVERRIDABLE_REUSE_FIELDS}
 
 
+# Per-task fields an external agent may set when creating a task tree from a raw
+# array. Excludes origin_type/original_task_id/user_id — without this allowlist an
+# agent could smuggle origin_type=link + original_task_id=<victim task> straight
+# into build_task(), bypassing from_link's ownership and completion checks entirely.
+_TASK_TREE_ITEM_FIELDS = (
+    "id",
+    "name",
+    "parent_id",
+    "priority",
+    "inputs",
+    "params",
+    "dependencies",
+    "token_budget",
+    "cost_policy",
+    "max_attempts",
+)
+
+
+def _filter_task_tree_item(task: dict[str, Any]) -> dict[str, Any]:
+    """Restrict a raw task-array item to the schema-advertised allowlist."""
+    return {k: v for k, v in task.items() if k in _TASK_TREE_ITEM_FIELDS}
+
+
 _TASK_CREATE_INPUT = {
     "type": "object",
     "properties": {
@@ -458,17 +481,19 @@ class TaskCreateTreeModule:
         self.output_schema = _make_schema(_TASK_CREATE_TREE_OUTPUT)
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
-        tasks = inputs.get("tasks", [])
-        if not isinstance(tasks, list):
+        raw_tasks = inputs.get("tasks", [])
+        if not isinstance(raw_tasks, list):
             raise ValueError("tasks must be an array")
-        if not tasks:
+        if not raw_tasks:
             raise ValueError("tasks array must be non-empty")
 
-        for index, t in enumerate(tasks):
+        tasks: list[dict[str, Any]] = []
+        for index, t in enumerate(raw_tasks):
             if not isinstance(t, dict):
                 raise ValueError(f"tasks[{index}] must be an object")
             if not t.get("name"):
                 raise ValueError("Each task must have a non-empty 'name'")
+            tasks.append(_filter_task_tree_item(t))
 
         tree = await self._creator.create_task_tree_from_array(tasks)
 
