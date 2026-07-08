@@ -33,6 +33,7 @@ class TestRestExecutor:
         executor = RestExecutor()
 
         mock_response = MagicMock()
+        mock_response.has_redirect_location = False
         mock_response.status_code = 200
         mock_response.url = "https://api.example.com/test"
         mock_response.headers = {"Content-Type": "application/json"}
@@ -59,6 +60,7 @@ class TestRestExecutor:
         executor = RestExecutor()
 
         mock_response = MagicMock()
+        mock_response.has_redirect_location = False
         mock_response.status_code = 201
         mock_response.url = "https://api.example.com/create"
         mock_response.headers = {}
@@ -89,6 +91,7 @@ class TestRestExecutor:
         executor = RestExecutor()
 
         mock_response = MagicMock()
+        mock_response.has_redirect_location = False
         mock_response.status_code = 200
         mock_response.url = "https://api.example.com/test"
         mock_response.headers = {}
@@ -117,6 +120,7 @@ class TestRestExecutor:
         executor = RestExecutor()
 
         mock_response = MagicMock()
+        mock_response.has_redirect_location = False
         mock_response.status_code = 200
         mock_response.url = "https://api.example.com/test"
         mock_response.headers = {}
@@ -171,6 +175,7 @@ class TestRestExecutor:
         executor = RestExecutor()
 
         mock_response = MagicMock()
+        mock_response.has_redirect_location = False
         mock_response.status_code = 200
         mock_response.url = "https://api.example.com/test"
         mock_response.headers = {}
@@ -204,6 +209,7 @@ class TestRestExecutor:
         executor = RestExecutor()
 
         mock_response = MagicMock()
+        mock_response.has_redirect_location = False
         mock_response.status_code = 200
         mock_response.url = "https://api.example.com/test"
         mock_response.headers = {}
@@ -237,6 +243,7 @@ class TestRestExecutor:
         executor = RestExecutor()
 
         mock_response = MagicMock()
+        mock_response.has_redirect_location = False
         mock_response.status_code = 200
         mock_response.url = "https://api.example.com/test"
         mock_response.headers = {}
@@ -262,6 +269,7 @@ class TestRestExecutor:
         executor = RestExecutor()
 
         mock_response = MagicMock()
+        mock_response.has_redirect_location = False
         mock_response.status_code = 200
         mock_response.url = "https://api.example.com/test"
         mock_response.headers = {}
@@ -291,6 +299,7 @@ class TestRestExecutor:
         executor = RestExecutor()
 
         mock_response = MagicMock()
+        mock_response.has_redirect_location = False
         mock_response.status_code = 404
         mock_response.url = "https://api.example.com/test"
         mock_response.headers = {}
@@ -351,6 +360,7 @@ class TestRestExecutor:
         executor.cancellation_checker = check_cancellation
 
         mock_response = MagicMock()
+        mock_response.has_redirect_location = False
         mock_response.status_code = 200
         mock_response.url = "https://api.example.com/test"
         mock_response.headers = {}
@@ -376,6 +386,7 @@ class TestRestExecutor:
 
         for method in methods:
             mock_response = MagicMock()
+            mock_response.has_redirect_location = False
             mock_response.status_code = 200
             mock_response.url = f"https://api.example.com/{method.lower()}"
             mock_response.headers = {}
@@ -400,6 +411,7 @@ class TestRestExecutor:
         executor = RestExecutor()
 
         mock_response = MagicMock()
+        mock_response.has_redirect_location = False
         mock_response.status_code = 200
         mock_response.url = "https://api.example.com/test"
         mock_response.headers = {}
@@ -426,6 +438,7 @@ class TestRestExecutor:
         executor = RestExecutor()
 
         mock_response = MagicMock()
+        mock_response.has_redirect_location = False
         mock_response.status_code = 200
         mock_response.url = "https://api.example.com/test"
         mock_response.headers = {}
@@ -483,6 +496,7 @@ class TestRestExecutor:
         executor = RestExecutor()
 
         mock_response = MagicMock()
+        mock_response.has_redirect_location = False
         mock_response.status_code = 200
         mock_response.url = "http://192.168.1.1/api"
         mock_response.headers = {}
@@ -500,6 +514,166 @@ class TestRestExecutor:
             result = await executor.execute({"url": "http://192.168.1.1/api"})
 
             assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_request_kwargs_always_disable_native_redirects(self):
+        """follow_redirects must always be False for the raw httpx call —
+        redirects are only ever followed manually, with per-hop SSRF
+        re-validation, via _follow_redirects_with_validation. (Review BLOCKER)"""
+        executor = RestExecutor()
+
+        mock_response = MagicMock()
+        mock_response.has_redirect_location = False
+        mock_response.status_code = 200
+        mock_response.url = "https://api.example.com/test"
+        mock_response.headers = {}
+        mock_response.text = "OK"
+        mock_response.json.side_effect = Exception("Not JSON")
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client_instance = AsyncMock()
+            mock_client.return_value.__aenter__.return_value = mock_client_instance
+            mock_client_instance.request = AsyncMock(return_value=mock_response)
+
+            await executor.execute({"url": "https://api.example.com/test"})
+
+            call_kwargs = mock_client_instance.request.call_args[1]
+            assert call_kwargs["follow_redirects"] is False
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_redirect_to_private_address(self):
+        """Regression: a malicious/compromised server could previously redirect
+        a validated public URL to a private/internal address (e.g. the cloud
+        metadata endpoint) and bypass SSRF validation entirely, since only the
+        original URL was ever checked. Each redirect hop must now be
+        re-validated before being followed. (Review BLOCKER)"""
+        executor = RestExecutor()
+
+        redirect_response = MagicMock()
+        redirect_response.has_redirect_location = True
+        redirect_response.status_code = 302
+        redirect_response.url = "https://api.example.com/redirect"
+        redirect_response.next_request = httpx.Request(
+            "GET", "http://169.254.169.254/latest/meta-data/"
+        )
+
+        def fake_getaddrinfo(hostname, port):
+            if hostname == "169.254.169.254":
+                return [(None, None, None, None, ("169.254.169.254", 0))]
+            return [(None, None, None, None, ("93.184.216.34", 0))]
+
+        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+            with patch("httpx.AsyncClient") as mock_client:
+                mock_client_instance = AsyncMock()
+                mock_client.return_value.__aenter__.return_value = mock_client_instance
+                mock_client_instance.request = AsyncMock(return_value=redirect_response)
+
+                with pytest.raises(ValidationError, match="private/reserved address"):
+                    await executor.execute({"url": "https://api.example.com/redirect"})
+
+    @pytest.mark.asyncio
+    async def test_execute_follows_redirect_to_public_address(self):
+        """A redirect to a public address must still be followed transparently
+        (regression guard for the new manual redirect-following)."""
+        executor = RestExecutor()
+
+        redirect_response = MagicMock()
+        redirect_response.has_redirect_location = True
+        redirect_response.status_code = 302
+        redirect_response.next_request = httpx.Request("GET", "https://api.example.com/final")
+
+        final_response = MagicMock()
+        final_response.has_redirect_location = False
+        final_response.status_code = 200
+        final_response.url = "https://api.example.com/final"
+        final_response.headers = {}
+        final_response.text = "OK"
+        final_response.json.side_effect = Exception("Not JSON")
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client_instance = AsyncMock()
+            mock_client.return_value.__aenter__.return_value = mock_client_instance
+            mock_client_instance.request = AsyncMock(return_value=redirect_response)
+            mock_client_instance.send = AsyncMock(return_value=final_response)
+
+            result = await executor.execute({"url": "https://api.example.com/start"})
+
+            assert result["success"] is True
+            mock_client_instance.send.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_execute_does_not_follow_redirects_when_disabled(self):
+        """When follow_redirects=False is configured, a redirect response must
+        be returned as-is without following it at all."""
+        executor = RestExecutor(follow_redirects=False)
+
+        redirect_response = MagicMock()
+        redirect_response.has_redirect_location = True
+        redirect_response.status_code = 302
+        redirect_response.url = "https://api.example.com/redirect"
+        redirect_response.headers = {}
+        redirect_response.text = ""
+        redirect_response.json.side_effect = Exception("Not JSON")
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client_instance = AsyncMock()
+            mock_client.return_value.__aenter__.return_value = mock_client_instance
+            mock_client_instance.request = AsyncMock(return_value=redirect_response)
+            mock_client_instance.send = AsyncMock()
+
+            result = await executor.execute({"url": "https://api.example.com/redirect"})
+
+            assert result["success"] is False
+            assert result["status_code"] == 302
+            mock_client_instance.send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_raises_on_too_many_redirects(self):
+        """A redirect chain longer than the max must raise, not loop forever."""
+        from apflow.core.execution.errors import NetworkError
+
+        executor = RestExecutor()
+
+        def make_redirect_response(n):
+            r = MagicMock()
+            r.has_redirect_location = True
+            r.status_code = 302
+            r.url = f"https://api.example.com/hop{n}"
+            r.next_request = httpx.Request("GET", f"https://api.example.com/hop{n + 1}")
+            return r
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client_instance = AsyncMock()
+            mock_client.return_value.__aenter__.return_value = mock_client_instance
+            mock_client_instance.request = AsyncMock(return_value=make_redirect_response(0))
+            mock_client_instance.send = AsyncMock(
+                side_effect=[make_redirect_response(i) for i in range(1, 25)]
+            )
+
+            with pytest.raises(NetworkError, match="Exceeded maximum redirect count"):
+                await executor.execute({"url": "https://api.example.com/start"})
+
+    @pytest.mark.asyncio
+    async def test_validate_url_dns_resolution_does_not_block_event_loop(self):
+        """Regression: socket.getaddrinfo() was called directly on the event
+        loop thread, blocking every concurrently-running task for the duration
+        of DNS resolution. It must run in a worker thread via run_in_executor.
+        (Review CRITICAL #61)"""
+        import threading
+
+        executor = RestExecutor()
+        main_thread = threading.current_thread()
+        resolution_threads = []
+
+        def fake_getaddrinfo(hostname, port):
+            resolution_threads.append(threading.current_thread())
+            return [(None, None, None, None, ("93.184.216.34", 0))]
+
+        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+            await executor._validate_url_not_private("https://api.example.com/test")
+
+        assert resolution_threads, "getaddrinfo was never called"
+        assert resolution_threads[0] is not main_thread
 
     @pytest.mark.asyncio
     async def test_get_input_schema(self):

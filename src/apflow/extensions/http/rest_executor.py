@@ -5,6 +5,7 @@ This executor is designed to make HTTP requests to third-party REST API services
 It supports authentication, custom headers, query parameters, and request bodies, making it suitable for integrating with external APIs such as SaaS platforms, cloud services, or any HTTP-based API provider.
 """
 
+import asyncio
 import ipaddress
 import os
 import socket
@@ -121,7 +122,7 @@ class RestExecutor(BaseTask):
         """Extension type identifier for categorization"""
         return "http"
 
-    def _validate_url_not_private(self, url: str) -> None:
+    async def _validate_url_not_private(self, url: str) -> None:
         """Validate that a URL does not target private or internal network addresses.
 
         Resolves the hostname to IP addresses and checks against private, loopback,
@@ -140,8 +141,12 @@ class RestExecutor(BaseTask):
         if not hostname:
             raise ValidationError(f"[{self.id}] URL has no hostname: {url}")
 
+        # socket.getaddrinfo() is a blocking call; running it directly here would
+        # stall the entire shared event loop (all other concurrently-running
+        # tasks) for as long as DNS resolution takes. Offload it to a thread.
+        loop = asyncio.get_running_loop()
         try:
-            addr_infos = socket.getaddrinfo(hostname, None)
+            addr_infos = await loop.run_in_executor(None, socket.getaddrinfo, hostname, None)
         except socket.gaierror:
             raise ValidationError(f"[{self.id}] Cannot resolve hostname: {hostname}")
 
@@ -152,6 +157,39 @@ class RestExecutor(BaseTask):
                 raise ValidationError(
                     f"[{self.id}] URL targets a private/reserved address: {hostname} -> {ip_str}"
                 )
+
+    async def _follow_redirects_with_validation(
+        self,
+        client: httpx.AsyncClient,
+        response: httpx.Response,
+        max_redirects: int = 20,
+    ) -> httpx.Response:
+        """Manually follow redirects, re-validating each hop against SSRF checks.
+
+        httpx's built-in follow_redirects=True follows Location headers without
+        re-validating the target, so a malicious or compromised server can
+        redirect to a private/internal address (e.g. the cloud metadata
+        endpoint 169.254.169.254) and bypass _validate_url_not_private entirely,
+        since it only ever checked the original URL. Each hop is validated here
+        before being followed.
+        """
+        redirects = 0
+        while response.has_redirect_location:
+            if redirects >= max_redirects:
+                raise NetworkError(
+                    f"[{self.id}] Too many redirects",
+                    what="Exceeded maximum redirect count",
+                    why=f"More than {max_redirects} redirects while requesting {response.url}",
+                    how_to_fix="Check the target service for a redirect loop",
+                    context={"url": str(response.url), "max_redirects": max_redirects},
+                )
+            next_request = response.next_request
+            if next_request is None:
+                break
+            await self._validate_url_not_private(str(next_request.url))
+            response = await client.send(next_request, follow_redirects=False)
+            redirects += 1
+        return response
 
     async def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -174,7 +212,7 @@ class RestExecutor(BaseTask):
         if not url:
             raise ValidationError(f"[{self.id}] url is required in inputs")
 
-        self._validate_url_not_private(url)
+        await self._validate_url_not_private(url)
 
         method = inputs.get("method", "GET").upper()
         headers = {**self.default_headers, **inputs.get("headers", {})}
@@ -209,12 +247,15 @@ class RestExecutor(BaseTask):
                             params = {}
                         params[key] = value
 
-        # Prepare request kwargs
+        # Prepare request kwargs. follow_redirects is always disabled at the
+        # transport level here — redirects are followed manually below (see
+        # _follow_redirects_with_validation) so each hop can be re-validated
+        # against SSRF checks.
         request_kwargs = {
             "method": method,
             "url": url,
             "headers": headers,
-            "follow_redirects": self.default_follow_redirects,
+            "follow_redirects": False,
         }
 
         if params:
@@ -237,6 +278,8 @@ class RestExecutor(BaseTask):
                     return {"success": False, "error": "Request was cancelled", "method": method}
 
                 response = await client.request(**request_kwargs)
+                if self.default_follow_redirects:
+                    response = await self._follow_redirects_with_validation(client, response)
 
                 # Check for cancellation after request
                 if self.cancellation_checker and self.cancellation_checker():
