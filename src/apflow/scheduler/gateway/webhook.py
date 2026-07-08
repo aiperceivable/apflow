@@ -39,6 +39,9 @@ class WebhookConfig:
         rate_limit: Maximum requests per minute per IP (0 = unlimited)
         timeout: Timeout for task execution in seconds
         async_execution: If True, return immediately and execute in background
+        signature_max_age_seconds: Maximum age of a signed request's timestamp
+            (Unix epoch seconds) before it is rejected as a replay. Only
+            enforced when secret_key is set.
     """
 
     secret_key: Optional[str] = None
@@ -46,6 +49,7 @@ class WebhookConfig:
     rate_limit: int = 0
     timeout: int = 3600
     async_execution: bool = True
+    signature_max_age_seconds: int = 300
     # Rate limiting state
     _rate_limit_state: Dict[str, List[float]] = field(default_factory=dict)
 
@@ -192,7 +196,7 @@ class WebhookGateway:
             client_ip: Client IP address
             payload: Request body (for signature validation)
             signature: Request signature header
-            timestamp: Request timestamp header
+            timestamp: Request timestamp header (Unix epoch seconds)
 
         Returns:
             Dict with 'valid' bool and 'error' message if invalid
@@ -208,9 +212,25 @@ class WebhookGateway:
         # Check signature if configured. A configured secret requires EVERY request
         # to be signed — including empty-body triggers, where task_id lives in the
         # URL path — so the HMAC guard cannot be bypassed by omitting the body.
+        #
+        # The timestamp is likewise mandatory (not just optionally folded into the
+        # signed message) and is freshness-checked here: an HMAC alone only proves
+        # the payload wasn't tampered with, not that the request is recent — a
+        # captured (payload, signature, timestamp) triple would otherwise remain
+        # valid forever, letting an attacker replay it indefinitely against this
+        # internet-facing, JWT-exempt endpoint.
         if self.config.secret_key:
             if not signature:
                 return {"valid": False, "error": "Missing signature"}
+            if not timestamp:
+                return {"valid": False, "error": "Missing timestamp"}
+            try:
+                timestamp_seconds = float(timestamp)
+            except ValueError:
+                return {"valid": False, "error": "Invalid timestamp"}
+            age = abs(time.time() - timestamp_seconds)
+            if age > self.config.signature_max_age_seconds:
+                return {"valid": False, "error": "Timestamp expired"}
             if not self.validate_signature(payload or b"", signature, timestamp):
                 return {"valid": False, "error": "Invalid signature"}
 
@@ -300,6 +320,7 @@ class WebhookGateway:
         from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
         from apflow.core.execution.task_creator import TaskCreator
         from apflow.core.execution.task_executor import TaskExecutor
+        from apflow.scheduler.internal import scheduled_dispatch_key
 
         try:
             async with create_pooled_session() as db_session:
@@ -318,8 +339,15 @@ class WebhookGateway:
                 # Spawn a fresh run instance from the definition. The definition is
                 # never executed in place — the clone is what runs, giving isolated
                 # per-fire history (origin_type=scheduled_run) and matching the
-                # distributed one-task-id-per-run model.
-                run_tree = await TaskCreator(db_session).instantiate_scheduled_run(definition)
+                # distributed one-task-id-per-run model. Stamp the SAME deterministic
+                # occurrence key the poll/leader dispatch path uses (internal.py), so
+                # this push-dispatch path dedupes against the same scheduled slot
+                # instead of always creating a fresh, uncontested run — without this,
+                # a webhook trigger racing the poll loop for the same due slot could
+                # both succeed, executing the occurrence twice (breaks effectively-once).
+                run_tree = await TaskCreator(db_session).instantiate_scheduled_run(
+                    definition, idempotency_key=scheduled_dispatch_key(definition)
+                )
                 if run_tree is None:
                     return {
                         "success": False,

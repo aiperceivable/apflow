@@ -9,6 +9,7 @@ Tests cover:
 """
 
 import asyncio
+import time
 
 import pytest
 from datetime import datetime, timezone, timedelta
@@ -572,6 +573,90 @@ class TestWebhookGateway:
         result = await gateway.validate_request(client_ip="192.168.1.1")
         assert result["valid"] is False
         assert "IP not allowed" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_validate_request_rejects_missing_timestamp_when_secret_set(self):
+        """Regression: timestamp was optional even with a secret configured,
+        so a signed request carrying no timestamp was never freshness-checked
+        at all. (Review CRITICAL #67)
+        """
+        config = WebhookConfig(secret_key="test-secret")
+        gateway = WebhookGateway(config)
+
+        import hmac
+        import hashlib
+
+        payload = b'{"task_id": "123"}'
+        # Signature computed the "no timestamp" way (message == payload).
+        signature = hmac.new(b"test-secret", payload, hashlib.sha256).hexdigest()
+
+        result = await gateway.validate_request(
+            client_ip="1.2.3.4", payload=payload, signature=signature, timestamp=None
+        )
+        assert result["valid"] is False
+        assert "timestamp" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_validate_request_rejects_stale_timestamp(self):
+        """Regression: an old, previously-valid (payload, signature, timestamp)
+        triple could be replayed indefinitely — the timestamp was folded into
+        the HMAC input but never compared against the current time. (Review
+        CRITICAL #67)
+        """
+        import hmac
+        import hashlib
+
+        config = WebhookConfig(secret_key="test-secret")
+        gateway = WebhookGateway(config)
+
+        payload = b'{"task_id": "123"}'
+        stale_timestamp = str(int(time.time()) - 3600)  # 1 hour old
+        message = f"{stale_timestamp}.".encode() + payload
+        signature = hmac.new(b"test-secret", message, hashlib.sha256).hexdigest()
+
+        result = await gateway.validate_request(
+            client_ip="1.2.3.4",
+            payload=payload,
+            signature=signature,
+            timestamp=stale_timestamp,
+        )
+        assert result["valid"] is False
+        assert "expired" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_validate_request_accepts_fresh_signed_request(self):
+        import hmac
+        import hashlib
+
+        config = WebhookConfig(secret_key="test-secret")
+        gateway = WebhookGateway(config)
+
+        payload = b'{"task_id": "123"}'
+        fresh_timestamp = str(int(time.time()))
+        message = f"{fresh_timestamp}.".encode() + payload
+        signature = hmac.new(b"test-secret", message, hashlib.sha256).hexdigest()
+
+        result = await gateway.validate_request(
+            client_ip="1.2.3.4",
+            payload=payload,
+            signature=signature,
+            timestamp=fresh_timestamp,
+        )
+        assert result["valid"] is True
+
+    @pytest.mark.asyncio
+    async def test_validate_request_rejects_non_numeric_timestamp(self):
+        config = WebhookConfig(secret_key="test-secret")
+        gateway = WebhookGateway(config)
+
+        result = await gateway.validate_request(
+            client_ip="1.2.3.4",
+            payload=b"{}",
+            signature="deadbeef",
+            timestamp="not-a-timestamp",
+        )
+        assert result["valid"] is False
+        assert "timestamp" in result["error"].lower()
 
     def test_generate_webhook_url(self):
         """Test webhook URL generation"""

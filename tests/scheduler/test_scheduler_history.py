@@ -442,3 +442,38 @@ class TestDuplicateDispatchAccounting:
         assert after.run_count == 0
         # ...but next_run_at DID advance (progress guaranteed even on rejection).
         assert after.next_run_at != prev_next
+
+    @pytest.mark.asyncio
+    async def test_exception_during_run_creation_does_not_count_as_a_run(self, use_test_db_session):
+        """Regression: count_this_run defaulted to True and was only flipped
+        to False in the one known "duplicate occurrence" branch. If
+        instantiate_scheduled_run raised for any OTHER reason (e.g. a
+        transient DB failure) before a run instance was actually created,
+        run_count was still incremented in the finally block for a fire that
+        never produced a run. (Review CRITICAL #68)
+        """
+        from unittest.mock import patch
+
+        repo = TaskRepository(use_test_db_session, task_model_class=get_task_model_class())
+        definition = await repo.create_task(
+            name="charge",
+            user_id="u1",
+            status="pending",
+            inputs={"resource": "cpu"},
+            schemas={"method": "aggregate_results_executor"},
+            schedule_type="interval",
+            schedule_expression="3600",
+            schedule_enabled=True,
+            run_count=0,
+        )
+
+        with patch(
+            "apflow.core.execution.task_creator.TaskCreator.instantiate_scheduled_run",
+            side_effect=RuntimeError("simulated DB failure"),
+        ):
+            await InternalScheduler()._execute_task_via_db(definition.id)
+
+        after = await repo.get_task_by_id(definition.id)
+        assert after is not None
+        assert after.run_count == 0  # no run instance was ever created
+        assert len(await repo.list_scheduled_runs(definition.id)) == 0

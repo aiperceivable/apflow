@@ -411,7 +411,13 @@ class InternalScheduler(BaseScheduler):
         result = None
         error = None
         run_id: Optional[str] = None
-        count_this_run = True
+        # Defaults to False and flips True only once a run instance is
+        # actually created below — that way ANY early exit before that point
+        # (definition not found, duplicate occurrence, or an exception from
+        # the definition lookup/instantiation) leaves run_count un-incremented
+        # for a fire that never produced a run, rather than requiring every
+        # such path to remember to opt back out.
+        count_this_run = False
         task_name = self._task_names.pop(task_id, "")
 
         try:
@@ -447,9 +453,10 @@ class InternalScheduler(BaseScheduler):
                     # duplicate) but does NOT count the run — the winning node
                     # already counted it.
                     logger.info(f"Scheduled task {task_id} occurrence already dispatched; skipping")
-                    count_this_run = False
                     return
                 run_id = str(run_tree.task.id)
+                # A real run instance now exists — safe to count this fire.
+                count_this_run = True
 
             if self._dispatch_only:
                 # Distributed mode: leave the run instance pending for a worker to

@@ -325,7 +325,11 @@ class ICalExporter:
         if task.get("inputs"):
             parts.append(f"Inputs: {task['inputs']}")
 
-        return "\\n".join(parts)
+        # A real newline here, not a literal "\n" — escape_text() below turns
+        # actual newlines into the correctly-escaped "\n" sequence. Joining
+        # with a literal backslash-n instead double-escapes it into "\\n",
+        # which calendar apps render as literal text, not a line break.
+        return "\n".join(parts)
 
     def _generate_rrule(self, task: Dict[str, Any]) -> Optional[str]:
         """
