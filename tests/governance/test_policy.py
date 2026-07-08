@@ -78,6 +78,49 @@ class TestPolicyEngine:
         assert result.action == PolicyAction.DOWNGRADE
         assert result.model_override == "sonnet"
 
+    def test_evaluate_downgrade_returns_next_model_index(self):
+        """Regression: PolicyEvaluation didn't expose the chain position used
+        to compute model_override, so the sole production caller
+        (task_manager.py) never threaded current_model_index and multi-tier
+        chains behaved as 2-tier — always downgrading to index 1.
+        (Review CRITICAL #63)"""
+        engine = PolicyEngine()
+        engine.register_policy(
+            CostPolicy(
+                name="p1",
+                action=PolicyAction.DOWNGRADE,
+                threshold=0.8,
+                downgrade_chain=["opus", "sonnet", "haiku"],
+            )
+        )
+        result = engine.evaluate("p1", 0.85, current_model_index=0)
+        assert result.model_override == "sonnet"
+        assert result.next_model_index == 1
+
+    def test_evaluate_downgrade_advances_through_multi_tier_chain(self):
+        """Threading next_model_index back as current_model_index on each
+        subsequent call must advance through every tier, not get stuck
+        recomputing the same one."""
+        engine = PolicyEngine()
+        engine.register_policy(
+            CostPolicy(
+                name="p1",
+                action=PolicyAction.DOWNGRADE,
+                threshold=0.8,
+                downgrade_chain=["opus", "sonnet", "haiku"],
+            )
+        )
+        result1 = engine.evaluate("p1", 0.85, current_model_index=0)
+        assert result1.model_override == "sonnet"
+        assert result1.next_model_index is not None
+
+        result2 = engine.evaluate("p1", 0.9, current_model_index=result1.next_model_index)
+        assert result2.model_override == "haiku"
+        assert result2.next_model_index is not None
+
+        result3 = engine.evaluate("p1", 0.95, current_model_index=result2.next_model_index)
+        assert result3.action == PolicyAction.BLOCK  # chain exhausted
+
     def test_evaluate_downgrade_chain_exhausted(self):
         engine = PolicyEngine()
         engine.register_policy(

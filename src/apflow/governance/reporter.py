@@ -38,7 +38,7 @@ class UsageReporter:
         if not task_id:
             raise ValueError("task_id must be non-empty")
 
-        task = self._repo.get_task_by_id(task_id)
+        task = await self._repo.get_task_by_id(task_id)
         if task is None:
             raise KeyError(f"Task '{task_id}' not found")
 
@@ -67,28 +67,40 @@ class UsageReporter:
         if start_time and end_time and end_time < start_time:
             raise ValueError("end_time must be >= start_time")
 
-        tasks = self._repo.list_tasks(user_id=user_id)
-
         total_input = 0
         total_output = 0
         total_tokens = 0
         total_cost = 0.0
         count = 0
 
-        for task in tasks:
-            # Filter by time range if specified
-            if start_time and task.created_at and task.created_at < start_time:
-                continue
-            if end_time and task.created_at and task.created_at > end_time:
-                continue
+        # query_tasks() is paginated (default limit=100); page through every
+        # result instead of only the first page, or a user with more tasks
+        # than one page would silently get an incomplete usage report.
+        page_size = 100
+        offset = 0
+        while True:
+            tasks = await self._repo.query_tasks(user_id=user_id, limit=page_size, offset=offset)
+            if not tasks:
+                break
 
-            usage = task.token_usage or {}
-            total_input += usage.get("input", 0)
-            total_output += usage.get("output", 0)
-            total_tokens += usage.get("total", 0)
-            if task.actual_cost_usd:
-                total_cost += float(task.actual_cost_usd)
-            count += 1
+            for task in tasks:
+                # Filter by time range if specified
+                if start_time and task.created_at and task.created_at < start_time:
+                    continue
+                if end_time and task.created_at and task.created_at > end_time:
+                    continue
+
+                usage = task.token_usage or {}
+                total_input += usage.get("input", 0)
+                total_output += usage.get("output", 0)
+                total_tokens += usage.get("total", 0)
+                if task.actual_cost_usd:
+                    total_cost += float(task.actual_cost_usd)
+                count += 1
+
+            if len(tasks) < page_size:
+                break
+            offset += page_size
 
         return UsageSummary(
             scope="user",

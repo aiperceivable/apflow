@@ -115,3 +115,45 @@ class TestTaskRepositoryAdditional:
 
         deleted_task = await repo.get_task_by_id(task_id)
         assert deleted_task is None
+
+
+class TestIncrementTokenUsage:
+    """Regression: BudgetManager.update_usage's old read-accumulate-write was
+    not atomic — two concurrent calls for the same task_id could both read
+    the same starting value, and whichever wrote last would silently
+    discard the other's contribution. increment_token_usage recomputes from
+    the row's own current value inside a single UPDATE, so repeated calls
+    always accumulate correctly regardless of interleaving.
+    (Review CRITICAL #62)
+    """
+
+    @pytest.mark.asyncio
+    async def test_sequential_increments_accumulate_correctly(self, sync_db_session):
+        repo = TaskRepository(sync_db_session)
+        task = await repo.create_task(name="t", user_id="u", token_budget=10000)
+
+        # Two separate contributions for the same task, as would happen from
+        # two racing callers (e.g. a stale worker and its lease-reassigned
+        # replacement).
+        await repo.increment_token_usage(task.id, input_delta=50, output_delta=20, total_delta=70)
+        await repo.increment_token_usage(task.id, input_delta=30, output_delta=10, total_delta=40)
+
+        refreshed = await repo.get_task_by_id(task.id)
+        assert refreshed.token_usage == {"input": 80, "output": 30, "total": 110}
+
+    @pytest.mark.asyncio
+    async def test_starts_from_null_token_usage(self, sync_db_session):
+        repo = TaskRepository(sync_db_session)
+        task = await repo.create_task(name="t", user_id="u")
+        assert task.token_usage is None
+
+        await repo.increment_token_usage(task.id, input_delta=5, output_delta=5, total_delta=10)
+
+        refreshed = await repo.get_task_by_id(task.id)
+        assert refreshed.token_usage == {"input": 5, "output": 5, "total": 10}
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_nonexistent_task(self, sync_db_session):
+        repo = TaskRepository(sync_db_session)
+        result = await repo.increment_token_usage("nonexistent-id", 10, 10, 20)
+        assert result is None

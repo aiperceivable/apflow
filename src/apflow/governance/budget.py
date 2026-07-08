@@ -123,28 +123,28 @@ class BudgetManager:
             if key in token_usage and token_usage[key] < 0:
                 raise ValueError(f"token_usage['{key}'] must be >= 0, got {token_usage[key]}")
 
-        task = await self._repo.get_task_by_id(task_id)
+        # Atomic DB-level increment (single UPDATE, computed from the row's
+        # own current value inside the engine) instead of an application-side
+        # read-accumulate-write: two concurrent calls for the same task_id
+        # (e.g. a stale worker whose lease was reassigned racing the new
+        # owner) would otherwise both read the same starting value, and the
+        # loser's contribution would be silently overwritten.
+        task = await self._repo.increment_token_usage(
+            task_id,
+            input_delta=token_usage.get("input", 0),
+            output_delta=token_usage.get("output", 0),
+            total_delta=token_usage.get("total", 0),
+        )
         if task is None:
             raise KeyError(f"Task '{task_id}' not found")
-
-        # Accumulate usage
-        existing = task.token_usage or {}
-        accumulated = {
-            "input": existing.get("input", 0) + token_usage.get("input", 0),
-            "output": existing.get("output", 0) + token_usage.get("output", 0),
-            "total": existing.get("total", 0) + token_usage.get("total", 0),
-        }
-
-        # Persist through the repository's async update_task so it works on the
-        # live execution session (the repo is async; a raw sync commit would not).
-        await self._repo.update_task(task_id=task_id, token_usage=accumulated)
 
         if task.token_budget is None:
             return None
 
+        accumulated_total = (task.token_usage or {}).get("total", 0)
         return TokenBudget(
             scope=BudgetScope.TASK,
             scope_id=task_id,
             limit=task.token_budget,
-            used=accumulated["total"],
+            used=accumulated_total,
         )

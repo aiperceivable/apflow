@@ -11,6 +11,7 @@ def _async_repo(task: object) -> MagicMock:
     repo = MagicMock()
     repo.get_task_by_id = AsyncMock(return_value=task)
     repo.update_task = AsyncMock()
+    repo.increment_token_usage = AsyncMock(return_value=task)
     return repo
 
 
@@ -103,18 +104,20 @@ class TestBudgetManager:
 
     @pytest.mark.asyncio
     async def test_update_accumulates(self):
-        task = _mock_task(
-            token_budget=1000, token_usage={"input": 100, "output": 200, "total": 300}
+        """Regression: update_usage must delegate to the repository's atomic
+        DB-level increment (deltas in, not a pre-accumulated dict) instead of
+        an application-side read-accumulate-write. (Review CRITICAL #62)"""
+        updated_task = _mock_task(
+            token_budget=1000, token_usage={"input": 150, "output": 250, "total": 400}
         )
-        repo = _async_repo(task)
+        repo = _async_repo(updated_task)
         bm = BudgetManager(repo)
 
         result = await bm.update_usage("t1", {"input": 50, "output": 50, "total": 100})
         assert result is not None
         assert result.used == 400
-        # Persistence goes through the async update_task with the accumulated usage.
-        repo.update_task.assert_awaited_once_with(
-            task_id="t1", token_usage={"input": 150, "output": 250, "total": 400}
+        repo.increment_token_usage.assert_awaited_once_with(
+            "t1", input_delta=50, output_delta=50, total_delta=100
         )
 
     @pytest.mark.asyncio
@@ -129,3 +132,11 @@ class TestBudgetManager:
         bm = BudgetManager(repo)
         result = await bm.update_usage("t1", {"input": 100, "output": 100, "total": 200})
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_update_not_found_raises(self):
+        repo = _async_repo(None)
+        repo.increment_token_usage = AsyncMock(return_value=None)
+        bm = BudgetManager(repo)
+        with pytest.raises(KeyError):
+            await bm.update_usage("nonexistent", {"input": 10, "output": 10, "total": 20})

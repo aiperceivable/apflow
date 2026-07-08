@@ -1115,9 +1115,18 @@ class TaskManager:
                         if self._policy_engine and task.cost_policy:
                             from apflow.governance.policy import PolicyAction
 
+                            # Resume the downgrade chain from wherever the last
+                            # evaluation for this task left off (persisted in
+                            # params) — without this, current_model_index was
+                            # never threaded and a re-triggered downgrade always
+                            # recomputed the same first tier.
+                            current_model_index = (task.params or {}).get(
+                                "_downgrade_model_index", 0
+                            )
                             evaluation = self._policy_engine.evaluate(
                                 task.cost_policy,
                                 budget_check.utilization,
+                                current_model_index=current_model_index,
                             )
                             if evaluation.action == PolicyAction.BLOCK:
                                 await self.task_repository.update_task(
@@ -1137,6 +1146,17 @@ class TaskManager:
                             ):
                                 final_inputs = final_inputs or {}
                                 final_inputs["model"] = evaluation.model_override
+                                # Persist the new chain position so the next
+                                # evaluation for this task (e.g. a retry/re-
+                                # execution still over budget) advances to the
+                                # next tier instead of recomputing this one.
+                                new_params = dict(task.params or {})
+                                new_params["_downgrade_model_index"] = (
+                                    evaluation.next_model_index
+                                )
+                                await self.task_repository.update_task(
+                                    task_id=task_id, params=new_params
+                                )
                                 logger.info(
                                     f"Task {task_id}: downgrading model to {evaluation.model_override}"
                                 )

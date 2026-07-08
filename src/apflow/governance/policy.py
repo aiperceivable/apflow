@@ -55,6 +55,11 @@ class PolicyEvaluation:
     action: PolicyAction
     message: str = ""
     model_override: Optional[str] = None
+    # Chain position model_override was taken from (DOWNGRADE only). Callers
+    # must pass this back as current_model_index on the next evaluate() call
+    # for the same task so a re-triggered downgrade advances to the next
+    # tier instead of recomputing the same one forever.
+    next_model_index: Optional[int] = None
 
 
 class PolicyEngine:
@@ -125,6 +130,7 @@ class PolicyEngine:
                         f"(utilization {utilization:.1%} >= {policy.threshold:.1%})"
                     ),
                     model_override=next_model,
+                    next_model_index=next_index,
                 )
             else:
                 return PolicyEvaluation(

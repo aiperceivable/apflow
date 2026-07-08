@@ -10,9 +10,10 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, update
+from sqlalchemy import select, delete, update, text
 from typing import List, Dict, Any, Optional, Union, TYPE_CHECKING, Type, Set
 from apflow.core.storage.sqlalchemy.models import TaskModel, TaskOriginType, TaskModelType
+from apflow.core.distributed.config import is_postgresql
 from apflow.core.execution.errors import ValidationError
 from sqlalchemy_session_proxy import SqlalchemySessionProxy
 from apflow.logger import get_logger
@@ -466,6 +467,102 @@ class TaskRepository:
 
         except Exception as e:
             logger.error(f"Error claiming task {task_id}: {str(e)}")
+            await self.db.rollback()
+            raise
+
+    async def increment_token_usage(
+        self,
+        task_id: str,
+        input_delta: int,
+        output_delta: int,
+        total_delta: int,
+    ) -> Optional[TaskModelType]:
+        """
+        Atomically increment a task's token_usage JSON fields at the DB level.
+
+        Computes the new value from the row's own current value inside a
+        single UPDATE statement, instead of an application-side
+        read-accumulate-write. Two concurrent callers for the same task_id
+        (e.g. a stale worker whose lease was reassigned racing the new
+        owner) would otherwise both read the same starting value, and the
+        loser's contribution would be silently overwritten.
+
+        Args:
+            task_id: Task ID
+            input_delta: Amount to add to token_usage["input"]
+            output_delta: Amount to add to token_usage["output"]
+            total_delta: Amount to add to token_usage["total"]
+
+        Returns:
+            The refreshed task, or None if no task with that ID exists.
+        """
+        table_name = self.task_model_class.__tablename__
+        params = {
+            "task_id": task_id,
+            "input_delta": input_delta,
+            "output_delta": output_delta,
+            "total_delta": total_delta,
+        }
+        try:
+            if is_postgresql(self.db):
+                # token_usage is declared as plain JSON (not JSONB) on the
+                # model, and Postgres has no jsonb_set equivalent for json —
+                # cast to jsonb for the computation, then back to json for
+                # the assignment. A never-set JSON column is stored as the
+                # JSON literal 'null' (SQLAlchemy's JSON type default:
+                # none_as_null=False), not SQL NULL, so a plain COALESCE
+                # never fires; NULLIF converts that scalar 'null' to a real
+                # SQL NULL first so COALESCE can substitute '{}'.
+                stmt = text(
+                    f"""
+                    UPDATE {table_name}
+                    SET token_usage = (
+                        jsonb_set(
+                            jsonb_set(
+                                jsonb_set(
+                                    COALESCE(NULLIF(token_usage::jsonb, 'null'::jsonb), '{{}}'::jsonb),
+                                    '{{input}}',
+                                    to_jsonb(COALESCE((token_usage::jsonb->>'input')::bigint, 0) + :input_delta)
+                                ),
+                                '{{output}}',
+                                to_jsonb(COALESCE((token_usage::jsonb->>'output')::bigint, 0) + :output_delta)
+                            ),
+                            '{{total}}',
+                            to_jsonb(COALESCE((token_usage::jsonb->>'total')::bigint, 0) + :total_delta)
+                        )
+                    )::json
+                    WHERE id = :task_id
+                    """
+                )
+            else:
+                # A never-set JSON column is stored as the text 'null' (see
+                # the PostgreSQL branch comment above), which json_set()
+                # silently fails to update in place (SQLite returns the
+                # scalar unchanged rather than erroring) — NULLIF converts it
+                # to a real SQL NULL first so COALESCE substitutes '{}'.
+                stmt = text(
+                    f"""
+                    UPDATE {table_name}
+                    SET token_usage = json_set(
+                        COALESCE(NULLIF(token_usage, 'null'), '{{}}'),
+                        '$.input', COALESCE(json_extract(token_usage, '$.input'), 0) + :input_delta,
+                        '$.output', COALESCE(json_extract(token_usage, '$.output'), 0) + :output_delta,
+                        '$.total', COALESCE(json_extract(token_usage, '$.total'), 0) + :total_delta
+                    )
+                    WHERE id = :task_id
+                    """
+                )
+
+            result = await self.db.execute(stmt, params)
+            await self.db.commit()
+
+            if result.rowcount == 0:  # type: ignore[union-attr]
+                return None
+
+            return await self.get_task_by_id(task_id)
+
+        except Exception as e:
+            logger.error(f"Error incrementing token usage for task {task_id}: {str(e)}")
             await self.db.rollback()
             raise
 
