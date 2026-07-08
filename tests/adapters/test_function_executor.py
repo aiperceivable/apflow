@@ -144,6 +144,30 @@ class TestFunctionExecutorDecorator:
         cls = get_function_executor_classes()["test_custom_name"]
         assert cls.name == "My Custom Name"
 
+    def test_bridge_registry_matches_execution_registry_on_id_reuse(self):
+        """Regression: registering the same id twice without override= must
+        not let the bridge-discovery dict (_function_executor_classes)
+        diverge from the class the extension registry actually uses at
+        execution time — otherwise MCP/CLI advertises one implementation
+        while execution runs another. (Review CRITICAL #6)
+        """
+
+        @function_executor(id="test_diverge", description="v1")
+        async def my_func_v1(inputs: dict) -> dict:
+            return {"version": 1}
+
+        @function_executor(id="test_diverge", description="v2")
+        async def my_func_v2(inputs: dict) -> dict:
+            return {"version": 2}
+
+        from apflow.core.extensions.registry import get_registry
+
+        registry = get_registry()
+        execution_class = registry.get_executor_class("test_diverge")
+        bridge_class = get_function_executor_classes()["test_diverge"]
+
+        assert bridge_class is execution_class
+
 
 class TestResolveSchema:
     def test_returns_none_when_both_none(self):

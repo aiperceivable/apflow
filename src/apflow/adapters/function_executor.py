@@ -80,11 +80,15 @@ def function_executor(
             tags=tags or [],
         )
 
-        # Register in extension registry
-        executor_register(override=override)(cls)
+        # Register in extension registry. When override=False and `id` is
+        # already registered, this returns the previously registered class,
+        # not `cls` — the bridge-discovery entry must track whichever class
+        # the extension registry actually uses at execution time, or MCP/CLI
+        # would advertise one implementation while execution runs another.
+        registered_cls = executor_register(override=override)(cls)
 
         # Store for bridge discovery
-        _function_executor_classes[id] = cls
+        _function_executor_classes[id] = registered_cls
 
         logger.info(f"Registered function executor: {id}")
         return fn
