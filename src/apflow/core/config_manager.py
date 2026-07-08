@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Union
 
 from apflow.core.config.registry import ConfigRegistry, get_config
 from apflow.core.types import TaskPostHook, TaskPreHook
@@ -260,10 +260,10 @@ class ConfigManager:
     def get_post_hooks(self) -> List[TaskPostHook]:
         return self._registry.get_post_hooks()
 
-    def set_use_task_creator(self, enabled: bool) -> None:
-        self._registry.set_use_task_creator(enabled)
+    def set_use_task_creator(self, use_task_creator: Union[bool, type, None]) -> None:
+        self._registry.set_use_task_creator(use_task_creator)
 
-    def get_use_task_creator(self) -> bool:
+    def get_use_task_creator(self) -> type:
         return self._registry.get_use_task_creator()
 
     def set_require_existing_tasks(self, required: bool) -> None:

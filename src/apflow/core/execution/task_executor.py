@@ -754,11 +754,13 @@ class TaskExecutor:
         - Global configuration `get_require_existing_tasks()` (used if parameter is None)
         - Default: False (auto-create for convenience)
 
-        The use of TaskCreator is controlled by global configuration (get_use_task_creator()).
-        By default, TaskCreator is used for rigorous validation. This can be configured via:
+        The task-creation class is controlled by global configuration
+        (get_use_task_creator()), which defaults to the built-in TaskCreator.
+        A custom TaskCreator-compatible class can be injected via:
             from apflow.core.config import set_use_task_creator
-            set_use_task_creator(True)  # Use TaskCreator (default, recommended)
-            set_use_task_creator(False) # Use quick create mode (not recommended)
+            set_use_task_creator(MyCustomTaskCreator)
+        set_use_task_creator(False) raises ValueError: no "quick create mode"
+        bypass of TaskCreator has ever been implemented.
 
         Args:
             tasks: List of task dictionaries or task IDs (if require_existing_tasks=True)

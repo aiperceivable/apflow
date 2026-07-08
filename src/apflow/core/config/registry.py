@@ -9,7 +9,7 @@ passing parameters through multiple layers.
 import importlib
 import os
 from threading import local
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 
 from apflow.core.types import TaskPreHook, TaskPostHook, WebhookVerifyHook
 from apflow.logger import get_logger
@@ -41,7 +41,7 @@ class ConfigRegistry:
         self._task_model_class: Optional["TaskModelType"] = None
         self._pre_hooks: List[TaskPreHook] = []
         self._post_hooks: List[TaskPostHook] = []
-        self._use_task_creator: Optional[type] = None  # Default to True for rigorous task creation
+        self._use_task_creator: Union[bool, type, None] = None  # None/True -> default TaskCreator
         self._require_existing_tasks: bool = False  # Default to False for convenience (auto-create)
         # Execution components (F-003 durability, F-004 governance). Process-singleton,
         # session-free components (PolicyEngine, CircuitBreakerRegistry) are stored here so
@@ -182,26 +182,42 @@ class ConfigRegistry:
         """
         return self._post_hooks.copy()
 
-    def set_use_task_creator(self, use_task_creator: Optional[type]) -> None:
+    def set_use_task_creator(self, use_task_creator: Union[bool, type, None]) -> None:
         """
-        Set whether to use TaskCreator for rigorous task creation
+        Set which task-creation class to use for rigorous task creation
 
         Args:
-            use_task_creator: If use_task_creator, use TaskCreator.create_task_tree_from_array for rigorous validation.
-                             If not, use quick create mode (not recommended, may have issues).
-                             Default is TaskCreator for rigorous creation.
+            use_task_creator: True or None (default) uses the built-in TaskCreator.
+                             A class is used directly as a drop-in TaskCreator
+                             replacement (must accept a db session and expose
+                             create_task_tree_from_array()). False is rejected:
+                             no "quick create mode" bypass has ever been
+                             implemented, so storing it would only defer a
+                             confusing "'bool' object is not callable" crash to
+                             the next task execution.
+
+        Raises:
+            ValueError: If use_task_creator is False.
         """
+        if use_task_creator is False:
+            raise ValueError(
+                "set_use_task_creator(False) is not supported: no 'quick create "
+                "mode' bypass of TaskCreator has ever been implemented. Pass "
+                "True (or leave unset) for the default TaskCreator, or pass a "
+                "custom TaskCreator-compatible class."
+            )
         self._use_task_creator = use_task_creator
         logger.debug(f"Set use_task_creator: {use_task_creator}")
 
     def get_use_task_creator(self) -> type:
         """
-        Get whether to use TaskCreator for task creation
+        Get the TaskCreator class to use for task creation
 
         Returns:
-            True if TaskCreator should be used (default), False otherwise
+            The configured TaskCreator-compatible class, or the built-in
+            TaskCreator if unset or set to True.
         """
-        if self._use_task_creator is not None:
+        if isinstance(self._use_task_creator, type):
             return self._use_task_creator
         # Use importlib to avoid circular import with task_creator module
         module = importlib.import_module("apflow.core.execution.task_creator")
@@ -382,6 +398,8 @@ class ConfigRegistry:
         self._circuit_breaker_registry = None
         self._governance_enabled = False
         self._durability_enabled = False
+        # Reset demo sleep scale to its env-configured default
+        self._demo_sleep_scale = float(os.getenv("APFLOW_DEMO_SLEEP_SCALE", "1.0"))
         # Clear task tree hooks
         for hook_list in self._task_tree_hooks.values():
             hook_list.clear()
@@ -532,24 +550,29 @@ def clear_config() -> None:
     _get_registry().clear()
 
 
-def set_use_task_creator(use_task_creator: bool) -> None:
+def set_use_task_creator(use_task_creator: Union[bool, type, None]) -> None:
     """
-    Set whether to use TaskCreator for rigorous task creation
+    Set which task-creation class to use for rigorous task creation
 
     Args:
-        use_task_creator: If True, use TaskCreator.create_task_tree_from_array for rigorous validation.
-                         If False, use quick create mode (not recommended, may have issues).
-                         Default is True.
+        use_task_creator: True or None (default) uses the built-in TaskCreator.
+                         A class is used directly as a drop-in TaskCreator
+                         replacement. False is rejected: no "quick create
+                         mode" bypass has ever been implemented.
+
+    Raises:
+        ValueError: If use_task_creator is False.
     """
     _get_registry().set_use_task_creator(use_task_creator)
 
 
 def get_use_task_creator() -> type:
     """
-    Get whether to use TaskCreator for task creation
+    Get the TaskCreator class to use for task creation
 
     Returns:
-        True if TaskCreator should be used (default), False otherwise
+        The configured TaskCreator-compatible class, or the built-in
+        TaskCreator if unset or set to True.
     """
     return _get_registry().get_use_task_creator()
 
