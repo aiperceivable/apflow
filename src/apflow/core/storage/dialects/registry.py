@@ -41,15 +41,31 @@ def get_dialect_config(name: str):
     return _DIALECT_REGISTRY[name]
 
 
+def _postgres_drivers_available() -> bool:
+    """Check whether the drivers installed by the [postgres] extra are importable.
+
+    postgres.py itself has no driver imports (it only builds connection
+    strings/kwargs), so importing it always succeeds regardless of whether
+    psycopg2/asyncpg are installed — that import alone can never raise
+    ImportError. The actual driver dependency is only pulled in later, deep
+    inside SQLAlchemy's create_engine()/create_async_engine(), so probe for
+    it explicitly here instead.
+    """
+    try:
+        import asyncpg  # noqa: F401
+        import psycopg2  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
 # Register built-in dialects
 register_dialect("sqlite", SQLiteDialect)
 
-# Lazy register PostgreSQL (if available)
-try:
+# Lazy register PostgreSQL only when its drivers are actually installed
+if _postgres_drivers_available():
     from apflow.core.storage.dialects.postgres import PostgreSQLDialect
 
     register_dialect("postgresql", PostgreSQLDialect)
     register_dialect("postgres", PostgreSQLDialect)  # Alias
-except ImportError:
-    # PostgreSQL not installed, skip registration
-    pass
