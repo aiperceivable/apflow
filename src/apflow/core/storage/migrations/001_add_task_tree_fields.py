@@ -158,7 +158,7 @@ class AddTaskTreeFields(Migration):
 
     def _update_task_trees(self, engine: Engine) -> None:
         batch_size = 100
-        offset = 0
+        total_processed = 0
 
         try:
             # Create a session from the engine
@@ -169,13 +169,16 @@ class AddTaskTreeFields(Migration):
 
             while True:
                 try:
-                    # Get batch of root tasks using ORM
+                    # Get next batch of root tasks using ORM. No OFFSET: each
+                    # committed batch clears its rows from this filter (their
+                    # task_tree_id is now set), so the next iteration naturally
+                    # starts at the next unprocessed rows. An OFFSET here would
+                    # skip rows as the matching set shrinks between iterations.
                     root_tasks = (
                         session.query(TaskModel)
                         .filter(TaskModel.task_tree_id.is_(None), TaskModel.parent_id.is_(None))
                         .order_by(TaskModel.created_at.asc())
                         .limit(batch_size)
-                        .offset(offset)
                         .all()
                     )
 
@@ -189,16 +192,17 @@ class AddTaskTreeFields(Migration):
                     # Commit batch
                     session.commit()
 
+                    total_processed += len(root_tasks)
                     logger.info(
                         f"✓ {self.id}: Auto-assigned task_tree_id for {len(root_tasks)} root task(s) "
-                        f"(offset: {offset})"
+                        f"(total: {total_processed})"
                     )
-                    offset += batch_size
 
                 except Exception as batch_err:
                     session.rollback()
                     logger.warning(
-                        f"⚠ {self.id}: Error in batch {offset // batch_size}: {str(batch_err)}"
+                        f"⚠ {self.id}: Error in batch (processed so far: {total_processed}): "
+                        f"{str(batch_err)}"
                     )
                     raise
 
@@ -234,12 +238,15 @@ class AddTaskTreeFields(Migration):
             self._assign_task_tree_id_recursive(session, child.id, tree_id)
 
     def _add_has_references_with_copy(self, engine: Engine, table_name: str) -> None:
-        """Fallback for databases that block column rename when dependencies exist."""
+        """Fallback for databases that block column rename when dependencies exist.
+
+        The caller only invokes this when it has already confirmed has_references
+        does not exist yet, so a plain ADD COLUMN is sufficient — 'IF NOT EXISTS'
+        is not valid syntax for ADD COLUMN on SQLite and crashes the migration.
+        """
         with engine.begin() as conn:
             conn.execute(
-                text(
-                    f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS has_references BOOLEAN DEFAULT FALSE"
-                )
+                text(f"ALTER TABLE {table_name} ADD COLUMN has_references BOOLEAN DEFAULT FALSE")
             )
         with engine.begin() as conn:
             conn.execute(
@@ -252,7 +259,7 @@ class AddTaskTreeFields(Migration):
         )
 
     def downgrade(self, engine: Engine) -> None:
-        """Rollback migration (drop columns)"""
+        """Rollback migration (drop new columns; restore has_copy if it was renamed away)"""
         table_name = TASK_TABLE_NAME
         inspector = sa_inspect(engine)
 
@@ -261,6 +268,28 @@ class AddTaskTreeFields(Migration):
             return
 
         existing_columns = {col["name"] for col in inspector.get_columns(table_name)}
+
+        # Restore has_copy before dropping has_references, so its data is not
+        # lost. If has_copy already exists, upgrade() took the fallback
+        # add-alongside path (has_copy already holds the original data) —
+        # just drop the added has_references column below.
+        if "has_references" in existing_columns and "has_copy" not in existing_columns:
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(f"ALTER TABLE {table_name} RENAME COLUMN has_references TO has_copy")
+                    )
+                logger.info(
+                    f"✓ Downgrade {self.id}: Renamed column 'has_references' back to 'has_copy'"
+                )
+                existing_columns.discard("has_references")
+                existing_columns.add("has_copy")
+            except Exception as e:
+                logger.error(
+                    f"✗ Downgrade {self.id}: Could not rename 'has_references' back to "
+                    f"'has_copy': {str(e)}"
+                )
+                raise
 
         columns_to_drop = ["task_tree_id", "origin_type", "has_references"]
 
@@ -275,7 +304,4 @@ class AddTaskTreeFields(Migration):
                         f"⚠ Downgrade {self.id}: Could not drop column '{col_name}': {str(e)}"
                     )
 
-        # Rename has_references back to has_copy if needed
-        if "has_references" not in existing_columns and "has_copy" not in existing_columns:
-            # This is a fallback - in reality, the column was dropped above
-            logger.info(f"Downgrade {self.id}: Completed")
+        logger.info(f"Downgrade {self.id}: Completed")

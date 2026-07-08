@@ -27,31 +27,34 @@ class MigrationHistoryTable:
 
     @staticmethod
     def ensure_exists(engine: Engine) -> None:
-        """Create migration history table if not exists"""
-        inspector = inspect(engine)
+        """Create migration history table if not exists.
 
-        if MigrationHistoryTable.TABLE_NAME not in inspector.get_table_names():
-            try:
-                with engine.begin() as conn:
-                    conn.execute(
-                        text(
-                            f"""
-                            CREATE TABLE {MigrationHistoryTable.TABLE_NAME} (
-                                id VARCHAR(100) PRIMARY KEY,
-                                description TEXT NOT NULL,
-                                apflow_version VARCHAR(50) NOT NULL,
-                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                            )
-                            """
+        Uses CREATE TABLE IF NOT EXISTS instead of a check-then-create so this
+        is safe under concurrent multi-node startup: a separate existence check
+        followed by a bare CREATE TABLE leaves a race window where another node
+        can create the table first, causing this node's CREATE TABLE to crash.
+        """
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS {MigrationHistoryTable.TABLE_NAME} (
+                            id VARCHAR(100) PRIMARY KEY,
+                            description TEXT NOT NULL,
+                            apflow_version VARCHAR(50) NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
+                        """
                     )
-                logger.info(
-                    f"✓ Created migration history table: {MigrationHistoryTable.TABLE_NAME}"
                 )
-            except Exception as e:
-                logger.error(f"✗ Failed to create migration history table: {str(e)}")
-                raise
+            logger.info(
+                f"✓ Ensured migration history table exists: {MigrationHistoryTable.TABLE_NAME}"
+            )
+        except Exception as e:
+            logger.error(f"✗ Failed to create migration history table: {str(e)}")
+            raise
 
     @staticmethod
     def get_applied(engine: Engine) -> Set[str]:
@@ -71,27 +74,30 @@ class MigrationHistoryTable:
 
     @staticmethod
     def record(engine: Engine, migration: Migration) -> None:
-        """Record migration as applied with apflow version"""
+        """Record migration as applied with apflow version.
+
+        Does not swallow write failures: run_pending() calls this right after
+        migration.upgrade() succeeds, so a swallowed failure here would leave
+        the migration silently unrecorded and re-attempted on every subsequent
+        startup with no visible error.
+        """
         from importlib.metadata import version
 
         __version__ = version("apflow")
 
-        try:
-            with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        f"INSERT INTO {MigrationHistoryTable.TABLE_NAME} (id, description, apflow_version) "
-                        f"VALUES (:id, :desc, :version)"
-                    ),
-                    {
-                        "id": migration.id,
-                        "desc": migration.description,
-                        "version": __version__,
-                    },
-                )
-            logger.info(f"✓ Recorded migration '{migration.id}' (apflow v{__version__}) in history")
-        except Exception as e:
-            logger.warning(f"⚠ Could not record migration in history: {str(e)}")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"INSERT INTO {MigrationHistoryTable.TABLE_NAME} (id, description, apflow_version) "
+                    f"VALUES (:id, :desc, :version)"
+                ),
+                {
+                    "id": migration.id,
+                    "desc": migration.description,
+                    "version": __version__,
+                },
+            )
+        logger.info(f"✓ Recorded migration '{migration.id}' (apflow v{__version__}) in history")
 
 
 class MigrationManager:
@@ -108,7 +114,7 @@ class MigrationManager:
         Sorts migrations by ID to ensure consistent execution order.
         """
         migrations_dir = Path(__file__).parent / "migrations"
-        discovered: List[Type[Migration]] = []
+        discovered: List[tuple[Type[Migration], str]] = []
 
         # Scan all Python files in migrations directory
         for module_path in sorted(migrations_dir.glob("*.py")):
@@ -128,16 +134,22 @@ class MigrationManager:
                         and obj is not Migration
                         and not name.startswith("_")
                     ):
-                        discovered.append(obj)
+                        discovered.append((obj, module_path.stem))
                         logger.debug(f"Discovered migration class: {obj.__name__}")
             except Exception as e:
                 logger.warning(f"⚠ Could not load migration module {module_name}: {str(e)}")
 
-        # Instantiate migrations and sort by ID
-        self._migrations = sorted(
-            [cls() for cls in discovered],
-            key=lambda m: m.id,
-        )
+        # Instantiate migrations, stamp each with its filename-derived id (the
+        # documented contract — see each migration file's own docstring), and
+        # sort by that id so execution order matches filename order (001, 002,
+        # ...) rather than alphabetical class-name order.
+        instances: List[Migration] = []
+        for cls, filename_stem in discovered:
+            instance = cls()
+            instance.set_filename_id(filename_stem)
+            instances.append(instance)
+
+        self._migrations = sorted(instances, key=lambda m: m.id)
 
         logger.debug(
             f"Discovered {len(self._migrations)} migrations: {[m.id for m in self._migrations]}"

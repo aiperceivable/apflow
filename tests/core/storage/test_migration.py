@@ -9,10 +9,13 @@ Tests:
 - Schema evolution for existing databases
 """
 
+import importlib
+
 import pytest
 from sqlalchemy import text
 
 from apflow.core.storage.migrate import MigrationManager, MigrationHistoryTable
+from apflow.core.storage.migrations import Migration
 from apflow.core.storage.sqlalchemy.models import TaskModel
 from apflow.logger import get_logger
 
@@ -48,14 +51,26 @@ class TestMigrationDiscovery:
         # IDs should be in sorted order
         assert migration_ids == sorted(migration_ids), f"Migrations not sorted: {migration_ids}"
 
+        # Regression: id must be the filename-derived stem (e.g.
+        # "001_add_task_tree_fields"), not the class name — otherwise migrations
+        # sort alphabetically by class name (003, 004, 005, 002, 001) instead of
+        # the documented 001-005 execution order.
+        assert migration_ids == [
+            "001_add_task_tree_fields",
+            "002_add_scheduling_fields",
+            "003_add_distributed_support",
+            "004_add_durability_and_governance",
+            "005_add_idempotency_key_unique_index",
+        ], f"Migrations executing out of documented order: {migration_ids}"
+
     def test_add_task_tree_fields_migration_exists(self, migration_manager):
         """Test that the AddTaskTreeFields migration is discovered"""
         migrations = migration_manager.get_all_migrations()
         migration_ids = [m.id for m in migrations]
 
-        # Should find migration with class name AddTaskTreeFields
-        assert any(
-            "AddTaskTreeFields" in mid for mid in migration_ids
+        # id is the filename stem, per each migration file's own documented contract.
+        assert (
+            "001_add_task_tree_fields" in migration_ids
         ), f"AddTaskTreeFields migration not found in {migration_ids}"
 
 
@@ -338,3 +353,254 @@ class TestMigrationVersionTracking:
         for mig_id, created_at, updated_at in migrations:
             assert created_at, f"Migration {mig_id} has no created_at"
             assert updated_at, f"Migration {mig_id} has no updated_at"
+
+
+class TestAddTaskTreeFieldsDowngrade:
+    """Regression: downgrade() must not permanently destroy the has_copy/
+    has_references data by dropping has_references without restoring has_copy."""
+
+    def test_downgrade_restores_has_copy_without_data_loss(self, sync_db_session):
+        engine = sync_db_session.get_bind()
+        mod = importlib.import_module(
+            "apflow.core.storage.migrations.001_add_task_tree_fields"
+        )
+        migration = mod.AddTaskTreeFields()
+
+        # Simulate a legacy (pre-001) database: apflow_tasks has has_copy instead
+        # of has_references, with real data in it. Raw SQL throughout this test
+        # (not the TaskModel ORM) since the ORM's column set no longer matches
+        # this hand-rolled legacy schema.
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE apflow_tasks DROP COLUMN has_references"))
+            conn.execute(text("ALTER TABLE apflow_tasks ADD COLUMN has_copy BOOLEAN DEFAULT FALSE"))
+            conn.execute(
+                text("INSERT INTO apflow_tasks (id, name, has_copy) VALUES ('t1', 'T1', TRUE)")
+            )
+
+        migration.upgrade(engine)
+        migration.downgrade(engine)
+
+        with engine.begin() as conn:
+            result = conn.execute(text("SELECT has_copy FROM apflow_tasks WHERE id = 't1'"))
+            row = result.fetchone()
+
+        assert row is not None, "Row lost after upgrade+downgrade"
+        assert bool(row[0]) is True, "has_copy data was destroyed by downgrade instead of restored"
+
+
+class TestUpdateTaskTreesBackfill:
+    """Regression: OFFSET pagination on a self-shrinking filter must not skip rows."""
+
+    def test_backfill_assigns_task_tree_id_to_all_root_tasks(self, sync_db_session):
+        """With batch_size=100, 150 root tasks reproduces the skip: batch 1
+        consumes rows [0:100] and commits (removing them from the filter), so an
+        OFFSET=100 second query against the now-50-row remaining set returns
+        nothing and the loop exits early, silently skipping the last 50 tasks."""
+        engine = sync_db_session.get_bind()
+        mod = importlib.import_module(
+            "apflow.core.storage.migrations.001_add_task_tree_fields"
+        )
+        migration = mod.AddTaskTreeFields()
+
+        tasks = [TaskModel(id=f"root_{i}", name=f"Root {i}", user_id="u") for i in range(150)]
+        sync_db_session.add_all(tasks)
+        sync_db_session.commit()
+
+        migration._update_task_trees(engine)
+
+        sync_db_session.expire_all()
+        missing = (
+            sync_db_session.query(TaskModel)
+            .filter(TaskModel.task_tree_id.is_(None))
+            .count()
+        )
+        assert missing == 0, f"{missing} root task(s) left without task_tree_id after backfill"
+
+
+class TestAddHasReferencesWithCopyFallback:
+    """Regression: the SQLite-incompatible 'ADD COLUMN IF NOT EXISTS' fallback
+    syntax crashed on SQLite; the caller already guarantees has_references does
+    not exist yet, so a bare ADD COLUMN is both correct and portable."""
+
+    def test_fallback_uses_valid_syntax_and_copies_data(self, sync_db_session):
+        engine = sync_db_session.get_bind()
+        mod = importlib.import_module(
+            "apflow.core.storage.migrations.001_add_task_tree_fields"
+        )
+        migration = mod.AddTaskTreeFields()
+
+        with engine.begin() as conn:
+            # Simulate the caller's precondition: has_references does not exist yet.
+            conn.execute(text("ALTER TABLE apflow_tasks DROP COLUMN has_references"))
+            conn.execute(text("ALTER TABLE apflow_tasks ADD COLUMN has_copy BOOLEAN DEFAULT FALSE"))
+            conn.execute(
+                text("INSERT INTO apflow_tasks (id, name, has_copy) VALUES ('t1', 'T1', TRUE)")
+            )
+
+        migration._add_has_references_with_copy(engine, "apflow_tasks")
+
+        with engine.begin() as conn:
+            result = conn.execute(text("SELECT has_references FROM apflow_tasks WHERE id = 't1'"))
+            row = result.fetchone()
+        assert row is not None
+        assert bool(row[0]) is True
+
+
+class TestDurabilityGovernanceColumnInspectionErrors:
+    """Regression: a genuine inspection failure (not 'table missing') must
+    propagate, not be swallowed as if the migration had nothing to do — a
+    swallowed failure here gets recorded as applied despite adding no columns."""
+
+    def test_add_durability_columns_propagates_unexpected_errors(
+        self, sync_db_session, monkeypatch
+    ):
+        mod = importlib.import_module(
+            "apflow.core.storage.migrations.004_add_durability_and_governance"
+        )
+        migration = mod.AddDurabilityAndGovernance()
+        engine = sync_db_session.get_bind()
+
+        def boom(_engine):
+            raise RuntimeError("simulated inspection failure")
+
+        monkeypatch.setattr(mod, "sa_inspect", boom)
+
+        with pytest.raises(RuntimeError, match="simulated inspection failure"):
+            migration._add_durability_columns(engine)
+
+    def test_add_governance_columns_propagates_unexpected_errors(
+        self, sync_db_session, monkeypatch
+    ):
+        mod = importlib.import_module(
+            "apflow.core.storage.migrations.004_add_durability_and_governance"
+        )
+        migration = mod.AddDurabilityAndGovernance()
+        engine = sync_db_session.get_bind()
+
+        def boom(_engine):
+            raise RuntimeError("simulated inspection failure")
+
+        monkeypatch.setattr(mod, "sa_inspect", boom)
+
+        with pytest.raises(RuntimeError, match="simulated inspection failure"):
+            migration._add_governance_columns(engine)
+
+
+class TestCheckpointAtColumnType:
+    """Regression: checkpoint_at must be added with timezone awareness to match
+    models.py's DateTime(timezone=True) — otherwise migrated DBs diverge from
+    fresh installs on PostgreSQL (naive vs aware datetimes)."""
+
+    def test_checkpoint_at_declared_with_timezone(self, sync_db_session, migration_manager):
+        engine = sync_db_session.get_bind()
+        migration_manager.run_pending(engine)
+
+        with engine.begin() as conn:
+            try:
+                result = conn.execute(
+                    text(
+                        "SELECT data_type FROM information_schema.columns "
+                        "WHERE table_name = 'apflow_tasks' AND column_name = 'checkpoint_at'"
+                    )
+                )
+                data_type = result.scalar()
+            except Exception:
+                result = conn.execute(text("PRAGMA table_info(apflow_tasks)"))
+                columns = {row[1]: row[2] for row in result}
+                data_type = columns.get("checkpoint_at")
+
+        assert data_type and "time zone" in data_type.lower(), (
+            f"checkpoint_at declared as '{data_type}', "
+            "diverging from models.py's DateTime(timezone=True)"
+        )
+
+
+class TestIdempotencyKeyIndexDedup:
+    """Regression: a pre-existing leader-handoff race could leave duplicate
+    idempotency_key values in a legacy (pre-005) database. Building the unique
+    index against that data must not hard-fail app boot."""
+
+    def test_upgrade_dedups_pre_existing_duplicate_keys(self, sync_db_session):
+        engine = sync_db_session.get_bind()
+        mod = importlib.import_module(
+            "apflow.core.storage.migrations.005_add_idempotency_key_unique_index"
+        )
+        migration = mod.AddIdempotencyKeyUniqueIndex()
+
+        # Simulate a legacy (pre-005) database: drop the unique index the
+        # current ORM model already creates via __table_args__, so duplicate
+        # keys can exist as they would have before this migration existed.
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP INDEX IF EXISTS {migration._index_name()}"))
+
+        t1 = TaskModel(id="run_1", name="Run 1", user_id="u", idempotency_key="dup-key")
+        t2 = TaskModel(id="run_2", name="Run 2", user_id="u", idempotency_key="dup-key")
+        sync_db_session.add_all([t1, t2])
+        sync_db_session.commit()
+
+        # Must not raise despite the pre-existing duplicate.
+        migration.upgrade(engine)
+
+        sync_db_session.expire_all()
+        keys = [
+            t.idempotency_key
+            for t in sync_db_session.query(TaskModel)
+            .filter(TaskModel.id.in_(["run_1", "run_2"]))
+            .all()
+        ]
+        assert keys.count("dup-key") == 1, (
+            f"Expected exactly one row to retain the duplicate key, got {keys}"
+        )
+
+
+class TestMigrationHistoryTableRace:
+    """Regression: ensure_exists must survive a concurrent multi-node-startup
+    race where another node creates the history table between this node's
+    existence check and its CREATE TABLE."""
+
+    def test_ensure_exists_survives_stale_missing_read(self, sync_db_session, monkeypatch):
+        engine = sync_db_session.get_bind()
+        MigrationHistoryTable.ensure_exists(engine)  # table now really exists
+
+        from apflow.core.storage import migrate as migrate_module
+
+        real_inspect = migrate_module.inspect
+
+        class _StaleInspector:
+            """Reports the table as missing even though it already exists,
+            reproducing the exact TOCTOU window between check and create."""
+
+            def get_table_names(self):
+                return []
+
+        monkeypatch.setattr(migrate_module, "inspect", lambda eng: _StaleInspector())
+
+        # Must not raise even though the table already exists underneath.
+        MigrationHistoryTable.ensure_exists(engine)
+
+        monkeypatch.setattr(migrate_module, "inspect", real_inspect)
+
+    def test_record_propagates_insert_failures(self, sync_db_session):
+        """A failed INSERT (e.g. duplicate id) must propagate so the caller
+        sees the migration as failed, instead of silently re-attempting the
+        migration forever with no visible error."""
+        engine = sync_db_session.get_bind()
+        MigrationHistoryTable.ensure_exists(engine)
+
+        class FakeMigration(Migration):
+            description = "fake"
+
+            @property
+            def id(self) -> str:
+                return "999_fake"
+
+            def upgrade(self, engine):
+                pass
+
+            def downgrade(self, engine):
+                pass
+
+        MigrationHistoryTable.record(engine, FakeMigration())
+
+        with pytest.raises(Exception):
+            MigrationHistoryTable.record(engine, FakeMigration())

@@ -17,7 +17,9 @@ from apflow.logger import get_logger
 logger = get_logger(__name__)
 
 DURABILITY_COLUMNS = {
-    "checkpoint_at": "TIMESTAMP",
+    # models.py declares DateTime(timezone=True); a plain TIMESTAMP here would
+    # make migrated databases diverge from fresh installs on PostgreSQL.
+    "checkpoint_at": "TIMESTAMP WITH TIME ZONE",
     "resume_from": "VARCHAR(255)",
     "attempt_count": "INTEGER DEFAULT 0",
     "max_attempts": "INTEGER DEFAULT 3",
@@ -50,23 +52,21 @@ class AddDurabilityAndGovernance(Migration):
         self._create_checkpoints_table(engine)
 
     def _add_durability_columns(self, engine: Engine) -> None:
-        """Add durability columns to the tasks table."""
+        """Add durability columns to the tasks table.
+
+        Table-existence/column-inspection failures are not swallowed: a real
+        inspection error (not "table missing") must propagate, otherwise it
+        gets recorded as a successfully-applied migration despite adding no
+        columns.
+        """
         table_name = TASK_TABLE_NAME
 
-        try:
-            inspector = sa_inspect(engine)
-            if table_name not in inspector.get_table_names():
-                logger.debug(f"Table '{table_name}' does not exist, skipping")
-                return
-        except Exception as e:
-            logger.debug(f"Could not check table existence: {e}, skipping")
+        inspector = sa_inspect(engine)
+        if table_name not in inspector.get_table_names():
+            logger.debug(f"Table '{table_name}' does not exist, skipping")
             return
 
-        try:
-            existing_columns = {col["name"] for col in inspector.get_columns(table_name)}
-        except Exception as e:
-            logger.warning(f"Could not get columns for '{table_name}': {e}")
-            return
+        existing_columns = {col["name"] for col in inspector.get_columns(table_name)}
 
         for col_name, col_type in DURABILITY_COLUMNS.items():
             if col_name not in existing_columns:
@@ -81,23 +81,21 @@ class AddDurabilityAndGovernance(Migration):
                     raise
 
     def _add_governance_columns(self, engine: Engine) -> None:
-        """Add governance columns to the tasks table."""
+        """Add governance columns to the tasks table.
+
+        Table-existence/column-inspection failures are not swallowed: a real
+        inspection error (not "table missing") must propagate, otherwise it
+        gets recorded as a successfully-applied migration despite adding no
+        columns.
+        """
         table_name = TASK_TABLE_NAME
 
-        try:
-            inspector = sa_inspect(engine)
-            if table_name not in inspector.get_table_names():
-                logger.debug(f"Table '{table_name}' does not exist, skipping")
-                return
-        except Exception as e:
-            logger.debug(f"Could not check table existence: {e}, skipping")
+        inspector = sa_inspect(engine)
+        if table_name not in inspector.get_table_names():
+            logger.debug(f"Table '{table_name}' does not exist, skipping")
             return
 
-        try:
-            existing_columns = {col["name"] for col in inspector.get_columns(table_name)}
-        except Exception as e:
-            logger.warning(f"Could not get columns for '{table_name}': {e}")
-            return
+        existing_columns = {col["name"] for col in inspector.get_columns(table_name)}
 
         for col_name, col_type in GOVERNANCE_COLUMNS.items():
             if col_name not in existing_columns:

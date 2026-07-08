@@ -17,6 +17,7 @@ identifier for tracking which migrations have been applied.
 """
 
 from abc import ABC, abstractmethod
+from typing import Optional
 from sqlalchemy import Engine
 
 
@@ -33,15 +34,24 @@ class Migration(ABC):
     # Optional list of alias IDs for this migration (for renaming migrations)
     aliases = []
 
+    def __init__(self) -> None:
+        self._filename_id: Optional[str] = None
+
+    def set_filename_id(self, filename_id: str) -> None:
+        """Set the migration id extracted from its filename.
+
+        Called by MigrationManager during discovery so migrations sort and
+        execute in filename order (001, 002, ...) rather than by class name.
+        """
+        self._filename_id = filename_id
+
     @property
     def id(self) -> str:
-        """Migration ID (extracted from filename or class name)
-
-        Subclasses can override this if needed, but typically it's auto-extracted.
-        """
-        # Default: use class name in lowercase with underscores
-        class_name = self.__class__.__name__
-        return class_name  # Will be overridden by MigrationManager when loading from file
+        """Migration ID (extracted from filename; falls back to class name
+        until set_filename_id() is called by MigrationManager during discovery)."""
+        if self._filename_id:
+            return self._filename_id
+        return self.__class__.__name__
 
     @abstractmethod
     def upgrade(self, engine: Engine) -> None:
