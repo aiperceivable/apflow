@@ -13,7 +13,7 @@ Expression Formats:
 - monthly: "dates HH:MM" format where dates are 1-31, e.g., "1,15 09:00"
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import re
 
@@ -139,6 +139,14 @@ class ScheduleCalculator:
         try:
             # Parse ISO datetime
             scheduled_time = parse_iso_datetime(expression)
+
+            # An expression with no explicit UTC offset parses as naive, which
+            # would otherwise raise TypeError when compared against
+            # from_time (always timezone-aware) below — caught by the
+            # except clause and misreported as an invalid expression, even
+            # though the expression itself is a valid ISO datetime.
+            if scheduled_time.tzinfo is None:
+                scheduled_time = scheduled_time.replace(tzinfo=timezone.utc)
 
             # If the scheduled time is in the future, return it
             if scheduled_time > from_time:

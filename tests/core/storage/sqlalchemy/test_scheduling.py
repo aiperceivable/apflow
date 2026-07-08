@@ -75,6 +75,21 @@ class TestScheduleCalculatorOnce:
         expected = datetime(2024, 1, 15, 9, 0, 0, tzinfo=timezone.utc)
         assert result == expected
 
+    def test_calculate_once_without_explicit_utc_offset(self):
+        """Regression: an ISO datetime expression with no explicit UTC offset
+        parses as a naive datetime, so comparing it against a timezone-aware
+        from_time raised TypeError — masked by the except clause into a
+        misleading "Invalid 'once' expression" ValueError, even though the
+        expression is a syntactically valid ISO datetime. (Review CRITICAL #48)
+        """
+        from_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        expression = "2024-01-15T09:00:00"  # no offset / no "Z" suffix
+
+        result = ScheduleCalculator.calculate_next_run(ScheduleType.once, expression, from_time)
+
+        expected = datetime(2024, 1, 15, 9, 0, 0, tzinfo=timezone.utc)
+        assert result == expected
+
     def test_calculate_once_invalid_expression(self):
         """Test that invalid expression raises ValueError"""
         from_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
