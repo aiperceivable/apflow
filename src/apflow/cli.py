@@ -229,6 +229,15 @@ def serve(
             "(or run the standalone `apflow scheduler` process)."
         )
 
+    # The plain A2A path (apcore-a2a's blocking serve) mounts no webhook route, so
+    # --webhook would be silently ignored. Fail loudly, mirroring --scheduler, so an
+    # operator expecting an inbound trigger endpoint isn't left with a silent 404.
+    if webhook and not all_protocols:
+        raise click.ClickException(
+            "--webhook needs the unified server; use `serve --all --webhook` "
+            "(or run `apflow rest --webhook`)."
+        )
+
     app = create_app(connection_string=db, cluster=False)
 
     cors_origins = [s.strip() for s in cors.split(",")] if cors else None

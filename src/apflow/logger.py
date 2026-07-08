@@ -16,10 +16,11 @@ Or directly use standard library (recommended for maximum performance):
 import logging
 import sys
 import os
+from typing import Optional
 
 
 # Configure root logger for apflow namespace
-def setup_logging(level: str = None) -> None:
+def setup_logging(level: Optional[str] = None) -> None:
     """
     Configure logging for apflow namespace
 
@@ -30,7 +31,13 @@ def setup_logging(level: str = None) -> None:
     if level is None:
         # Priority: APFLOW_LOG_LEVEL > LOG_LEVEL > INFO (default)
         level = os.getenv("APFLOW_LOG_LEVEL") or os.getenv("LOG_LEVEL", "INFO")
-        level = level.upper()
+
+    # Normalize regardless of source: getattr(logging, "DEBUG") resolves to the
+    # int constant, whereas getattr(logging, "debug") resolves to the *function*
+    # logging.debug, which basicConfig(level=...) rejects with TypeError. Callers
+    # pass operator-supplied strings (e.g. `--log-level debug`), so uppercase here
+    # rather than at each call site.
+    level = level.upper()
 
     # Convert string level to logging constant
     numeric_level = getattr(logging, level, logging.INFO)
@@ -50,7 +57,7 @@ def setup_logging(level: str = None) -> None:
     apflow_logger.setLevel(numeric_level)
 
 
-def get_logger(name: str = None) -> logging.Logger:
+def get_logger(name: Optional[str] = None) -> logging.Logger:
     """
     Get a logger instance
 

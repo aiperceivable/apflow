@@ -49,6 +49,14 @@ def test_serve_scheduler_requires_all() -> None:
     assert "--all" in result.output
 
 
+def test_serve_webhook_requires_all() -> None:
+    """Regression (Review): `serve --webhook` without --all silently mounted no
+    webhook route. It must now fail loudly, mirroring --scheduler."""
+    result = CliRunner().invoke(serve, ["--webhook"])
+    assert result.exit_code != 0
+    assert "--all" in result.output
+
+
 def test_rest_auth_requires_jwt_secret(monkeypatch) -> None:
     """`rest --auth` must fail early when no JWT secret is configured."""
     monkeypatch.setattr(
