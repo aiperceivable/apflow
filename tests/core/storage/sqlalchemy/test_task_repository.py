@@ -5,8 +5,11 @@ This replaces test_task_model.py as it's more appropriate to test the repository
 layer that provides actual functionality, rather than just the model layer.
 """
 
+import uuid
+
 import pytest
 from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
+from apflow.core.types import TaskTreeNode
 
 
 class TestTaskRepository:
@@ -223,3 +226,34 @@ class TestTaskRepository:
 
         result = await repo.delete_task("non-existent-id")
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_save_task_tree_persists_grandchildren(self, sync_db_session):
+        """Test that save_task_tree persists nodes at depth >= 3 (grandchildren)"""
+        repo = TaskRepository(sync_db_session)
+
+        root_id = str(uuid.uuid4())
+        child_id = str(uuid.uuid4())
+        grandchild_id = str(uuid.uuid4())
+
+        root_node = TaskTreeNode(task=repo.build_task(id=root_id, name="Root", user_id="test-user"))
+        child_node = TaskTreeNode(
+            task=repo.build_task(id=child_id, name="Child", user_id="test-user")
+        )
+        grandchild_node = TaskTreeNode(
+            task=repo.build_task(id=grandchild_id, name="Grandchild", user_id="test-user")
+        )
+
+        child_node.add_child(grandchild_node)
+        root_node.add_child(child_node)
+
+        result = await repo.save_task_tree(root_node)
+        assert result is True
+
+        saved_child = await repo.get_task_by_id(child_id)
+        assert saved_child is not None
+        assert saved_child.parent_id == root_id
+
+        saved_grandchild = await repo.get_task_by_id(grandchild_id)
+        assert saved_grandchild is not None
+        assert saved_grandchild.parent_id == child_id

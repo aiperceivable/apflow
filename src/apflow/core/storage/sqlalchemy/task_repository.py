@@ -1170,7 +1170,8 @@ class TaskRepository:
 
             # Recursively save grandchildren
             if child_node.children:
-                await self._save_children_recursive(child_node)  # type: ignore
+                grandchild_changed_tasks = await self._save_task_tree_recursive(child_node)
+                changed_tasks.extend(grandchild_changed_tasks)
 
         return changed_tasks
 
