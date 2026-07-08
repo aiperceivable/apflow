@@ -624,6 +624,8 @@ class TaskRepository:
         offset: int = 0,
         order_by: str = "created_at",
         order_desc: bool = True,
+        created_after: Optional[datetime] = None,
+        created_before: Optional[datetime] = None,
     ) -> List[TaskModelType]:
         """
         Query tasks with filters and pagination
@@ -636,6 +638,9 @@ class TaskRepository:
             offset: Number of tasks to skip (default: 0)
             order_by: Field to order by (default: "created_at")
             order_desc: If True, order descending; if False, order ascending (default: True)
+            created_after: Optional inclusive lower bound on created_at (pushes the
+                time-window filter into SQL so callers don't scan the full history)
+            created_before: Optional inclusive upper bound on created_at
 
         Returns:
             List of TaskModel instances (or custom TaskModel subclass) matching the criteria
@@ -650,6 +655,12 @@ class TaskRepository:
 
             if status is not None:
                 stmt = stmt.filter(self.task_model_class.status == status)
+
+            if created_after is not None:
+                stmt = stmt.filter(self.task_model_class.created_at >= created_after)
+
+            if created_before is not None:
+                stmt = stmt.filter(self.task_model_class.created_at <= created_before)
 
             # Apply parent_id filter
             if parent_id is not None:

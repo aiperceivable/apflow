@@ -79,6 +79,9 @@ class RetryPolicy:
         if self.jitter:
             jitter_range = delay * 0.25
             delay += random.uniform(-jitter_range, jitter_range)
+            # Re-cap after jitter: jitter must not push the delay above the
+            # documented backoff_max_seconds ceiling.
+            delay = min(delay, self.backoff_max_seconds)
 
         return max(0.0, delay)
 

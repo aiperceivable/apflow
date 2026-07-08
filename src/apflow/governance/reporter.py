@@ -75,21 +75,23 @@ class UsageReporter:
 
         # query_tasks() is paginated (default limit=100); page through every
         # result instead of only the first page, or a user with more tasks
-        # than one page would silently get an incomplete usage report.
+        # than one page would silently get an incomplete usage report. The
+        # time window is pushed into SQL (created_after/created_before) so a
+        # bounded report scans only the window, not the user's full history.
         page_size = 100
         offset = 0
         while True:
-            tasks = await self._repo.query_tasks(user_id=user_id, limit=page_size, offset=offset)
+            tasks = await self._repo.query_tasks(
+                user_id=user_id,
+                limit=page_size,
+                offset=offset,
+                created_after=start_time,
+                created_before=end_time,
+            )
             if not tasks:
                 break
 
             for task in tasks:
-                # Filter by time range if specified
-                if start_time and task.created_at and task.created_at < start_time:
-                    continue
-                if end_time and task.created_at and task.created_at > end_time:
-                    continue
-
                 usage = task.token_usage or {}
                 total_input += usage.get("input", 0)
                 total_output += usage.get("output", 0)

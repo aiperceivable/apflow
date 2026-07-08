@@ -46,9 +46,18 @@ class TestTokenBudget:
         b = TokenBudget(scope=BudgetScope.TASK, scope_id="t1", limit=100, used=99)
         assert not b.is_exhausted
 
-    def test_limit_zero_raises(self):
-        with pytest.raises(ValueError):
-            TokenBudget(scope=BudgetScope.TASK, scope_id="t1", limit=0)
+    def test_limit_zero_is_valid_and_exhausted(self):
+        """Regression (Review CRITICAL): token_budget=0 is an accepted external
+        value (task-create schema minimum:0). It must be a zero-budget (exhausted)
+        budget, not a ValueError that escapes into the circuit-breaker path."""
+        b = TokenBudget(scope=BudgetScope.TASK, scope_id="t1", limit=0)
+        assert b.is_exhausted
+        assert b.utilization == 1.0
+        assert b.remaining == 0
+
+    def test_negative_limit_raises(self):
+        with pytest.raises(ValueError, match=">= 0"):
+            TokenBudget(scope=BudgetScope.TASK, scope_id="t1", limit=-1)
 
     def test_negative_used_raises(self):
         with pytest.raises(ValueError):
@@ -81,6 +90,24 @@ class TestBudgetManager:
         result = await bm.check_budget("t1")
         assert result.allowed is True
         assert result.remaining == 500
+
+    @pytest.mark.asyncio
+    async def test_check_zero_budget_blocks_without_crashing(self):
+        """Regression (Review CRITICAL): a task with token_budget=0 must return
+        allowed=False, not raise ValueError (which previously escaped the caller's
+        except-KeyError and tripped the circuit breaker)."""
+        repo = _async_repo(_mock_task(token_budget=0, token_usage={"total": 0}))
+        bm = BudgetManager(repo)
+        result = await bm.check_budget("t1")
+        assert result.allowed is False
+
+    @pytest.mark.asyncio
+    async def test_update_usage_zero_budget_does_not_crash(self):
+        task = _mock_task(token_budget=0, token_usage={"total": 5})
+        repo = _async_repo(task)
+        bm = BudgetManager(repo)
+        # Must not raise ValueError("limit must be >= 1").
+        await bm.update_usage("t1", {"total": 5})
 
     @pytest.mark.asyncio
     async def test_check_exhausted(self):

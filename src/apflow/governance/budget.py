@@ -37,8 +37,11 @@ class TokenBudget:
     def __post_init__(self) -> None:
         if not self.scope_id:
             raise ValueError("scope_id must be non-empty")
-        if self.limit < 1:
-            raise ValueError(f"limit must be >= 1, got {self.limit}")
+        # limit == 0 is a valid, externally-accepted value (task-create schema allows
+        # token_budget minimum 0) and means "zero budget → immediately exhausted";
+        # utilization and is_exhausted already handle it. Only reject negatives.
+        if self.limit < 0:
+            raise ValueError(f"limit must be >= 0, got {self.limit}")
         if self.used < 0:
             raise ValueError(f"used must be >= 0, got {self.used}")
 

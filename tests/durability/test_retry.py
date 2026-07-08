@@ -73,6 +73,20 @@ class TestCalculateDelay:
         p = RetryPolicy(backoff_base_seconds=1.0, backoff_max_seconds=10.0, jitter=False)
         assert p.calculate_delay(20) == 10.0
 
+    def test_jitter_never_exceeds_cap(self):
+        """Regression (Review): jitter was applied after the cap, so the returned
+        delay could reach 1.25x backoff_max_seconds. It must never exceed the cap."""
+        p = RetryPolicy(
+            backoff_strategy=BackoffStrategy.EXPONENTIAL,
+            backoff_base_seconds=1.0,
+            backoff_max_seconds=10.0,
+            jitter=True,
+        )
+        for attempt in range(15):
+            for _ in range(50):
+                delay = p.calculate_delay(attempt)
+                assert 0.0 <= delay <= 10.0
+
     def test_negative_attempt_raises(self):
         p = RetryPolicy(jitter=False)
         with pytest.raises(ValueError):

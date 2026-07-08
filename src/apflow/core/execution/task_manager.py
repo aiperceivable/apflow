@@ -1233,10 +1233,7 @@ class TaskManager:
                 logger.error(f"Error executing task {task_id}: {str(e)}", exc_info=True)
 
             # --- Durability: Record failure on circuit breaker ---
-            if self._circuit_breaker_registry:
-                executor_id = self._get_executor_id(task)
-                if executor_id:
-                    self._circuit_breaker_registry.get(executor_id).record_failure()
+            self._record_breaker_failure(task, e)
 
             # Retries (if any) are now exhausted — clear the executor reference
             # left in place by _execute_task_with_schemas so a retry callback
@@ -1552,6 +1549,20 @@ class TaskManager:
                 logger.debug("No tasks were triggered by this completion")
         else:
             logger.debug("No waiting tasks found")
+
+    def _record_breaker_failure(self, task: TaskModelType, error: BaseException) -> None:
+        """Record an executor fault on the circuit breaker.
+
+        A BusinessError (ValidationError / ConfigurationError / etc.) is a client
+        input problem, NOT an executor-health signal. Counting it toward the breaker
+        would trip it OPEN and reject otherwise-healthy tasks for that executor, so
+        only genuine executor/system faults are recorded.
+        """
+        if not self._circuit_breaker_registry or isinstance(error, BusinessError):
+            return
+        executor_id = self._get_executor_id(task)
+        if executor_id:
+            self._circuit_breaker_registry.get(executor_id).record_failure()
 
     def _get_executor_id(self, task: TaskModelType) -> Optional[str]:
         """
