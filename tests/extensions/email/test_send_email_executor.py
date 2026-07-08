@@ -395,6 +395,23 @@ class TestSchemaAndDemo:
         assert "api_key" in schema["properties"]
         assert "smtp_host" in schema["properties"]
 
+    def test_credential_fields_marked_sensitive(self):
+        """Regression: api_key/smtp_username/smtp_password were accepted as
+        plain task-input fields with no marking, so apcore's observability
+        logging (enabled via metrics=True) logged them in cleartext at INFO
+        — x-sensitive is apcore's documented mechanism for a module to mark
+        its own sensitive fields for redaction. (Review CRITICAL #60)
+        """
+        executor = SendEmailExecutor()
+        schema = executor.get_input_schema()
+
+        for field in ("api_key", "smtp_username", "smtp_password"):
+            assert schema["properties"][field].get("x-sensitive") is True, field
+
+        # Non-credential fields must not be marked sensitive.
+        for field in ("to", "subject", "body", "smtp_host", "from_email"):
+            assert schema["properties"][field].get("x-sensitive") is not True, field
+
     def test_get_output_schema(self):
         """Test output schema contains expected fields"""
         executor = SendEmailExecutor()

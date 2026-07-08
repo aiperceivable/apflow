@@ -150,13 +150,13 @@ class AggregateResultsExecutor(BaseTask):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-        # Extract dependency results from inputs
+        # Extract dependency results from inputs. No filtering beyond the
+        # internal pre-hook markers — a dependency task ID may legitimately
+        # contain a "." (see class docstring: "No filtering is applied - all
+        # keys are included").
         pre_hook_markers = {"_pre_hook_executed", "_pre_hook_timestamp"}
         dependency_results = {
-            key: value
-            for key, value in inputs.items()
-            if key not in pre_hook_markers
-            and "." not in key  # Filter out field mappings (keys with ".")
+            key: value for key, value in inputs.items() if key not in pre_hook_markers
         }
         logger.debug(
             f"Extracted {len(dependency_results)} dependency results: {list(dependency_results.keys())}"

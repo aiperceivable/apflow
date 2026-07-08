@@ -13,6 +13,19 @@ from apflow.extensions.apflow.api_executor import ApFlowApiExecutor
 class TestApFlowApiExecutor:
     """Test ApFlowApiExecutor functionality"""
 
+    @pytest.fixture(autouse=True)
+    def _mock_dns_resolution(self):
+        """Mock DNS resolution to return a public IP for test URLs.
+
+        This prevents the SSRF validation from failing on the loopback
+        "localhost" hostname used throughout the existing tests below.
+        """
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[(None, None, None, None, ("93.184.216.34", 0))],
+        ):
+            yield
+
     @pytest.mark.asyncio
     async def test_execute_api_call(self):
         """Test executing an API call"""
@@ -393,6 +406,104 @@ class TestApFlowApiExecutor:
             assert result["success"] is True
             call_kwargs = mock_client_instance.post.call_args[1]
             assert call_kwargs["headers"]["X-Custom-Header"] == "custom-value"
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_private_base_url(self):
+        """Regression: base_url is task-supplied and was used for outbound
+        HTTP calls with zero SSRF validation, unlike sibling rest_executor.py
+        (which has _validate_url_not_private). A task could target internal
+        infrastructure (e.g. the cloud metadata endpoint) via this executor.
+        (Review CRITICAL #57)
+        """
+        executor = ApFlowApiExecutor()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "jsonrpc": "2.0",
+            "result": {"success": True},
+            "id": "test-id",
+        }
+
+        with (
+            patch("httpx.AsyncClient") as mock_client,
+            patch(
+                "socket.getaddrinfo",
+                return_value=[(None, None, None, None, ("169.254.169.254", 0))],
+            ),
+        ):
+            mock_client_instance = AsyncMock()
+            mock_client.return_value.__aenter__.return_value = mock_client_instance
+            mock_client_instance.post = AsyncMock(return_value=mock_response)
+
+            result = await executor.execute(
+                {
+                    "base_url": "http://metadata.internal",
+                    "method": "tasks.execute",
+                    "params": {},
+                }
+            )
+
+        assert result["success"] is False
+        assert "private" in result["error"].lower() or "reserved" in result["error"].lower()
+        # The outbound call must never have been attempted.
+        mock_client_instance.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_private_base_url_during_polling(self):
+        """Regression: the same missing SSRF check applied to the polling
+        loop's outbound requests in _wait_for_task_completion. (Review
+        CRITICAL #57)
+        """
+        executor = ApFlowApiExecutor()
+
+        mock_execute_response = MagicMock()
+        mock_execute_response.status_code = 200
+        mock_execute_response.json.return_value = {
+            "jsonrpc": "2.0",
+            "result": {"task_id": "task-123", "status": "started"},
+            "id": "test-id",
+        }
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client_instance = AsyncMock()
+            mock_client.return_value.__aenter__.return_value = mock_client_instance
+            mock_client_instance.post = AsyncMock(return_value=mock_execute_response)
+
+            with patch(
+                "socket.getaddrinfo",
+                return_value=[(None, None, None, None, ("10.0.0.5", 0))],
+            ):
+                result = await executor.execute(
+                    {
+                        "base_url": "http://internal-host",
+                        "method": "tasks.execute",
+                        "params": {"task_id": "task-123"},
+                        "wait_for_completion": True,
+                        "poll_interval": 0.01,
+                    }
+                )
+
+        assert result["success"] is False
+        assert "private" in result["error"].lower() or "reserved" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_execute_use_streaming_raises_instead_of_silently_ignoring(self):
+        """Regression: use_streaming was parsed but discarded — the documented
+        streaming mode was never implemented, so a caller requesting it got no
+        indication their request was ignored. (Review CRITICAL #58)
+        """
+        executor = ApFlowApiExecutor()
+
+        with pytest.raises(ValueError, match="use_streaming"):
+            await executor.execute(
+                {
+                    "base_url": "http://localhost:8000",
+                    "method": "tasks.execute",
+                    "params": {},
+                    "use_streaming": True,
+                }
+            )
 
     @pytest.mark.asyncio
     async def test_get_input_schema(self):

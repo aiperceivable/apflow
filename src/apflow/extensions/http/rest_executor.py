@@ -5,18 +5,13 @@ This executor is designed to make HTTP requests to third-party REST API services
 It supports authentication, custom headers, query parameters, and request bodies, making it suitable for integrating with external APIs such as SaaS platforms, cloud services, or any HTTP-based API provider.
 """
 
-import asyncio
-import ipaddress
-import os
-import socket
-from urllib.parse import urlparse
-
 import httpx
 from typing import Any, ClassVar, Dict, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 from apflow.core.base import BaseTask
 from apflow.core.extensions.decorators import executor_register
-from apflow.core.execution.errors import ValidationError, NetworkError
+from apflow.core.execution.errors import NetworkError, ValidationError
+from apflow.core.utils.network_security import validate_url_not_private
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
@@ -125,38 +120,11 @@ class RestExecutor(BaseTask):
     async def _validate_url_not_private(self, url: str) -> None:
         """Validate that a URL does not target private or internal network addresses.
 
-        Resolves the hostname to IP addresses and checks against private, loopback,
-        link-local, and reserved ranges to prevent SSRF attacks.
-
-        Can be bypassed by setting env var APFLOW_REST_ALLOW_PRIVATE_URLS=1.
-
-        Raises:
-            ValidationError: If the URL targets a private/reserved address.
+        See ``network_security.validate_url_not_private`` for details. Shared
+        with other executors that make outbound requests to task-supplied
+        URLs (e.g. apflow_api_executor), so the SSRF guard stays in one place.
         """
-        if os.environ.get("APFLOW_REST_ALLOW_PRIVATE_URLS") == "1":
-            return
-
-        parsed = urlparse(url)
-        hostname = parsed.hostname
-        if not hostname:
-            raise ValidationError(f"[{self.id}] URL has no hostname: {url}")
-
-        # socket.getaddrinfo() is a blocking call; running it directly here would
-        # stall the entire shared event loop (all other concurrently-running
-        # tasks) for as long as DNS resolution takes. Offload it to a thread.
-        loop = asyncio.get_running_loop()
-        try:
-            addr_infos = await loop.run_in_executor(None, socket.getaddrinfo, hostname, None)
-        except socket.gaierror:
-            raise ValidationError(f"[{self.id}] Cannot resolve hostname: {hostname}")
-
-        for addr_info in addr_infos:
-            ip_str = addr_info[4][0]
-            ip = ipaddress.ip_address(ip_str)
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-                raise ValidationError(
-                    f"[{self.id}] URL targets a private/reserved address: {hostname} -> {ip_str}"
-                )
+        await validate_url_not_private(url, self.id)
 
     async def _follow_redirects_with_validation(
         self,

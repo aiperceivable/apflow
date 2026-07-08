@@ -67,7 +67,9 @@ class SendEmailInputSchema(BaseModel):
     timeout: float = Field(default=30, description="Request timeout in seconds (default: 30)")
     api_key: Optional[str] = Field(
         default=None,
-        description="Resend API key. Falls back to RESEND_API_KEY env var.",
+        description="Resend API key. Falls back to RESEND_API_KEY env var (recommended: "
+        "passing it here persists it in cleartext in the task's stored inputs).",
+        json_schema_extra={"x-sensitive": True},
     )
     smtp_host: Optional[str] = Field(
         default=None,
@@ -79,11 +81,15 @@ class SendEmailInputSchema(BaseModel):
     )
     smtp_username: Optional[str] = Field(
         default=None,
-        description="SMTP authentication username. Falls back to SMTP_USERNAME env var.",
+        description="SMTP authentication username. Falls back to SMTP_USERNAME env var "
+        "(recommended: passing it here persists it in cleartext in the task's stored inputs).",
+        json_schema_extra={"x-sensitive": True},
     )
     smtp_password: Optional[str] = Field(
         default=None,
-        description="SMTP authentication password. Falls back to SMTP_PASSWORD env var.",
+        description="SMTP authentication password. Falls back to SMTP_PASSWORD env var "
+        "(recommended: passing it here persists it in cleartext in the task's stored inputs).",
+        json_schema_extra={"x-sensitive": True},
     )
     smtp_use_tls: Optional[bool] = Field(
         default=None,
@@ -111,14 +117,20 @@ class SendEmailExecutor(BaseTask):
     - "resend": Uses Resend HTTP API (requires api_key)
     - "smtp": Uses SMTP protocol via aiosmtplib (requires smtp_host, etc.)
 
-    Example usage in task schemas:
+    Credentials (api_key, smtp_username, smtp_password) are marked x-sensitive
+    so they are redacted from observability logging, but they are still stored
+    in cleartext in the task's persisted inputs if passed here. Prefer
+    configuring RESEND_API_KEY / SMTP_USERNAME / SMTP_PASSWORD as environment
+    variables instead — inputs are only a fallback for cases that need
+    per-task overrides.
+
+    Example usage in task schemas (credentials from env vars, not inputs):
     {
         "schemas": {
             "method": "send_email_executor"
         },
         "inputs": {
             "provider": "resend",
-            "api_key": "re_xxx",
             "to": ["user@example.com"],
             "from_email": "noreply@example.com",
             "subject": "Hello",

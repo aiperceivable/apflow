@@ -60,6 +60,7 @@ from typing import Any, ClassVar, Dict, Literal, Optional
 from pydantic import BaseModel, Field
 from apflow.core.base import BaseTask
 from apflow.core.extensions.decorators import executor_register
+from apflow.core.utils.network_security import validate_url_not_private
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
@@ -78,7 +79,8 @@ class ApFlowApiInputSchema(BaseModel):
     )
     use_streaming: bool = Field(
         default=False,
-        description="Whether to use streaming mode (only for tasks.execute, default: False)",
+        description="Not implemented; setting this to True raises an error. "
+        "Use wait_for_completion instead.",
     )
     wait_for_completion: bool = Field(
         default=False,
@@ -150,7 +152,8 @@ class ApFlowApiExecutor(BaseTask):
     Executor for calling other apflow API instances
 
     Supports all task management methods (tasks.execute, tasks.create, tasks.get, etc.)
-    with authentication, streaming, and result polling.
+    with authentication and polling-based result retrieval (use_streaming is not
+    implemented).
 
     Example usage in task schemas:
     {
@@ -198,7 +201,7 @@ class ApFlowApiExecutor(BaseTask):
                 - method: API method name (e.g., "tasks.execute", "tasks.create") (required)
                 - params: Method parameters dict (required)
                 - auth_token: Optional JWT token for authentication
-                - use_streaming: Whether to use streaming mode (only for tasks.execute, default: False)
+                - use_streaming: Not implemented; raises if set to True
                 - wait_for_completion: Whether to wait for task completion (only for tasks.execute, default: False)
                 - poll_interval: Polling interval in seconds when waiting for completion (default: 1.0)
                 - timeout: Total timeout in seconds (default: 300.0)
@@ -217,7 +220,14 @@ class ApFlowApiExecutor(BaseTask):
 
         params = inputs.get("params", {})
         auth_token = inputs.get("auth_token")
-        inputs.get("use_streaming", False)
+        if inputs.get("use_streaming", False):
+            # Not implemented: there is no streaming code path in this executor.
+            # Silently ignoring the flag would make the caller believe streaming
+            # happened when it never did — fail loudly instead.
+            raise ValueError(
+                f"[{self.id}] use_streaming is not implemented; "
+                "use wait_for_completion for polling-based result retrieval instead"
+            )
         wait_for_completion = inputs.get("wait_for_completion", False)
         poll_interval = inputs.get("poll_interval", 1.0)
         timeout = inputs.get("timeout", 300.0)
@@ -243,6 +253,12 @@ class ApFlowApiExecutor(BaseTask):
         logger.info(f"Calling apflow API {method} on {base_url}")
 
         try:
+            # base_url is task-supplied; without this check a task could target
+            # internal/private infrastructure (e.g. the cloud metadata endpoint)
+            # via this executor (unlike sibling rest_executor, which already
+            # validates outbound URLs the same way).
+            await validate_url_not_private(api_url, self.id)
+
             async with httpx.AsyncClient(timeout=timeout) as client:
                 # Check for cancellation before making request
                 if self.cancellation_checker and self.cancellation_checker():
@@ -377,6 +393,10 @@ class ApFlowApiExecutor(BaseTask):
             request_headers["Authorization"] = f"Bearer {auth_token}"
 
         api_url = f"{base_url.rstrip('/')}/tasks"
+        # Validated once here, not per poll iteration — base_url is fixed for
+        # the lifetime of this polling loop, so re-resolving DNS on every poll
+        # would be wasted work.
+        await validate_url_not_private(api_url, self.id)
         start_time = asyncio.get_event_loop().time()
 
         # Production-grade retry configuration

@@ -54,6 +54,24 @@ class TestAggregateResultsExecutor:
         assert result["results"]["task-3"]["total"] == "926Gi"
 
     @pytest.mark.asyncio
+    async def test_execute_includes_dependency_ids_containing_a_dot(self, executor):
+        """Regression: a "." not in key filter silently dropped any dependency
+        whose task ID contains a literal dot, contradicting the class
+        docstring's documented contract ("No filtering is applied - all keys
+        are included"). (Review CRITICAL #59)
+        """
+        inputs = {
+            "task-1": {"cores": 8},
+            "service.worker-1": {"status": "ok"},
+        }
+
+        result = await executor.execute(inputs)
+
+        assert result["result_count"] == 2
+        assert "service.worker-1" in result["results"]
+        assert result["results"]["service.worker-1"] == {"status": "ok"}
+
+    @pytest.mark.asyncio
     async def test_execute_with_empty_inputs(self, executor):
         """Test aggregating with empty inputs"""
         inputs = {}
@@ -211,4 +229,3 @@ class TestAggregateResultsExecutor:
         assert aggregated["results"]["disk-info"] == disk_result
         assert "_pre_hook_executed" not in aggregated["results"]
         assert "_pre_hook_timestamp" not in aggregated["results"]
-
