@@ -243,3 +243,63 @@ class TestLeaderTimingValidation:
             leader_renew_seconds=10,
         )
         config.validate_and_initialize()  # must not raise
+
+
+class TestSchedulerPollIntervalValidation:
+    """Regression: scheduler_poll_interval_seconds was missing from
+    positive_fields, so a value of 0 (or negative) passed validation silently
+    — the leader dispatch scheduler would busy-loop with no delay between
+    polls. (Review CRITICAL #19)
+    """
+
+    def test_rejects_zero_scheduler_poll_interval(self) -> None:
+        from apflow.core.distributed.config import DistributedConfig
+
+        config = DistributedConfig(scheduler_poll_interval_seconds=0)
+        with pytest.raises(ValueError, match="scheduler_poll_interval_seconds"):
+            config.validate_and_initialize()
+
+    def test_rejects_negative_scheduler_poll_interval(self) -> None:
+        from apflow.core.distributed.config import DistributedConfig
+
+        config = DistributedConfig(scheduler_poll_interval_seconds=-5)
+        with pytest.raises(ValueError, match="scheduler_poll_interval_seconds"):
+            config.validate_and_initialize()
+
+
+class TestNodeHealthThresholdValidation:
+    """Regression: no cross-field invariant enforced node_dead_threshold_seconds
+    > node_stale_threshold_seconds (unlike the analogous leader_renew <
+    leader_lease check) — a misconfiguration could let a node jump straight
+    from healthy to dead without ever being classified stale. (Review
+    CRITICAL #20)
+    """
+
+    def test_dead_threshold_not_greater_than_stale_raises(self) -> None:
+        from apflow.core.distributed.config import DistributedConfig
+
+        config = DistributedConfig(
+            node_stale_threshold_seconds=120,
+            node_dead_threshold_seconds=30,
+        )
+        with pytest.raises(ValueError, match="node_dead_threshold_seconds"):
+            config.validate_and_initialize()
+
+    def test_dead_threshold_equal_to_stale_raises(self) -> None:
+        from apflow.core.distributed.config import DistributedConfig
+
+        config = DistributedConfig(
+            node_stale_threshold_seconds=30,
+            node_dead_threshold_seconds=30,
+        )
+        with pytest.raises(ValueError, match="node_dead_threshold_seconds"):
+            config.validate_and_initialize()
+
+    def test_dead_threshold_greater_than_stale_ok(self) -> None:
+        from apflow.core.distributed.config import DistributedConfig
+
+        config = DistributedConfig(
+            node_stale_threshold_seconds=30,
+            node_dead_threshold_seconds=120,
+        )
+        config.validate_and_initialize()  # must not raise

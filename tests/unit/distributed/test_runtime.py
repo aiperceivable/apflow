@@ -371,6 +371,42 @@ class TestLeaderBackgroundTasks:
 
         assert runtime.current_role == "worker"
 
+    @pytest.mark.asyncio
+    async def test_demotion_stops_lease_and_node_cleanup_loops(self) -> None:
+        """Regression: demotion stopped the dispatch scheduler but left
+        _lease_cleanup_loop/_node_cleanup_loop running indefinitely — a
+        demoted node kept performing exclusive leader-only DB maintenance
+        after losing leadership. (Review CRITICAL #23)
+        """
+        election = MagicMock()
+        election.try_acquire.return_value = (True, "token")
+        election.renew_leadership.return_value = False  # fails immediately
+        lease_mgr = MagicMock()
+        registry = MagicMock()
+
+        runtime = _make_runtime(
+            config=_make_config(node_role="leader"),
+            leader_election=election,
+            lease_manager=lease_mgr,
+            node_registry=registry,
+        )
+
+        task = asyncio.create_task(runtime.start())
+        await asyncio.sleep(0.2)  # allow renewal failure + demotion to occur
+        assert runtime.current_role == "worker"
+
+        cleanup_calls_at_demotion = lease_mgr.cleanup_expired_leases.call_count
+        node_cleanup_calls_at_demotion = registry.detect_stale_nodes.call_count
+
+        # Give the (buggy) loops ample opportunity to keep firing.
+        await asyncio.sleep(0.3)
+
+        await runtime.shutdown()
+        await task
+
+        assert lease_mgr.cleanup_expired_leases.call_count == cleanup_calls_at_demotion
+        assert registry.detect_stale_nodes.call_count == node_cleanup_calls_at_demotion
+
 
 class TestProperties:
     """Tests for runtime properties."""

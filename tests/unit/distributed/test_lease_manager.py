@@ -114,6 +114,40 @@ class TestLeaseManager:
         task = session.get(TaskModel, "task-1")
         assert task.status == "pending"
 
+    def test_cleanup_expired_leases_does_not_report_already_completed_task(
+        self, session_factory, config, session, sample_node, sample_task
+    ):
+        """Regression: cleanup_expired_leases unconditionally appended
+        task_id (and thus fired a task_reassigned event) even when a racing
+        worker had already completed the task normally before the expired
+        lease was swept up. The lease row must still be cleaned up, but the
+        task must NOT be reported as reassigned. (Review CRITICAL #21)
+        """
+        manager = LeaseManager(session_factory, config)
+
+        lease = manager.acquire_lease("task-1", "worker-1")
+        assert lease is not None
+
+        # A racing worker completed the task normally, then the lease
+        # expired before its row was cleaned up.
+        task = session.get(TaskModel, "task-1")
+        task.status = "completed"
+        db_lease = session.get(TaskLease, "task-1")
+        db_lease.expires_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+        session.commit()
+
+        with patch("apflow.core.distributed.lease_manager.emit_task_event") as mock_emit:
+            cleaned = manager.cleanup_expired_leases()
+
+        # The stale lease row is still removed...
+        session.expire_all()
+        assert session.get(TaskLease, "task-1") is None
+        # ...but the already-completed task is not reported as reassigned.
+        assert "task-1" not in cleaned
+        mock_emit.assert_not_called()
+        task = session.get(TaskModel, "task-1")
+        assert task.status == "completed"
+
     def test_release_lease_removes_entry(
         self, session_factory, config, session, sample_node, sample_task
     ):

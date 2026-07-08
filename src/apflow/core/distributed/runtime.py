@@ -326,8 +326,15 @@ class DistributedRuntime:
                 return
 
     async def _lease_cleanup_loop(self) -> None:
-        """Clean expired leases periodically."""
-        while not self._shutdown_event.is_set():
+        """Clean expired leases periodically. Exits on demotion from leader.
+
+        Started only via _start_leader_background_tasks(), but demotion
+        (_leader_renewal_loop, on renewal failure) only flips self._role and
+        stops the dispatch scheduler — this loop must notice the role change
+        itself, or a demoted node keeps performing exclusive leader-only DB
+        maintenance indefinitely alongside the new leader.
+        """
+        while not self._shutdown_event.is_set() and self._role == "leader":
             try:
                 await asyncio.wait_for(
                     self._shutdown_event.wait(),
@@ -337,14 +344,21 @@ class DistributedRuntime:
             except asyncio.TimeoutError:
                 pass
 
+            if self._role != "leader":
+                break
+
             try:
                 self._lease_manager.cleanup_expired_leases()
             except Exception:
                 logger.error("Lease cleanup failed", exc_info=True)
 
     async def _node_cleanup_loop(self) -> None:
-        """Detect stale and dead nodes periodically."""
-        while not self._shutdown_event.is_set():
+        """Detect stale and dead nodes periodically. Exits on demotion from leader.
+
+        See _lease_cleanup_loop's docstring: demotion does not itself cancel
+        this loop, so it must check self._role on every iteration.
+        """
+        while not self._shutdown_event.is_set() and self._role == "leader":
             try:
                 await asyncio.wait_for(
                     self._shutdown_event.wait(),
@@ -353,6 +367,9 @@ class DistributedRuntime:
                 break
             except asyncio.TimeoutError:
                 pass
+
+            if self._role != "leader":
+                break
 
             try:
                 self._node_registry.detect_stale_nodes()

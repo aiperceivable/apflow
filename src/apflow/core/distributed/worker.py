@@ -12,16 +12,23 @@ from typing import Any, cast
 from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
-from apflow.core.distributed.config import DistributedConfig, is_postgresql
+from apflow.core.distributed.config import DistributedConfig, is_postgresql, utcnow
 from apflow.core.distributed.events import emit_task_event
 from apflow.core.distributed.idempotency import IdempotencyManager
 from apflow.core.distributed.lease_manager import LeaseManager
 from apflow.core.distributed.node_registry import NodeRegistry
+from apflow.core.distributed.placement import PlacementEngine
 from apflow.core.distributed.types import TaskExecutorFn
-from apflow.core.storage.sqlalchemy.models import TaskModel
+from apflow.core.storage.sqlalchemy.models import DistributedNode, TaskModel
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Registered for every node until node capability declaration is supported;
+# shared between register_node() and the placement self-check below so they
+# never drift apart.
+_DEFAULT_EXECUTOR_TYPES = ["default"]
+_DEFAULT_CAPABILITIES: dict[str, Any] = {}
 
 
 class WorkerRuntime:
@@ -53,13 +60,14 @@ class WorkerRuntime:
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._active_leases: dict[str, str] = {}  # task_id -> lease_token
         self._shutdown_event = asyncio.Event()
+        self._placement_engine = PlacementEngine()
 
     async def start(self) -> None:
         """Start worker: register node, launch polling + heartbeat loops."""
         self._node_registry.register_node(
             node_id=self._node_id,
-            executor_types=["default"],
-            capabilities={},
+            executor_types=_DEFAULT_EXECUTOR_TYPES,
+            capabilities=_DEFAULT_CAPABILITIES,
         )
         logger.info("Worker %s started", self._node_id)
 
@@ -106,6 +114,12 @@ class WorkerRuntime:
                     # re-spawning would overwrite the live entry in _running_tasks
                     # (making _renew_lease_loop cancel the wrong coroutine).
                     if task_id in self._running_tasks:
+                        continue
+                    if not self._is_eligible_for_this_node(task):
+                        # Leave it pending for a node whose executor_types/
+                        # capabilities/allow-list actually satisfy the
+                        # constraint; this is a pull model with no central
+                        # dispatcher, so ineligible tasks are simply not leased.
                         continue
                     exec_task = asyncio.create_task(self._execute_task(task))
                     self._running_tasks[task_id] = exec_task
@@ -158,6 +172,29 @@ class WorkerRuntime:
             tasks = query.all()
             session.expunge_all()
             return tasks
+
+    def _is_eligible_for_this_node(self, task: TaskModel) -> bool:
+        """Check task.placement_constraints against this node.
+
+        There is no central dispatcher in this pull-based architecture — every
+        worker polls the same pending pool and self-selects — so placement is
+        enforced here as a self-check rather than as an external filter over
+        all healthy nodes.
+        """
+        self_node = DistributedNode(
+            node_id=self._node_id,
+            executor_types=_DEFAULT_EXECUTOR_TYPES,
+            capabilities=_DEFAULT_CAPABILITIES,
+            status="healthy",
+            heartbeat_at=utcnow(),
+        )
+        eligible = self._placement_engine.find_eligible_nodes(
+            cast("dict[str, Any] | None", task.placement_constraints),
+            [self_node],
+            active_leases_by_node={},
+            max_parallel_per_node=self._config.max_parallel_tasks_per_node,
+        )
+        return len(eligible) > 0
 
     async def _execute_task(self, task: TaskModel) -> None:
         """Full task lifecycle: acquire -> check idempotency -> execute -> report."""

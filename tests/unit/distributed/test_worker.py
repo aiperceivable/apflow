@@ -180,6 +180,64 @@ class TestPolling:
 
         lease_mgr.acquire_lease.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_poll_skips_task_ineligible_for_this_node(self) -> None:
+        """Regression: PlacementEngine.find_eligible_nodes was never invoked
+        from the dispatch path, so placement_constraints had zero runtime
+        effect — a task restricted to a different node would still be leased
+        and executed by this one. (Review CRITICAL #22)
+        """
+        lease_mgr = MagicMock()
+        lease_mgr.acquire_lease.return_value = _make_lease()
+
+        ineligible_task = _make_task_model(task_id="task-ineligible")
+        ineligible_task.placement_constraints = {"allowed_nodes": ["some-other-node"]}
+
+        session = MagicMock()
+        query_mock = session.query.return_value.filter.return_value
+        query_mock.limit.return_value.all.return_value = [ineligible_task]
+        session.get_bind.return_value.dialect.name = "sqlite"
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=False)
+        factory = MagicMock(return_value=session)
+
+        worker = _make_worker(session_factory=factory, lease_manager=lease_mgr)
+
+        task = asyncio.create_task(worker.start())
+        await asyncio.sleep(0.2)
+        await worker.shutdown()
+        await task
+
+        lease_mgr.acquire_lease.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_poll_executes_task_eligible_for_this_node(self) -> None:
+        """A task whose placement_constraints this node satisfies is still
+        leased and executed normally. (Review CRITICAL #22)
+        """
+        lease_mgr = MagicMock()
+        lease_mgr.acquire_lease.return_value = _make_lease()
+
+        eligible_task = _make_task_model(task_id="task-eligible")
+        eligible_task.placement_constraints = {"allowed_nodes": ["test-worker"]}
+
+        session = MagicMock()
+        query_mock = session.query.return_value.filter.return_value
+        query_mock.limit.return_value.all.return_value = [eligible_task]
+        session.get_bind.return_value.dialect.name = "sqlite"
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=False)
+        factory = MagicMock(return_value=session)
+
+        worker = _make_worker(session_factory=factory, lease_manager=lease_mgr)
+
+        task = asyncio.create_task(worker.start())
+        await asyncio.sleep(0.2)
+        await worker.shutdown()
+        await task
+
+        lease_mgr.acquire_lease.assert_called()
+
 
 class TestLeaseAcquisition:
     """Tests for lease acquisition during execution."""

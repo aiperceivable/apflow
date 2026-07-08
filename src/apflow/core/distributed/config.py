@@ -132,6 +132,7 @@ class DistributedConfig:
             "lease_cleanup_interval_seconds",
             "poll_interval_seconds",
             "max_parallel_tasks_per_node",
+            "scheduler_poll_interval_seconds",
             "heartbeat_interval_seconds",
             "node_stale_threshold_seconds",
             "node_dead_threshold_seconds",
@@ -148,6 +149,16 @@ class DistributedConfig:
             raise ValueError(
                 "leader_renew_seconds must be less than leader_lease_seconds "
                 f"(got renew={self.leader_renew_seconds}, lease={self.leader_lease_seconds})"
+            )
+
+        # Cross-field invariant: a node must be classified stale before it is
+        # classified dead, otherwise it can jump straight from healthy to dead,
+        # silently disabling the graduated stale/dead health classification.
+        if self.node_dead_threshold_seconds <= self.node_stale_threshold_seconds:
+            raise ValueError(
+                "node_dead_threshold_seconds must be greater than node_stale_threshold_seconds "
+                f"(got dead={self.node_dead_threshold_seconds}, "
+                f"stale={self.node_stale_threshold_seconds})"
             )
 
         # Auto-generate node_id if enabled and not set

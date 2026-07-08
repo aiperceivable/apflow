@@ -214,9 +214,20 @@ class LeaseManager:
                     # idempotency key rather than colliding with the timed-out
                     # attempt's stored (and possibly failed) result.
                     task.attempt_id = (task.attempt_id or 0) + 1
+                    cleaned_task_ids.append(lease.task_id)
+                    logger.info("Cleaned up expired lease for task %s", lease.task_id)
+                else:
+                    # A racing worker already moved the task past in_progress
+                    # (or it no longer exists) before this sweep ran — the
+                    # stale lease row is still removed, but the task was never
+                    # actually reassigned, so it must not be reported as such.
+                    logger.debug(
+                        "Removed expired lease for task %s without reassignment "
+                        "(task status: %s)",
+                        lease.task_id,
+                        task.status if task is not None else "missing",
+                    )
                 session.delete(lease)
-                cleaned_task_ids.append(lease.task_id)
-                logger.info("Cleaned up expired lease for task %s", lease.task_id)
 
             session.commit()
 
