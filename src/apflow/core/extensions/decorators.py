@@ -59,19 +59,37 @@ def _register_extension(
             f"Using class attributes for registration."
         )
 
+        # id/name/description may be declared as read-only @property on cls
+        # (per the ExecutableTask interface contract). Accessed at the class
+        # level, a property attribute returns the descriptor object itself,
+        # not a computed value, so resolve to a plain string first and
+        # shadow it as an ordinary class attribute on TemplateClass — never
+        # assign to a template *instance*, which would hit the inherited
+        # property's setter (or lack of one) and either crash or store the
+        # descriptor object as if it were the value.
+        def _resolve_class_attr(name: str, default: str) -> str:
+            value = getattr(cls, name, None)
+            if value is None or isinstance(value, property):
+                return default
+            return value
+
+        resolved_id = _resolve_class_attr("id", cls.__name__.lower())
+        resolved_name = _resolve_class_attr("name", cls.__name__)
+        resolved_description = _resolve_class_attr("description", "")
+
         # Create a minimal template class
         class TemplateClass(cls):
             """Template instance for registration"""
+
+            id = resolved_id  # type: ignore
+            name = resolved_name  # type: ignore
+            description = resolved_description
 
             def __init__(self):
                 # Bypass parent __init__ to avoid errors
                 pass
 
-        # Set required attributes from class
         template = TemplateClass()
-        template.id = getattr(cls, "id", cls.__name__.lower())
-        template.name = getattr(cls, "name", cls.__name__)
-        template.description = getattr(cls, "description", "")
 
     # Override category
     from apflow.core.extensions.types import ExtensionCategory
@@ -149,7 +167,13 @@ def _register_extension(
                 f"Extension '{ext_id}' already registered in category '{category.value}'. "
                 f"Returning previously registered class."
             )
-            return getattr(existing, "executor_class", cls)
+            # existing is the registered Extension *instance* (a metadata
+            # template), which has no "executor_class" attribute — the real
+            # class lives in the registry's separate class index. Reaching
+            # for the wrong attribute here always missed, silently falling
+            # back to the fresh `cls` argument and losing whatever hooks a
+            # prior registration attached to the actually-registered class.
+            return registry.get_executor_class(ext_id) or cls
 
     # Register extension
     try:

@@ -139,11 +139,19 @@ class ExtensionRegistry:
             # This works for ExecutableTask without importing it directly
             # Protocol check: verify extension has required methods
             if hasattr(extension, "execute") and hasattr(extension, "get_input_schema"):
+                # factory and executor_class are independent, not mutually
+                # exclusive: create_executor_instance() checks factory first
+                # for instantiation either way, but callers like
+                # @executor_register() supply both, and other consumers
+                # (e.g. add_executor_hook()) need the real class regardless
+                # of whether a factory is also configured. Treating them as
+                # elif previously left _executor_classes empty for every
+                # decorator-registered executor whenever a factory was given.
                 if factory:
                     self._factory_functions[extension.id] = factory
-                elif executor_class:
+                if executor_class:
                     self._executor_classes[extension.id] = executor_class
-                else:
+                elif not factory:
                     # If extension is already an ExecutorLike instance, use its class
                     self._executor_classes[extension.id] = extension.__class__
 
@@ -166,6 +174,23 @@ class ExtensionRegistry:
             executor = registry.get_by_id("stdio_executor")
         """
         return self._by_id.get(extension_id)
+
+    def get_executor_class(self, extension_id: str) -> Optional[Type[Any]]:
+        """
+        Get the registered executor class for an extension ID, if any.
+
+        This is separate from get_by_id(), which returns the registered
+        Extension *instance* (a metadata template, possibly wrapped in
+        CategoryOverride) — not the class used to instantiate new executors.
+
+        Args:
+            extension_id: Extension ID
+
+        Returns:
+            The executor class, or None if not registered (e.g. the
+            extension uses a factory function instead of a class).
+        """
+        return self._executor_classes.get(extension_id)
 
     def get_by_type(self, category: ExtensionCategory, ext_type: str) -> Optional[Extension]:
         """
@@ -506,17 +531,24 @@ class ExtensionRegistry:
         # Get executor class from registry
         executor_class = self._executor_classes.get(executor_id)
         if not executor_class:
-            # Try to get from extension instance
-            # The extension is an instance, so we can get its class
-            if hasattr(extension, "__class__"):
+            # Fall back to the extension instance's own class. If it's a
+            # CategoryOverride wrapper (as produced by @executor_register()),
+            # its __class__ is the wrapper itself — a throwaway class local
+            # to that one registration call, never used to instantiate
+            # executors at execution time, so hooks attached to it would
+            # never be invoked. Unwrap it the same way
+            # create_executor_instance() already does.
+            if hasattr(extension, "_wrapped"):
+                executor_class = extension._wrapped.__class__
+            elif hasattr(extension, "__class__"):
                 executor_class = extension.__class__
-                # Store it for future use
-                self._executor_classes[executor_id] = executor_class
             else:
                 raise ValueError(
                     f"Cannot find executor class for '{executor_id}'. "
                     f"Make sure the executor was registered using @executor_register() decorator."
                 )
+            # Store it for future use
+            self._executor_classes[executor_id] = executor_class
 
         # Store hooks in executor class metadata
         if not hasattr(executor_class, "_executor_hooks"):

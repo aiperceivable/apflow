@@ -129,7 +129,13 @@ def get_allowed_executor_ids() -> Optional[set[str]]:
             else:
                 logger.warning(f"Unknown executor ID in APFLOW_EXTENSIONS_IDS: '{executor_id}'")
 
-    return allowed_ids if allowed_ids else None
+    # A restriction was explicitly configured (extensions_env and/or
+    # extensions_ids_env is set). If every entry turned out to be invalid,
+    # fail closed by returning the empty set (deny all) rather than falling
+    # back to None (allow all) — an empty allow-list here is almost always a
+    # misconfiguration (e.g. a typo), and failing open would silently defeat
+    # the administrator's intent to restrict which executors can run.
+    return allowed_ids
 
 
 # Track whether all extensions have been loaded

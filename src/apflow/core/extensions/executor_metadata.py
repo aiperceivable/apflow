@@ -62,11 +62,14 @@ def get_executor_metadata(executor_id: str) -> Optional[Dict[str, Any]]:
         executor_instance = registry.create_executor_instance(executor_id, inputs={})
     except Exception as e:
         logger.warning(f"Failed to create executor instance for '{executor_id}': {e}")
-        # Fallback: return basic metadata from extension
+        # Fallback: return basic metadata from extension. Use getattr with
+        # defaults throughout — an extension lacking one of these attributes
+        # must degrade to a best-effort dict, not raise (see docstring's
+        # documented None-only failure contract).
         return {
-            "id": extension.id,
-            "name": extension.name,
-            "description": extension.description or "",
+            "id": getattr(extension, "id", executor_id),
+            "name": getattr(extension, "name", executor_id),
+            "description": getattr(extension, "description", "") or "",
             "input_schema": {},
             "examples": getattr(extension, "examples", []) or [],
             "tags": getattr(extension, "tags", []) or [],
@@ -82,9 +85,9 @@ def get_executor_metadata(executor_id: str) -> Optional[Dict[str, Any]]:
 
     # Collect metadata
     metadata = {
-        "id": extension.id,
-        "name": extension.name,
-        "description": extension.description or "",
+        "id": getattr(extension, "id", executor_id),
+        "name": getattr(extension, "name", executor_id),
+        "description": getattr(extension, "description", "") or "",
         "input_schema": input_schema,
         "examples": getattr(extension, "examples", []) or [],
         "tags": getattr(extension, "tags", []) or [],
@@ -193,7 +196,13 @@ def get_all_executor_metadata() -> Dict[str, Dict[str, Any]]:
 
     for executor in executors:
         executor_id = executor.id
-        metadata = get_executor_metadata(executor_id)
+        try:
+            metadata = get_executor_metadata(executor_id)
+        except Exception as e:
+            # One bad executor must not abort metadata collection for every
+            # other registered executor.
+            logger.warning(f"Skipping executor '{executor_id}' in metadata collection: {e}")
+            continue
         if metadata:
             all_metadata[executor_id] = metadata
 

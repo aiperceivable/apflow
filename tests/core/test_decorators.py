@@ -314,6 +314,117 @@ class TestExtensionDecorator:
         assert executor_instance is not None
         assert executor_instance.custom_initialized is True
 
+    def test_property_based_metadata_survives_template_fallback(self):
+        """Regression: when cls(inputs={}) fails during template creation
+        (e.g. __init__ requires an extra positional arg), the fallback path
+        assigned template.id/.name/.description directly on the instance.
+        If a subclass declares these as read-only @property (a valid
+        implementation of the ExecutableTask interface contract), that
+        assignment either crashed (no setter) or stored the property
+        descriptor object itself instead of a string. A property's computed
+        value is unobtainable without a real instance (which is exactly what
+        creation just failed to produce), so the correct fix falls back to a
+        plain string default — the key requirement is that registration
+        succeeds and id/name/description are genuine strings, never the
+        property descriptor object itself. (Review CRITICAL #31)
+        """
+        from apflow.core.base import BaseTask
+        from apflow.core.extensions import get_registry
+
+        @executor_register()
+        class PropertyBasedExecutor(BaseTask):
+            category = ExtensionCategory.EXECUTOR
+
+            def __init__(self, required_arg, inputs=None):
+                # Requires a positional arg, so cls(inputs={}) always fails
+                # during template creation, forcing the fallback path.
+                super().__init__(inputs=inputs or {})
+                self.required_arg = required_arg
+
+            @property
+            def id(self):
+                return "property_based_executor"
+
+            @property
+            def name(self):
+                return "Property Based Executor"
+
+            @property
+            def description(self):
+                return "Uses computed properties for identity"
+
+            async def execute(self, inputs):
+                return {"result": "test"}
+
+            def get_input_schema(self):
+                return {"type": "object"}
+
+        registry = get_registry()
+        extension = registry.get_by_id("propertybasedexecutor")
+        assert extension is not None
+        assert isinstance(extension.id, str)
+        assert isinstance(extension.name, str)
+        assert isinstance(extension.description, str)
+
+    def test_reregistration_returns_registry_recognized_class_for_hook_attachment(self):
+        """Regression: idempotent re-registration (override=False) looked up
+        a nonexistent 'executor_class' attribute on the registered Extension
+        instance (always missing — the real class lives in a separate
+        registry index), so getattr's fallback always returned the fresh
+        cls argument instead of the class the registry actually uses. Hooks
+        attached on a second @executor_register() call for the same id
+        landed on a throwaway duplicate class, never the one instantiated
+        at execution time. (Review CRITICAL #32)
+        """
+        from apflow.core.base import BaseTask
+        from apflow.core.extensions import get_registry
+
+        async def hook_v1(executor, task, inputs):
+            pass
+
+        @executor_register(pre_hook=hook_v1)
+        class ReregisteredExecutorV1(BaseTask):
+            id = "reregistered_executor"
+            name = "Reregistered Executor"
+            description = "test"
+            category = ExtensionCategory.EXECUTOR
+
+            def __init__(self, inputs=None):
+                super().__init__(inputs=inputs or {})
+
+            async def execute(self, inputs):
+                return {"result": "ok"}
+
+            def get_input_schema(self):
+                return {"type": "object"}
+
+        async def hook_v2(executor, task, inputs):
+            pass
+
+        # Second decoration of the same id, without override — must not
+        # register again, but its hook must still land on the class the
+        # registry actually recognizes.
+        @executor_register(pre_hook=hook_v2)
+        class ReregisteredExecutorV2(BaseTask):
+            id = "reregistered_executor"
+            name = "Reregistered Executor"
+            description = "test"
+            category = ExtensionCategory.EXECUTOR
+
+            def __init__(self, inputs=None):
+                super().__init__(inputs=inputs or {})
+
+            async def execute(self, inputs):
+                return {"result": "ok"}
+
+            def get_input_schema(self):
+                return {"type": "object"}
+
+        registry = get_registry()
+        actual_class = registry.get_executor_class("reregistered_executor")
+        assert actual_class is not None
+        assert actual_class._executor_hooks["pre_hook"] is hook_v2
+
 
 class TestDecoratorIntegration:
     """Test integration of decorators with real components"""

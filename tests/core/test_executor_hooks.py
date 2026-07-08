@@ -174,6 +174,47 @@ class TestExecutorHooks:
         assert "pre_hook" in TestExecutor._executor_hooks
         assert TestExecutor._executor_hooks["pre_hook"] == runtime_pre_hook
 
+    def test_add_executor_hook_reaches_real_class_not_wrapper(self):
+        """Regression: add_executor_hook()'s fallback (when _executor_classes
+        has no entry for the id) used extension.__class__, which for a
+        decorator-registered executor is the disconnected CategoryOverride
+        wrapper defined inside _register_extension — a throwaway class
+        never used to instantiate real executor instances, so the hook was
+        never actually invoked at execution time. (Review CRITICAL #35)
+        """
+
+        @executor_register()
+        class WrapperFallbackExecutor(BaseTask):
+            id = "wrapper_fallback_executor"
+            name = "Wrapper Fallback Executor"
+            description = "test"
+
+            def __init__(self, inputs=None):
+                super().__init__(inputs=inputs or {})
+
+            async def execute(self, inputs):
+                return {"result": "ok"}
+
+            def get_input_schema(self):
+                return {"type": "object"}
+
+        registry = get_registry()
+        # Force add_executor_hook into its fallback branch, simulating any
+        # registration path where _executor_classes has no entry for this id.
+        registry._executor_classes.pop("wrapper_fallback_executor", None)
+
+        def runtime_hook(executor, task, inputs):
+            return None
+
+        add_executor_hook("wrapper_fallback_executor", "pre_hook", runtime_hook)
+
+        # The hook must land on the REAL executor class — proven by actually
+        # instantiating a fresh executor and checking its class carries it.
+        instance = registry.create_executor_instance("wrapper_fallback_executor", inputs={})
+        assert instance is not None
+        assert hasattr(type(instance), "_executor_hooks")
+        assert type(instance)._executor_hooks.get("pre_hook") is runtime_hook
+
     def test_add_executor_hook_invalid_type(self):
         """Test that invalid hook type raises error"""
 
