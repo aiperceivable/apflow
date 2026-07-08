@@ -209,10 +209,11 @@ class TaskTreeNode:
         Calculate overall status of the task tree
 
         Returns:
-            Status string: "completed", "failed", "in_progress", or "pending"
+            Status string: "completed", "failed", "in_progress", "cancelled", or "pending"
             - "completed": All children are completed
             - "failed": At least one child has failed
             - "in_progress": At least one child is in progress
+            - "cancelled": At least one child was cancelled (and none failed/in progress)
             - "pending": Otherwise
         """
         if not self.children:
@@ -226,6 +227,8 @@ class TaskTreeNode:
             return "failed"
         elif any(s == "in_progress" for s in statuses):
             return "in_progress"
+        elif any(s == "cancelled" for s in statuses):
+            return "cancelled"
         else:
             return "pending"
 

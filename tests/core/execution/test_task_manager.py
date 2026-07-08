@@ -259,6 +259,71 @@ class TestTaskManager:
         assert status == "failed"
 
     @pytest.mark.asyncio
+    async def test_task_tree_node_calculate_status_cancelled(self, sync_db_session):
+        """Regression: calculate_status() never handled a 'cancelled' child
+        status, silently falling through to 'pending' — which then misfired
+        the on_tree_failed hook with a misleading 'status: pending' message
+        for a tree that was actually cancelled. (Review CRITICAL #49)"""
+        parent_task = TaskModel(
+            id="parent-cancelled",
+            user_id="test-user",
+            name="Parent Task",
+            status="pending",
+            has_children=True,
+        )
+        child1 = TaskModel(
+            id="child-cancelled-1",
+            user_id="test-user",
+            parent_id="parent-cancelled",
+            name="Child 1",
+            status="completed",
+        )
+        child2 = TaskModel(
+            id="child-cancelled-2",
+            user_id="test-user",
+            parent_id="parent-cancelled",
+            name="Child 2",
+            status="cancelled",
+        )
+
+        parent_node = TaskTreeNode(task=parent_task)
+        parent_node.add_child(TaskTreeNode(task=child1))
+        parent_node.add_child(TaskTreeNode(task=child2))
+
+        assert parent_node.calculate_status() == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_task_tree_node_calculate_status_failed_beats_cancelled(self, sync_db_session):
+        """A genuine failure must still take priority over a cancellation."""
+        parent_task = TaskModel(
+            id="parent-mixed",
+            user_id="test-user",
+            name="Parent Task",
+            status="pending",
+            has_children=True,
+        )
+        child1 = TaskModel(
+            id="child-mixed-1",
+            user_id="test-user",
+            parent_id="parent-mixed",
+            name="Child 1",
+            status="failed",
+        )
+        child2 = TaskModel(
+            id="child-mixed-2",
+            user_id="test-user",
+            parent_id="parent-mixed",
+            name="Child 2",
+            status="cancelled",
+        )
+
+        parent_node = TaskTreeNode(task=parent_task)
+        parent_node.add_child(TaskTreeNode(task=child1))
+        parent_node.add_child(TaskTreeNode(task=child2))
+
+        assert parent_node.calculate_status() == "failed"
+
+    @pytest.mark.asyncio
     async def test_are_dependencies_satisfied_no_dependencies(self, sync_db_session):
         """Test dependency checking with no dependencies"""
         task_manager = TaskManager(sync_db_session)
