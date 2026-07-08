@@ -126,8 +126,8 @@ class TaskModel(Base):
 
     # === Task Orchestration (TaskManager) ===
     priority = Column(
-        Integer, default=2
-    )  # Priority level: 0=urgent (highest), 1=high, 2=normal (default), 3=low (lowest). ASC order: smaller numbers execute first.
+        Integer, default=1
+    )  # Priority level: 0=urgent (highest), 1=high (default), 2=normal, 3=low (lowest). ASC order: smaller numbers execute first. NOTE: create() always injects default_values()['priority']=1, so this column default aligns with it.
     dependencies = Column(
         JSON, nullable=True
     )  # Task dependencies: [{"id": "uuid", "required": true}]

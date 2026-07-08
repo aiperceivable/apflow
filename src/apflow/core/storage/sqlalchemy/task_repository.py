@@ -5,7 +5,6 @@ This module provides a TaskRepository class that encapsulates all database opera
 for tasks. TaskManager should use TaskRepository instead of directly operating on db session.
 """
 
-from asyncio import Task
 from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
@@ -143,8 +142,12 @@ class TaskRepository:
             result = await self.db.execute(stmt)
             return result.scalars().all()
         except Exception as e:
+            # Re-raise instead of returning []: this method feeds recursive tree
+            # traversal (build_task_tree / get_all_tasks_in_tree / children listing),
+            # where an empty result on a transient DB error would silently produce a
+            # truncated tree that looks complete to the caller.
             logger.error(f"Error getting child tasks for parent {parent_id}: {str(e)}")
-            return []
+            raise
 
     async def get_root_task(self, task: TaskModelType) -> TaskModelType:
         """
@@ -280,19 +283,10 @@ class TaskRepository:
         # CRITICAL: get_tasks_by_tree_id now uses expire_all() to ensure fresh data
         # in concurrent environments, but we should still refresh tasks before building tree
         # to ensure we have the absolute latest state from database
+        # get_tasks_by_tree_id already expire_all()s and re-SELECTs committed-fresh
+        # rows, so a per-task refresh() here would only re-issue N redundant queries
+        # (the N+1 the single-query fast path exists to avoid).
         tasks = await self.get_tasks_by_tree_id(tree_id)
-
-        # CRITICAL: Refresh all tasks to ensure we have latest state from database
-        # This is important in concurrent environments where task status may have changed
-        # between query and tree building
-        for task in tasks:
-            try:
-                await self.db.refresh(task)
-            except Exception as refresh_error:
-                # If refresh fails (e.g., task was deleted), log and continue
-                logger.warning(
-                    f"Failed to refresh task {task.id} in build_task_tree_by_tree_id: {refresh_error}"
-                )
 
         # Find root task - required for tree building
         root_task = [task for task in tasks if task.parent_id is None]
@@ -303,61 +297,55 @@ class TaskRepository:
         # Lazy import to avoid circular dependency
         from apflow.core.types import TaskTreeNode
 
-        # Build tree structure starting from root task
+        # Index children by parent once → O(N) assembly instead of scanning the
+        # full flat list per node (O(N^2)).
+        children_by_parent: Dict[str, List[TaskModelType]] = {}
+        for t in tasks:
+            children_by_parent.setdefault(str(t.parent_id), []).append(t)
+
+        def add_children(node: "TaskTreeNode", visited: Set[str]) -> None:
+            node_id = str(node.task.id)
+            if node_id in visited:
+                # Defensive: a corrupt parent_id cycle would otherwise loop forever.
+                logger.warning(f"Cycle detected under tree_id {tree_id} at task {node_id}.")
+                return
+            visited.add(node_id)
+            for child in children_by_parent.get(node_id, []):
+                child_node = TaskTreeNode(task=child)
+                node.add_child(child_node)
+                add_children(child_node, visited)
+
         task_tree = TaskTreeNode(task=root_task[0])
-
-        def add_children(task: Task, task_tree: TaskTreeNode):
-            """
-            Recursively add child tasks to the tree structure.
-
-            For each task in the flat list, if it has the current task as parent,
-            add it as a child node. If the child has children (has_children=True),
-            recursively build its subtree before adding.
-
-            Args:
-                task: Current parent task to find children for
-                task_tree: Current tree node to add children to
-            """
-            for child in tasks:
-                # Check if this task is a child of the current parent task
-                if str(child.parent_id) == str(task.id):
-                    if bool(child.has_children):
-                        # Child has children: create subtree and recursively add grandchildren
-                        child_task_tree = TaskTreeNode(task=child)
-                        add_children(child, child_task_tree)
-                        # CRITICAL: Add the child subtree to the parent tree
-                        # This was missing in the original implementation
-                        task_tree.add_child(child_task_tree)
-                    else:
-                        # Leaf node: add directly without recursion
-                        task_tree.add_child(TaskTreeNode(task=child))
-
-        # Start recursive tree building from root task
-        add_children(root_task[0], task_tree)
+        add_children(task_tree, set())
 
         return task_tree
 
-    async def build_task_tree(self, task: TaskModelType) -> "TaskTreeNode":
+    async def build_task_tree(
+        self, task: TaskModelType, _visited: Optional[Set[str]] = None
+    ) -> "TaskTreeNode":
         """
         Build TaskTreeNode for a task with its children (recursive)
 
         Args:
             task: Root task (or custom TaskModel subclass)
+            _visited: Internal cycle-guard set of task ids already on the recursion
+                path; callers should not pass it.
 
         Returns:
             TaskTreeNode instance with all children recursively built
         """
         task_tree_id = getattr(task, "task_tree_id", None)
         is_root_task = task.parent_id is None
-        if is_root_task and task_tree_id:
+        if _visited is None and is_root_task and task_tree_id:
             try:
                 # Fast path: single query to get all tasks in tree
                 task_tree = await self.build_task_tree_by_tree_id(task_tree_id)
                 logger.debug(f"✅ [OPTIMIZED] Used task_tree_id fast path for task {task.id}")
                 return task_tree
-            except (ValueError, AttributeError) as e:
-                # task_tree_id exists but tree build failed (data inconsistency)
-                # Fall back to slow path
+            except (ValueError, AttributeError, ValidationError) as e:
+                # task_tree_id exists but tree build failed (data inconsistency).
+                # ValidationError ('Root task not found for tree_id') must be caught
+                # too, or the documented fall-back to the slow path never runs.
                 logger.warning(
                     f"⚠️ [FALLBACK] Fast path failed for task {task.id} with task_tree_id={task_tree_id}: {str(e)}. "
                     f"Falling back to slow path (get_root_task + build_task_tree)."
@@ -365,6 +353,19 @@ class TaskRepository:
 
         # Lazy import to avoid circular dependency
         from apflow.core.types import TaskTreeNode
+
+        # Guard the downward parent_id recursion against cycles (get_root_task
+        # guards the upward walk; without this a self/mutually-parented row would
+        # recurse without bound).
+        if _visited is None:
+            _visited = set()
+        task_id_str = str(task.id)
+        if task_id_str in _visited:
+            logger.warning(
+                f"Cycle detected in parent_id chain at task {task.id}; stopping tree recursion."
+            )
+            return TaskTreeNode(task=task)
+        _visited.add(task_id_str)
 
         # Get all child tasks
         child_tasks = await self.get_child_tasks_by_parent_id(task.id)
@@ -374,7 +375,7 @@ class TaskRepository:
 
         # Add child tasks recursively
         for child_task in child_tasks:
-            child_node = await self.build_task_tree(child_task)
+            child_node = await self.build_task_tree(child_task, _visited)
             task_node.add_child(child_node)
 
         return task_node
@@ -513,8 +514,7 @@ class TaskRepository:
                 # none_as_null=False), not SQL NULL, so a plain COALESCE
                 # never fires; NULLIF converts that scalar 'null' to a real
                 # SQL NULL first so COALESCE can substitute '{}'.
-                stmt = text(
-                    f"""
+                stmt = text(f"""
                     UPDATE {table_name}
                     SET token_usage = (
                         jsonb_set(
@@ -532,16 +532,14 @@ class TaskRepository:
                         )
                     )::json
                     WHERE id = :task_id
-                    """
-                )
+                    """)
             else:
                 # A never-set JSON column is stored as the text 'null' (see
                 # the PostgreSQL branch comment above), which json_set()
                 # silently fails to update in place (SQLite returns the
                 # scalar unchanged rather than erroring) — NULLIF converts it
                 # to a real SQL NULL first so COALESCE substitutes '{}'.
-                stmt = text(
-                    f"""
+                stmt = text(f"""
                     UPDATE {table_name}
                     SET token_usage = json_set(
                         COALESCE(NULLIF(token_usage, 'null'), '{{}}'),
@@ -550,8 +548,7 @@ class TaskRepository:
                         '$.total', COALESCE(json_extract(token_usage, '$.total'), 0) + :total_delta
                     )
                     WHERE id = :task_id
-                    """
-                )
+                    """)
 
             result = await self.db.execute(stmt, params)
             await self.db.commit()
@@ -1370,10 +1367,16 @@ class TaskRepository:
             keep_fields = default_keep_fields
 
         async def resolve_task(task: TaskModelType) -> Optional[TaskModelType]:
-            # Recursively resolve link
+            # Recursively resolve link, guarding against a link cycle (A -> B -> A)
+            # that would otherwise loop forever.
+            seen_link_ids: Set[str] = set()
             while getattr(task, "origin_type", None) == TaskOriginType.link and getattr(
                 task, "original_task_id", None
             ):
+                current_id = str(task.id)
+                if current_id in seen_link_ids:
+                    raise ValidationError(f"Link cycle detected while resolving task {task.id}")
+                seen_link_ids.add(current_id)
                 original_task = await self.get_task_by_id(task.original_task_id)
                 if not original_task:
                     logger.error(f"Original task not found for id {task.original_task_id}")
@@ -1390,6 +1393,18 @@ class TaskRepository:
             }
             return original_task.copy(override=override)
 
+        # Bulk-load the tree's rows once and index children by parent_id, so the
+        # per-node child fetch is an in-memory lookup instead of an N+1 query per
+        # node. merge_task keeps the link node's own id, so a resolved link node
+        # still matches its children by position within this tree. Link originals
+        # (which may live in another tree) are still fetched individually — that is
+        # inherent to links, not the tree-structure N+1 this fixes.
+        tree_id = getattr(root_task, "task_tree_id", None)
+        children_by_parent: Dict[str, List[TaskModelType]] = {}
+        if tree_id:
+            for t in await self.get_tasks_by_tree_id(tree_id):
+                children_by_parent.setdefault(str(t.parent_id), []).append(t)
+
         async def build_tree(task: TaskModelType) -> TaskTreeNode:
             if getattr(task, "origin_type", None) == TaskOriginType.link and getattr(
                 task, "original_task_id", None
@@ -1399,7 +1414,10 @@ class TaskRepository:
             else:
                 merged_task = task
             node = TaskTreeNode(task=merged_task)
-            child_tasks = await self.get_child_tasks_by_parent_id(merged_task.id)
+            if tree_id:
+                child_tasks = children_by_parent.get(str(merged_task.id), [])
+            else:
+                child_tasks = await self.get_child_tasks_by_parent_id(merged_task.id)
             for child in child_tasks:
                 child_node = await build_tree(child)
                 node.add_child(child_node)
