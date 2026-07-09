@@ -24,8 +24,8 @@ RUN useradd -m -u 1000 appuser && \
 
 USER appuser
 
-# Expose port for A2A server
+# Expose port for the unified REST + A2A + MCP server
 EXPOSE 8000
 
-# Default: start Python (users provide their own entry script)
-CMD ["python"]
+# Default: start the unified apflow service
+CMD ["apflow", "serve", "--host", "0.0.0.0", "--port", "8000", "--all"]

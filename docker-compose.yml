@@ -3,9 +3,12 @@
 # Standalone (default — SQLite storage):
 #   docker compose up -d
 #
-# With PostgreSQL (distributed/production):
+# With PostgreSQL storage:
 #   APFLOW_DATABASE_URL=postgresql+asyncpg://user:pass@db-host/apflow \
 #   docker compose up -d
+#
+# Distributed workers are started with `apflow worker`, not this standalone
+# service command.
 #
 services:
   apflow:
@@ -14,18 +17,11 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "${APFLOW_API_PORT:-8000}:${APFLOW_API_PORT:-8000}"
-    env_file:
-      - path: .env
-        required: false
+      - "${APFLOW_API_PORT:-8000}:8000"
     volumes:
       - apflow-data:/app/.data
     environment:
       - APFLOW_LOG_LEVEL=${APFLOW_LOG_LEVEL:-INFO}
-      # Cluster (disabled by default = standalone with SQLite)
-      - APFLOW_CLUSTER_ENABLED=${APFLOW_CLUSTER_ENABLED:-false}
-      - APFLOW_NODE_ROLE=${APFLOW_NODE_ROLE:-auto}
-      - APFLOW_NODE_ID=${APFLOW_NODE_ID:-}
       - APFLOW_DATABASE_URL=${APFLOW_DATABASE_URL:-}
       # LLM keys
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
