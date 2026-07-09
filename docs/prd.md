@@ -1,5 +1,5 @@
 ---
-description: Product requirements for apflow v2 as an AI-perceivable distributed orchestration engine.
+description: Historical product requirements for apflow v2 as an AI-perceivable distributed orchestration engine.
 ---
 
 # apflow v2 — Product Requirements Document
@@ -13,7 +13,11 @@ description: Product requirements for apflow v2 as an AI-perceivable distributed
 **Version:** 0.21.0
 **Author:** apflow team
 **Date:** 2026-06-25
-**Status:** Active
+**Status:** Historical planning document
+
+> **Current source of truth:** This PRD records the v0.20/v0.21 planning
+> rationale. For the current install surface, CLI commands, dependencies, and
+> runtime behavior, use `README.md`, `pyproject.toml`, and the feature guides.
 
 ---
 
@@ -149,7 +153,10 @@ apflow v2 registers its capabilities as apcore Modules. The apcore ecosystem aut
 
 #### F-001: Project Slimming
 
-**Description:** Remove all self-built protocol layers, CLI, and extensions that are superseded by the apcore ecosystem or out of scope for v2.
+**Description:** Remove legacy self-built protocol layers, the old standalone
+CLI package, and extensions that are superseded by the apcore ecosystem or out
+of scope for v2. The current implementation keeps thin API and CLI surfaces
+backed by apcore adapters.
 
 **What to delete (~19,938 lines, ~76 files):**
 
@@ -174,13 +181,14 @@ apflow v2 registers its capabilities as apcore Modules. The apcore ecosystem aut
 | `extensions/stdio/` | ~566 | 2 | Dropped (out of core scope) |
 
 **What to update:**
-- `pyproject.toml`: remove deleted extras (`a2a`, `cli`, `graphql`, `crewai`, `llm`, `grpc`, `tools`, `standard`, `all`); add `apcore>=0.14.0`, `apcore-mcp>=0.10.1`, `apcore-a2a`, `apcore-cli>=0.3.0` as dependencies or extras
-- `__init__.py`: update description to "AI Agent Production Middleware", version to `0.20.0`
-- Remove `project.scripts` entries (`apflow`, `apflow-server`)
+- `pyproject.toml`: remove deleted self-built protocol/integration extras (`a2a`, `graphql`, `crewai`, `llm`, `grpc`, `tools`, `standard`, `llm-key-config`, `mcp`) and add the apcore ecosystem dependencies.
+- Preserve the `all` aggregate extra for supported optional features (`postgres`, `scheduling`, `email`).
+- Preserve the `apflow` CLI entry point; the CLI is now the apcore-cli-backed operator surface for humans.
+- `__init__.py`: update version and public description to the current "AI-Perceivable Distributed Orchestration" positioning.
 
 **Acceptance criteria:**
 1. All listed directories are deleted from the source tree.
-2. `pyproject.toml` has no references to deleted modules.
+2. `pyproject.toml` has no references to deleted modules, while preserving supported optional extras and the `apflow` CLI script.
 3. `pip install apflow` succeeds with only core + apcore dependencies.
 4. Remaining test suite passes (tests for deleted modules are also removed).
 5. Total source line count drops from ~48.5k to ~25.2k.

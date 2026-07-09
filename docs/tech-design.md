@@ -1,5 +1,5 @@
 ---
-description: Technical design for apflow v2 architecture, storage, apcore integration, durability, governance, and implementation phases.
+description: Historical technical design for apflow v2 architecture, storage, apcore integration, durability, governance, and implementation phases.
 ---
 
 # apflow v2 -- Technical Design Document
@@ -11,8 +11,13 @@ description: Technical design for apflow v2 architecture, storage, apcore integr
 **Version:** 0.21.0
 **Author:** apflow team
 **Date:** 2026-06-25
-**Status:** Active
+**Status:** Historical planning document
 **PRD Reference:** `docs/prd.md`
+
+> **Current source of truth:** This design records the v0.20/v0.21 migration
+> plan. For current runtime commands, dependencies, and Docker behavior, use
+> `README.md`, `pyproject.toml`, `Dockerfile`, `docker-compose.yml`, and the
+> focused feature guides.
 
 ---
 
@@ -26,7 +31,8 @@ AI agents built with LangGraph, CrewAI, OpenAI Agents SDK, and similar framework
 
 apflow v2 repositions as framework-agnostic production middleware. It:
 
-1. **Removes** all self-built protocol layers, CLI, and out-of-scope extensions (17,561 lines, 64 files) -- replaced by the apcore ecosystem.
+1. **Removes** legacy self-built protocol layers, the old standalone CLI package,
+   and out-of-scope extensions -- replaced by thin apcore-backed API/CLI surfaces.
 2. **Adds** a bridge layer that registers apflow capabilities as apcore Modules, gaining automatic MCP, A2A, and CLI exposure.
 3. **Adds** durable execution (checkpoint/resume, retry with backoff, circuit breaker) for long-running agent tasks.
 4. **Adds** cost governance (token budgets, cost policies, model downgrade chains, usage reporting).
@@ -520,8 +526,8 @@ All three existing migrations (001, 002, 003) require this change. The pattern i
 ```toml
 [project]
 name = "apflow"
-version = "0.21.0"
-description = "AI Agent Production Middleware"
+version = "0.22.0"
+description = "AI-Perceivable Distributed Orchestration"
 requires-python = ">=3.11"
 
 # Core dependencies
@@ -533,12 +539,11 @@ dependencies = [
     "alembic>=1.13.0",
     # SQLite is Python stdlib -- no additional dependency
     # apcore ecosystem is core (MCP/A2A/CLI are standard apflow features, not extras).
-    # apcore-a2a 0.4.2 implements A2A protocol 1.0; apcore 0.25.0 is its required floor.
-    "apcore>=0.25.0",
-    "apcore-toolkit>=0.9.1",
-    "apcore-mcp>=0.17.0",
-    "apcore-a2a>=0.4.2",
-    "apcore-cli>=0.10.2",
+    "apcore>=0.22.0",
+    "apcore-toolkit>=0.8.0",
+    "apcore-mcp>=0.15.0",
+    "apcore-a2a>=0.4.0",
+    "apcore-cli>=0.10.0",
 ]
 
 # Storage
@@ -551,6 +556,9 @@ postgres = [
 # Executor-specific extras (preserved)
 scheduling = ["croniter>=1.0.0"]
 email = ["aiosmtplib>=3.0.0"]
+
+# Aggregate extra for supported optional features
+all = ["apflow[postgres,scheduling,email]"]
 
 # Documentation
 docs = [
@@ -575,20 +583,22 @@ dev = [
     "pre-commit>=3.0.0",
 ]
 
-# Delete these extras entirely:
-# a2a, cli, crewai, llm, grpc, graphql, tools, standard, all, llm-key-config, mcp
+# Delete these obsolete extras entirely:
+# a2a, cli, crewai, llm, grpc, graphql, tools, standard, llm-key-config, mcp
 
-# Delete project.scripts entirely:
-# [project.scripts] section removed -- no apflow or apflow-server entry points
+# Keep the apflow CLI entry point. It is now the apcore-cli-backed human
+# operator surface.
+[project.scripts]
+apflow = "apflow.cli:main"
 ```
 
 #### `__init__.py` Updates
 
 In `src/apflow/__init__.py`:
 
-1. Update `__version__` from `"0.18.2"` to `"0.20.0"`.
-2. Update module docstring to replace "Task Orchestration and Execution Framework" with "AI Agent Production Middleware".
-3. Remove references to "CrewAI", "A2A Protocol Server", "CLI tools" from docstring.
+1. Keep `__version__` aligned with the package version in `pyproject.toml`.
+2. Update module docstring to use "AI-Perceivable Distributed Orchestration".
+3. Remove references to deleted legacy integrations such as CrewAI-specific code.
 4. Remove `"create_storage"` and `"get_default_storage"` from `__all__` (deprecated backward-compat).
 
 #### Import Reference Cleanup
@@ -597,8 +607,8 @@ After deletion, grep the preserved codebase for any imports of deleted modules. 
 
 | Pattern to Search | Expected Locations | Action |
 |---|---|---|
-| `from apflow.api` | Possibly in test files | Delete test files for deleted modules |
-| `from apflow.cli` | Possibly in test files | Delete test files for deleted modules |
+| `from apflow.api.a2a`, `from apflow.api.mcp`, `from apflow.api.graphql` | Legacy tests or conftest files | Remove references to deleted legacy protocol packages |
+| `from apflow.cli.main` | Legacy CLI tests | Remove references to the deleted legacy CLI package |
 | `from apflow.extensions.crewai` | `core/execution/task_executor.py` lazy imports | Remove lazy import branch |
 | `from apflow.extensions.llm` | Scanner cache, test files | Remove references |
 | `from apflow.extensions.generate` | Scanner cache, test files | Remove references |

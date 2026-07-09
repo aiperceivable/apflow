@@ -12,11 +12,31 @@ Get running in 5 minutes.
 # A2A HTTP server (for services and agents)
 apflow serve --explorer
 
+# Unified REST + A2A + MCP server
+apflow serve --all
+
 # Or MCP server (for Claude/Cursor)
 apflow mcp
 ```
 
 Open http://localhost:8000/explorer to see all available tools.
+
+### Docker Compose
+
+The included Compose file starts the unified server on container port `8000`:
+
+```bash
+docker compose up -d
+
+# Optional: publish a different host port
+APFLOW_API_PORT=9000 docker compose up -d
+
+# Optional: use PostgreSQL storage
+APFLOW_DATABASE_URL=postgresql+asyncpg://user:pass@db-host/apflow docker compose up -d
+```
+
+For distributed execution, start worker nodes separately with
+`apflow worker --db <postgres-url>`.
 
 ## 2. Create and Run Tasks (Python)
 
