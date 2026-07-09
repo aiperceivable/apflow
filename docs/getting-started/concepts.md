@@ -1,3 +1,7 @@
+---
+description: Core concepts for apflow tasks, task trees, dependencies, executors, AI-perceivable modules, and creation modes.
+---
+
 # Core Concepts
 
 ## What is apflow?
@@ -26,7 +30,7 @@ Root Task (aggregates everything)
 └── Step C (processing)
 ```
 
-The tree structure enables powerful operations: **copy**, **link**, **archive**, and **mixed** — you can clone entire workflows, reference completed results, or freeze snapshots for audit.
+The tree structure enables powerful operations: **copy**, **link**, **archive**, and **mixed** — you can clone entire workflows, reference completed results without duplicating payload data, or freeze completed workflow rows for audit.
 
 ## Dependencies (Execution Order)
 
@@ -73,7 +77,7 @@ This is what makes apflow "AI-Perceivable" — the orchestration engine is trans
 | Mode | Use When |
 |------|----------|
 | **Create** | Building a new workflow from scratch |
-| **Link** | Referencing a completed workflow (read-only, zero storage) |
+| **Link** | Referencing a completed workflow without duplicating payload data |
 | **Copy** | Cloning a workflow to re-run with different parameters |
-| **Archive** | Freezing a workflow snapshot for audit/compliance |
+| **Archive** | Freezing an existing completed workflow for audit/compliance |
 | **Mixed** | Re-running only some steps, linking others |

@@ -1,3 +1,7 @@
+---
+description: Feature specification for apflow checkpointing, retry, circuit breakers, and durable task execution.
+---
+
 # Feature Spec: Durable Execution (F-003)
 
 **Feature ID:** F-003

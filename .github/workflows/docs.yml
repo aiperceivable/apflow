@@ -37,6 +37,13 @@ jobs:
         run: |
           # Copy README as index page
           cp README.md docs/index.md
+          {
+            printf '%s\n' '---'
+            printf '%s\n' 'description: apflow documentation home for AI-perceivable distributed orchestration, quick start, architecture, and feature guides.'
+            printf '%s\n\n' '---'
+            cat docs/index.md
+          } > docs/index.md.tmp
+          mv docs/index.md.tmp docs/index.md
 
           # Copy logo into docs assets
           mkdir -p docs/assets

@@ -1,3 +1,7 @@
+---
+description: Design of the apflow extension registry, executor discovery, metadata, and type-safe extension boundaries.
+---
+
 # Extension Registry Design - Protocol-Based Architecture
 
 ## Overview

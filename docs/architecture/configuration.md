@@ -1,3 +1,7 @@
+---
+description: Configuration architecture for apflow defaults, YAML files, environment overrides, and runtime settings.
+---
+
 # Table Name Configuration
 
 ## Overview

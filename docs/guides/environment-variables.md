@@ -1,3 +1,7 @@
+---
+description: Reference for apflow environment variables, YAML configuration, storage settings, authentication, governance, and distributed runtime options.
+---
+
 # Environment Variables
 
 apflow can be configured entirely through environment variables. Each variable maps to a YAML config key with the `APFLOW_` prefix.

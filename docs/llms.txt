@@ -1,0 +1,48 @@
+# apflow
+
+> AI-Perceivable Distributed Orchestration: deterministic task orchestration whose capabilities are discoverable and invocable by AI agents through the apcore module standard.
+
+## Start here
+
+- [Documentation home](https://apflow.aiperceivable.com/): Overview, positioning, quick start, architecture, and links.
+- [Installation](https://apflow.aiperceivable.com/getting-started/installation/): Install apflow and optional extras.
+- [Quick Start](https://apflow.aiperceivable.com/getting-started/quick-start/): Start servers, create tasks, run workflows, and expose tools to AI agents.
+- [Core Concepts](https://apflow.aiperceivable.com/getting-started/concepts/): Tasks, task trees, dependencies, executors, and creation modes.
+
+## Core architecture
+
+- [Task Orchestration Design](https://apflow.aiperceivable.com/architecture/task-orchestration/): Structure tree plus execution DAG, workflow reuse modes, scheduling history, and execution semantics.
+- [Extension Registry](https://apflow.aiperceivable.com/architecture/extension-registry-design/): Executor discovery, registry design, and extension metadata.
+- [Exception Handling](https://apflow.aiperceivable.com/architecture/exception-handling/): Error propagation and task failure handling.
+- [Configuration](https://apflow.aiperceivable.com/architecture/configuration/): Defaults, YAML files, environment variables, and runtime configuration.
+
+## Guides
+
+- [Task Orchestration Guide](https://apflow.aiperceivable.com/guides/task-orchestration/): Workflow patterns, reuse, custom executors, and distributed execution.
+- [Environment Variables](https://apflow.aiperceivable.com/guides/environment-variables/): Configuration keys for storage, auth, governance, durability, and distributed runtime.
+
+## Feature specifications
+
+- [Feature Overview](https://apflow.aiperceivable.com/features/overview/): Feature index and dependency map.
+- [apcore Bridge](https://apflow.aiperceivable.com/features/apcore-bridge/): MCP, A2A, CLI, and REST exposure through apcore modules.
+- [REST / HTTP API](https://apflow.aiperceivable.com/features/rest-api/): Registry-driven REST API, OpenAPI, SSE, auth, webhook, and unified server behavior.
+- [Built-in Scheduler](https://apflow.aiperceivable.com/features/scheduler/): Scheduling modules, direct database poll loop, webhook triggers, and run history.
+- [Durable Execution](https://apflow.aiperceivable.com/features/durable-execution/): Checkpoint/resume, retry, and circuit breaker behavior.
+- [Cost Governance](https://apflow.aiperceivable.com/features/cost-governance/): Token budgets, policy engine, model downgrade chains, and reporting.
+- [Function Executor](https://apflow.aiperceivable.com/features/function-executor/): Register Python functions as apflow executors.
+- [Storage Migration](https://apflow.aiperceivable.com/features/storage-migration/): SQLite default storage and PostgreSQL production/distributed storage.
+- [TaskCreator Relaxation](https://apflow.aiperceivable.com/features/task-creator-relaxation/): Multi-root task forest support.
+
+## Project references
+
+- [PRD](https://apflow.aiperceivable.com/prd/): Product requirements.
+- [Tech Design](https://apflow.aiperceivable.com/tech-design/): Technical design and implementation context.
+- [Source repository](https://github.com/aiperceivable/apflow): Python package source, tests, and release history.
+
+## Notes for AI agents
+
+- apflow is not an AI agent framework and does not implement LLM intelligence.
+- Use `parent_id` for task structure and reuse operations; use `dependencies` for execution ordering.
+- Link mode creates low-storage reference task rows and does not duplicate payload data.
+- Archive mode freezes existing completed workflow rows in place and keeps original task IDs.
+- The scheduler runs through direct database access; `APFLOW_API_SERVER_URL` does not route scheduler execution.

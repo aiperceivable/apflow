@@ -1,3 +1,7 @@
+---
+description: Feature specification for token budgets, cost policies, model downgrade chains, and usage reporting in apflow.
+---
+
 # Feature Spec: Cost Governance (F-004)
 
 **Feature ID:** F-004

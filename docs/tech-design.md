@@ -1,3 +1,7 @@
+---
+description: Technical design for apflow v2 architecture, storage, apcore integration, durability, governance, and implementation phases.
+---
+
 # apflow v2 -- Technical Design Document
 
 > **Positioning Update:** The product has been repositioned from "AI Agent Production Middleware"

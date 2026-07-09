@@ -44,6 +44,8 @@ clean:
 # Generate docs/index.md from README.md and copy logo (mirrors .github/workflows/docs.yml)
 docs-prep:
 	@cp README.md docs/index.md
+	@(printf '%s\n' '---' 'description: apflow documentation home for AI-perceivable distributed orchestration, quick start, architecture, and feature guides.' '---' ''; cat docs/index.md) > docs/index.md.tmp
+	@mv docs/index.md.tmp docs/index.md
 	@mkdir -p docs/assets
 	@cp apflow-logo.svg docs/assets/ 2>/dev/null || true
 	@sed -i.bak -e 's|\./docs/|./|g' -e 's|(docs/|(|g' -e 's|\./apflow-logo\.svg|./assets/apflow-logo.svg|g' docs/index.md && rm docs/index.md.bak

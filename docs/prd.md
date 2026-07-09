@@ -1,3 +1,7 @@
+---
+description: Product requirements for apflow v2 as an AI-perceivable distributed orchestration engine.
+---
+
 # apflow v2 — Product Requirements Document
 
 > **Positioning Update:** The product has been repositioned from "AI Agent Production Middleware"

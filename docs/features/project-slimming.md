@@ -1,3 +1,7 @@
+---
+description: Feature specification for slimming apflow by removing obsolete modules and relying on the apcore ecosystem.
+---
+
 # Feature Spec: Project Slimming (F-001)
 
 **Feature ID:** F-001

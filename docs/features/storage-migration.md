@@ -1,3 +1,7 @@
+---
+description: Feature specification for migrating apflow embedded storage from DuckDB to SQLite.
+---
+
 # Feature Spec: Storage Migration (DuckDB to SQLite)
 
 **Feature ID:** F-SM

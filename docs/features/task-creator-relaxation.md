@@ -1,3 +1,7 @@
+---
+description: Feature specification for allowing multi-root task forests in TaskCreator.
+---
+
 # Feature Spec: TaskCreator Relaxation (F-005)
 
 **Feature ID:** F-005

@@ -1,3 +1,7 @@
+---
+description: Guide to apflow task orchestration patterns, workflow reuse, custom executors, dependencies, and distributed execution.
+---
+
 # Task Orchestration Guide
 
 ## Basic Pipeline
@@ -64,14 +68,14 @@ await task_manager.distribute_task_tree(new_tree)
 
 ```python
 linked = await task_creator.from_link(original)
-# linked.task points to original — read-only, zero storage cost
+# linked.task points to original — read-only, without duplicating payload data
 ```
 
-### Archive (immutable snapshot)
+### Archive (freeze in place)
 
 ```python
 archived = await task_creator.from_archive(original)
-# Frozen for audit trail
+# Existing completed task rows are marked as archived for audit trail
 ```
 
 ### Mixed (partial re-run)

@@ -98,9 +98,9 @@ await task_manager.distribute_task_tree(tree)
 | Mode | Method | When to use |
 |------|--------|-------------|
 | **Create** | `create_task_tree_from_array()` | Build a new workflow from scratch |
-| **Link** | `from_link()` | Reference a completed workflow (read-only, zero storage) |
+| **Link** | `from_link()` | Reference a completed workflow (read-only, low storage) |
 | **Copy** | `from_copy()` | Clone a workflow with modifications (re-run with new params) |
-| **Archive** | `from_archive()` | Freeze a workflow snapshot (audit, compliance) |
+| **Archive** | `from_archive()` | Freeze an existing completed workflow in place (audit, compliance) |
 | **Mixed** | `from_mixed()` | Partial copy + partial link (re-run only changed steps) |
 
 See [Task Orchestration Architecture](docs/architecture/task-orchestration.md) for the full design rationale.

@@ -67,6 +67,7 @@ nav:
     - Cost Governance: features/cost-governance.md
     - TaskCreator Relaxation: features/task-creator-relaxation.md
     - REST / HTTP API: features/rest-api.md
+    - Built-in Scheduler: features/scheduler.md
 
 # Plugins
 plugins:

@@ -1,3 +1,7 @@
+---
+description: Installation guide for apflow, optional extras, development setup, and basic verification.
+---
+
 # Installation
 
 ## Requirements

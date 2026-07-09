@@ -1,3 +1,7 @@
+---
+description: Feature specification for the built-in apflow scheduler, schedule modules, webhook triggers, and run history.
+---
+
 # Feature Spec: Built-in Scheduler (F-013)
 
 **Feature ID:** F-013
@@ -68,9 +72,9 @@ against that database before the scheduler loop starts, so the direct-DB executi
 uses it end to end. Without `--db`, the pool falls back to `APFLOW_DATABASE_URL` /
 the active config.
 
-**Execution path:** The scheduler reads due tasks directly from the database (no
-`APFLOW_API_SERVER_URL` required). Set `APFLOW_API_SERVER_URL` only if you want task
-execution to be routed through a running REST server instead.
+**Execution path:** The scheduler reads due tasks directly from the database. It no
+longer has a REST/API execution mode, so `APFLOW_API_SERVER_URL` does not affect the
+scheduler loop.
 
 ---
 

@@ -1,3 +1,7 @@
+---
+description: Feature specification for registering Python functions as apflow executors with schemas and metadata.
+---
+
 # Feature Spec: Function Executor
 
 **Feature ID:** F-011

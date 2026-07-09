@@ -1,3 +1,7 @@
+---
+description: Exception-handling architecture for apflow task execution, logging, and failure propagation.
+---
+
 # Exception Handling Standards
 
 ## Overview

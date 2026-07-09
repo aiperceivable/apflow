@@ -1,3 +1,7 @@
+---
+description: Feature specification for exposing apflow capabilities as apcore modules across MCP, A2A, CLI, and REST surfaces.
+---
+
 # Feature Spec: apcore Module Bridge (F-002)
 
 **Feature ID:** F-002

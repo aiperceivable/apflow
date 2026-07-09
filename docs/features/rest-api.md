@@ -1,3 +1,7 @@
+---
+description: Feature specification for the registry-driven REST and OpenAPI surface over apflow modules.
+---
+
 # Feature Spec: REST / HTTP API (F-012)
 
 **Feature ID:** F-012

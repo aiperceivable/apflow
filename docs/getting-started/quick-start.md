@@ -1,3 +1,7 @@
+---
+description: Quick-start guide for running apflow servers, creating tasks, reusing workflows, and exposing tools to AI agents.
+---
+
 # Quick Start
 
 Get running in 5 minutes.
@@ -77,10 +81,10 @@ copy_tree = await app.task_creator.from_copy(
     original_task, inputs={"url": "https://new-api.example.com"}
 )
 
-# Link to a completed workflow (read-only, zero storage)
+# Link to a completed workflow (read-only, without duplicating payload data)
 link_tree = await app.task_creator.from_link(original_task)
 
-# Archive a workflow (immutable snapshot)
+# Archive a workflow in place
 archive_tree = await app.task_creator.from_archive(original_task)
 ```
 

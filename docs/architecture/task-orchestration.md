@@ -1,3 +1,7 @@
+---
+description: Architecture of apflow task orchestration, including structure trees, execution DAGs, reuse modes, and scheduling history.
+---
+
 # Task Orchestration Architecture
 
 ## The Dual Model: Structure Tree + Execution DAG
@@ -83,17 +87,17 @@ tree = await task_creator.from_copy(original_task, priority=0, inputs={"url": "n
 
 **Use case:** "Run yesterday's pipeline again with different parameters."
 
-### 4. Archive — Freeze a workflow (immutable snapshot)
+### 4. Archive — Freeze an existing workflow in place
 
 ```python
 tree = await task_creator.from_archive(original_task)
 ```
 
-- Marks tasks as `origin_type=archive` (frozen, read-only)
-- Preserves all data including results
+- Marks existing tasks as `origin_type=archive` (frozen, read-only)
+- Preserves all data including results and keeps the original task IDs
 - Requires entire tree to be `completed`
 
-**Use case:** Audit trail, compliance records, production snapshots.
+**Use case:** Audit trail and compliance records for completed production runs.
 
 ### 5. Mixed — Partial copy + partial link
 

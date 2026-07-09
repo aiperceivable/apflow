@@ -87,4 +87,7 @@ apflow does not implement AI intelligence — it implements deterministic, relia
 ## General Guidelines
 - English ONLY for comments, docstrings, logs, errors, commit messages.
 - Fully understand surrounding code before changes.
+- When reviewing MkDocs configuration, check `.github/workflows/docs.yml` and `Makefile`
+  first. `docs/index.md` is generated from `README.md` by the docs prep step, so do not
+  treat its absence in the working tree as a standalone navigation error.
 - Do not generate unnecessary documentation, examples, stubs, or bloated `__init__.py` files unless explicitly requested.
