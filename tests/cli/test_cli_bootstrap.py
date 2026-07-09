@@ -177,7 +177,9 @@ def test_apflow_module_group_hidden_from_top_level_help() -> None:
 
     cli = _build_cli()
     result = CliRunner().invoke(cli, ["--help"])
-    assert "Groups:" not in result.output, "Groups section should be hidden after task/schedule promotion"
+    assert (
+        "Groups:" not in result.output
+    ), "Groups section should be hidden after task/schedule promotion"
     # But the group must still be reachable for backward compat
     apflow_grp = cli.get_command(None, "apflow")
     assert apflow_grp is not None, "apflow module group must remain accessible via get_command"

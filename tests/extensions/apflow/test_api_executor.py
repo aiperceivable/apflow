@@ -215,6 +215,9 @@ class TestApFlowApiExecutor:
         """Test timeout while waiting for task completion"""
         executor = ApFlowApiExecutor()
 
+        async def skip_url_validation(*args, **kwargs):
+            return None
+
         mock_execute_response = MagicMock()
         mock_execute_response.status_code = 200
         mock_execute_response.json.return_value = {
@@ -265,7 +268,13 @@ class TestApFlowApiExecutor:
                     return time_counter[0]
 
             loop = asyncio.get_event_loop()
-            with patch.object(loop, "time", side_effect=mock_time):
+            with (
+                patch.object(loop, "time", side_effect=mock_time),
+                patch(
+                    "apflow.extensions.apflow.api_executor.validate_url_not_private",
+                    side_effect=skip_url_validation,
+                ),
+            ):
                 result = await executor.execute(
                     {
                         "base_url": "http://localhost:8000",

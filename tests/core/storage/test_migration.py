@@ -361,9 +361,7 @@ class TestAddTaskTreeFieldsDowngrade:
 
     def test_downgrade_restores_has_copy_without_data_loss(self, sync_db_session):
         engine = sync_db_session.get_bind()
-        mod = importlib.import_module(
-            "apflow.core.storage.migrations.001_add_task_tree_fields"
-        )
+        mod = importlib.import_module("apflow.core.storage.migrations.001_add_task_tree_fields")
         migration = mod.AddTaskTreeFields()
 
         # Simulate a legacy (pre-001) database: apflow_tasks has has_copy instead
@@ -397,9 +395,7 @@ class TestUpdateTaskTreesBackfill:
         OFFSET=100 second query against the now-50-row remaining set returns
         nothing and the loop exits early, silently skipping the last 50 tasks."""
         engine = sync_db_session.get_bind()
-        mod = importlib.import_module(
-            "apflow.core.storage.migrations.001_add_task_tree_fields"
-        )
+        mod = importlib.import_module("apflow.core.storage.migrations.001_add_task_tree_fields")
         migration = mod.AddTaskTreeFields()
 
         tasks = [TaskModel(id=f"root_{i}", name=f"Root {i}", user_id="u") for i in range(150)]
@@ -409,11 +405,7 @@ class TestUpdateTaskTreesBackfill:
         migration._update_task_trees(engine)
 
         sync_db_session.expire_all()
-        missing = (
-            sync_db_session.query(TaskModel)
-            .filter(TaskModel.task_tree_id.is_(None))
-            .count()
-        )
+        missing = sync_db_session.query(TaskModel).filter(TaskModel.task_tree_id.is_(None)).count()
         assert missing == 0, f"{missing} root task(s) left without task_tree_id after backfill"
 
 
@@ -424,9 +416,7 @@ class TestAddHasReferencesWithCopyFallback:
 
     def test_fallback_uses_valid_syntax_and_copies_data(self, sync_db_session):
         engine = sync_db_session.get_bind()
-        mod = importlib.import_module(
-            "apflow.core.storage.migrations.001_add_task_tree_fields"
-        )
+        mod = importlib.import_module("apflow.core.storage.migrations.001_add_task_tree_fields")
         migration = mod.AddTaskTreeFields()
 
         with engine.begin() as conn:
@@ -548,9 +538,9 @@ class TestIdempotencyKeyIndexDedup:
             .filter(TaskModel.id.in_(["run_1", "run_2"]))
             .all()
         ]
-        assert keys.count("dup-key") == 1, (
-            f"Expected exactly one row to retain the duplicate key, got {keys}"
-        )
+        assert (
+            keys.count("dup-key") == 1
+        ), f"Expected exactly one row to retain the duplicate key, got {keys}"
 
 
 class TestMigrationHistoryTableRace:

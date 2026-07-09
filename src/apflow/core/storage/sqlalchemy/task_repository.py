@@ -514,7 +514,8 @@ class TaskRepository:
                 # none_as_null=False), not SQL NULL, so a plain COALESCE
                 # never fires; NULLIF converts that scalar 'null' to a real
                 # SQL NULL first so COALESCE can substitute '{}'.
-                stmt = text(f"""
+                stmt = text(
+                    f"""
                     UPDATE {table_name}
                     SET token_usage = (
                         jsonb_set(
@@ -532,14 +533,16 @@ class TaskRepository:
                         )
                     )::json
                     WHERE id = :task_id
-                    """)
+                    """
+                )
             else:
                 # A never-set JSON column is stored as the text 'null' (see
                 # the PostgreSQL branch comment above), which json_set()
                 # silently fails to update in place (SQLite returns the
                 # scalar unchanged rather than erroring) — NULLIF converts it
                 # to a real SQL NULL first so COALESCE substitutes '{}'.
-                stmt = text(f"""
+                stmt = text(
+                    f"""
                     UPDATE {table_name}
                     SET token_usage = json_set(
                         COALESCE(NULLIF(token_usage, 'null'), '{{}}'),
@@ -548,7 +551,8 @@ class TaskRepository:
                         '$.total', COALESCE(json_extract(token_usage, '$.total'), 0) + :total_delta
                     )
                     WHERE id = :task_id
-                    """)
+                    """
+                )
 
             result = await self.db.execute(stmt, params)
             await self.db.commit()

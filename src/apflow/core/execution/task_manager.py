@@ -1151,9 +1151,7 @@ class TaskManager:
                                 # execution still over budget) advances to the
                                 # next tier instead of recomputing this one.
                                 new_params = dict(task.params or {})
-                                new_params["_downgrade_model_index"] = (
-                                    evaluation.next_model_index
-                                )
+                                new_params["_downgrade_model_index"] = evaluation.next_model_index
                                 await self.task_repository.update_task(
                                     task_id=task_id, params=new_params
                                 )

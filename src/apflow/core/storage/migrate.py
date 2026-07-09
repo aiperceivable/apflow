@@ -36,7 +36,9 @@ class MigrationHistoryTable:
         """
         try:
             with engine.begin() as conn:
-                conn.execute(text(f"""
+                conn.execute(
+                    text(
+                        f"""
                         CREATE TABLE IF NOT EXISTS {MigrationHistoryTable.TABLE_NAME} (
                             id VARCHAR(100) PRIMARY KEY,
                             description TEXT NOT NULL,
@@ -44,7 +46,9 @@ class MigrationHistoryTable:
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
-                        """))
+                        """
+                    )
+                )
             logger.info(
                 f"✓ Ensured migration history table exists: {MigrationHistoryTable.TABLE_NAME}"
             )

@@ -702,9 +702,7 @@ class TestCheckpointAndRetryDurability:
             assert task.id in manager._executor_instances
 
     @pytest.mark.asyncio
-    async def test_resume_from_checkpoint_invoked_when_executor_supports_it(
-        self, sync_db_session
-    ):
+    async def test_resume_from_checkpoint_invoked_when_executor_supports_it(self, sync_db_session):
         """Regression: resume_from_checkpoint()/supports_checkpoint() are the
         documented checkpoint-restore contract, but TaskManager never invoked
         them — checkpoint data was only ever stuffed into an ad-hoc

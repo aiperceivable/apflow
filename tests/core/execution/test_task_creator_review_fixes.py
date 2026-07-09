@@ -62,18 +62,14 @@ class TestCloneResetsTreeId:
         creator = _creator()
         model_cls = creator.task_model_class
 
-        root = model_cls.create(
-            {"id": "R", "name": "root", "task_tree_id": "R", "parent_id": None}
-        )
+        root = model_cls.create({"id": "R", "name": "root", "task_tree_id": "R", "parent_id": None})
         child = model_cls.create(
             {"id": "C", "name": "child", "task_tree_id": "R", "parent_id": "R"}
         )
         root_node = TaskTreeNode(task=root)
         root_node.add_child(TaskTreeNode(task=child))
 
-        cloned = await creator._clone_task_tree(
-            root_node, {"origin_type": TaskOriginType.copy}
-        )
+        cloned = await creator._clone_task_tree(root_node, {"origin_type": TaskOriginType.copy})
 
         new_root_id = str(cloned.task.id)
         assert new_root_id != "R"  # fresh id

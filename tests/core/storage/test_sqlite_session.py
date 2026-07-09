@@ -141,12 +141,46 @@ class TestAsyncSessionMigrationBridge:
 
     def test_create_session_async_postgres_calls_migration_bridge(self, monkeypatch):
         import apflow.core.storage.factory as factory_module
+        from apflow.core.storage.dialects.postgres import PostgreSQLDialect
 
         calls = []
         monkeypatch.setattr(
             factory_module,
             "_migrate_schema_for_async_engine",
             lambda conn_str, dialect: calls.append((conn_str, dialect)),
+        )
+        monkeypatch.setattr(
+            factory_module,
+            "get_dialect_config",
+            lambda dialect: PostgreSQLDialect if dialect == "postgresql" else None,
+        )
+
+        class FakeAsyncConnection:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return None
+
+            async def run_sync(self, func):
+                return None
+
+        class FakeAsyncEngine:
+            def begin(self):
+                return FakeAsyncConnection()
+
+        class FakeAsyncSession:
+            pass
+
+        monkeypatch.setattr(
+            factory_module,
+            "create_async_engine",
+            lambda connection_string, **kwargs: FakeAsyncEngine(),
+        )
+        monkeypatch.setattr(
+            factory_module,
+            "async_sessionmaker",
+            lambda *args, **kwargs: FakeAsyncSession,
         )
 
         create_session(
@@ -169,18 +203,16 @@ class TestAsyncSessionMigrationBridge:
         monkeypatch.setattr(factory_module, "_migrate_schema_if_needed", fake_migrate)
 
         disposed = []
-        original_create_engine = factory_module.create_engine
+
+        class FakeSyncEngine:
+            def __init__(self, url):
+                self.url = url
+
+            def dispose(self):
+                disposed.append(True)
 
         def tracking_create_engine(url, *args, **kwargs):
-            engine = original_create_engine(url, *args, **kwargs)
-            original_dispose = engine.dispose
-
-            def tracking_dispose():
-                disposed.append(True)
-                original_dispose()
-
-            engine.dispose = tracking_dispose
-            return engine
+            return FakeSyncEngine(url)
 
         monkeypatch.setattr(factory_module, "create_engine", tracking_create_engine)
 

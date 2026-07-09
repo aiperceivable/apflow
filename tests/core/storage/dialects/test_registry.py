@@ -1,6 +1,7 @@
 """Test the database dialect registry's PostgreSQL driver availability check"""
 
 import sys
+from types import ModuleType
 
 from apflow.core.storage.dialects import registry
 
@@ -15,7 +16,10 @@ class TestPostgresDriverAvailabilityCheck:
     deep inside SQLAlchemy's create_engine(). (Review #37)
     """
 
-    def test_returns_true_when_drivers_installed(self):
+    def test_returns_true_when_drivers_installed(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "asyncpg", ModuleType("asyncpg"))
+        monkeypatch.setitem(sys.modules, "psycopg2", ModuleType("psycopg2"))
+
         assert registry._postgres_drivers_available() is True
 
     def test_returns_false_when_psycopg2_missing(self, monkeypatch):

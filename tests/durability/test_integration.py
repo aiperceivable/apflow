@@ -85,9 +85,7 @@ async def test_retry_with_circuit_breaker():
     4. After 3 recordings, verify the circuit is OPEN.
     5. Verify can_execute() returns False, blocking the 4th attempt.
     """
-    registry = CircuitBreakerRegistry(
-        default_config=CircuitBreakerConfig(failure_threshold=3)
-    )
+    registry = CircuitBreakerRegistry(default_config=CircuitBreakerConfig(failure_threshold=3))
     retry_mgr = RetryManager()
 
     policy = RetryPolicy(max_attempts=2, backoff_base_seconds=0.1, jitter=False)

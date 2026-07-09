@@ -411,9 +411,7 @@ class TestTaskCreatorOriginTypes:
         task_repository = TaskRepository(sync_db_session)
         creator = TaskCreator(sync_db_session)
         root = await task_repository.create_task(name="Root", user_id="user_123")
-        dep = await task_repository.create_task(
-            name="Dep", user_id="user_123", parent_id=root.id
-        )
+        dep = await task_repository.create_task(name="Dep", user_id="user_123", parent_id=root.id)
         child = await task_repository.create_task(
             name="Child",
             user_id="user_123",
@@ -441,9 +439,7 @@ class TestTaskCreatorOriginTypes:
         task_repository = TaskRepository(sync_db_session)
         creator = TaskCreator(sync_db_session)
         root = await task_repository.create_task(name="Root", user_id="user_123")
-        dep = await task_repository.create_task(
-            name="Dep", user_id="user_123", parent_id=root.id
-        )
+        dep = await task_repository.create_task(name="Dep", user_id="user_123", parent_id=root.id)
         child = await task_repository.create_task(
             name="Child",
             user_id="user_123",
