@@ -26,7 +26,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from dataclasses import asdict, is_dataclass
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Optional
+from uuid import UUID
 
 from apcore.errors import ModuleError
 from apcore.executor import Executor
@@ -55,6 +59,39 @@ _HTTP_STATUS_BY_CODE: dict[str, int] = {
     "SCHEMA_VALIDATION_FAILED": 422,
     "INVALID_INPUT": 422,
 }
+
+
+def _json_safe(value: Any) -> Any:
+    """Convert common Python values to JSON-safe structures."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_safe(item) for item in value]
+    if is_dataclass(value) and not isinstance(value, type):
+        return _json_safe(asdict(value))
+
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _json_safe(model_dump(mode="json"))
+        except TypeError:
+            return _json_safe(model_dump())
+
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return _json_safe(to_dict())
+
+    return str(value)
 
 
 def _status_for_error(exc: ModuleError) -> int:
@@ -307,7 +344,7 @@ def build_rest_app(
             )
 
         status, payload = await _execute(executor, module_id, inputs)
-        return JSONResponse(payload, status_code=status)
+        return JSONResponse(_json_safe(payload), status_code=status)
 
     routes = [
         Route("/", root, methods=["GET"]),

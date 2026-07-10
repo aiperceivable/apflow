@@ -1,6 +1,11 @@
 # Changelog
 
 
+## [0.22.1] - 2026-07-10
+
+### Added
+add datetime serialization support for rest api
+add test for datetime module output serialization
 
 ## [0.22.0] - 2026-07-09
 

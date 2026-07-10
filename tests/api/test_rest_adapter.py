@@ -1,5 +1,6 @@
 """Tests for the registry-driven REST adapter (apflow.api.rest)."""
 
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import pytest
@@ -31,6 +32,22 @@ class EchoModule:
         self, inputs: dict[str, Any], context: Optional[Any] = None
     ) -> dict[str, Any]:
         return {"echo": inputs.get("message", "")}
+
+
+class DatetimeModule:
+    """A module that returns Python datetime values."""
+
+    description = "Return a datetime"
+    input_schema = {"type": "object"}
+    output_schema = {"type": "object"}
+
+    def __init__(self) -> None:
+        self.annotations = ModuleAnnotations()
+
+    async def execute(
+        self, inputs: dict[str, Any], context: Optional[Any] = None
+    ) -> dict[str, Any]:
+        return {"created_at": datetime(2026, 7, 10, 12, 34, 56, tzinfo=timezone.utc)}
 
 
 class StreamingEcho:
@@ -93,6 +110,17 @@ def test_execute_module_returns_output(client: TestClient) -> None:
     resp = client.post("/modules/echo", json={"message": "hi"})
     assert resp.status_code == 200
     assert resp.json() == {"echo": "hi"}
+
+
+def test_execute_module_serializes_datetime_output() -> None:
+    registry = Registry()
+    registry.register("datetime", DatetimeModule())
+    client = TestClient(build_rest_app(registry))
+
+    resp = client.post("/modules/datetime", json={})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"created_at": "2026-07-10T12:34:56+00:00"}
 
 
 def test_unknown_module_returns_404(client: TestClient) -> None:
