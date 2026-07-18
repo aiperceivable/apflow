@@ -2,8 +2,7 @@
 Executor metadata utilities for demo task generation and validation
 
 This module provides utilities to query executor metadata and validate
-demo task definitions against executor schemas. Used by demo applications
-like apflow-demo to generate accurate demo tasks.
+demo task definitions against executor schemas.
 """
 
 from typing import Dict, Any, Optional

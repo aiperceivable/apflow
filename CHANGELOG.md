@@ -1315,7 +1315,7 @@ Stripped down to 4 core executors. The remaining executors are examples; real ex
   - **Migration**: Demo task initialization has been moved to the **apflow-demo** project
   - Demo task definitions are now managed separately from the core library
   - This keeps the core library focused on orchestration functionality
-  - For demo tasks, please use [apflow-demo](https://github.com/aiperceivable/apflow-demo)
+  - For demo tasks, please use `apflow-demo`
 
 - **Examples API Methods**
   - Removed `examples.init` and `examples.status` API methods from system routes
