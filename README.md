@@ -180,6 +180,22 @@ These are examples and utilities. The real executors are your AI agents, busines
 
 Contributions welcome. Please open an issue or PR on GitHub.
 
+### Development setup
+
+```bash
+# Install the package with development dependencies
+# (pytest, ruff, black, pre-commit, apdev, ...).
+pip install -e ".[dev]"
+
+# Install the git hooks. Run this with the same interpreter that has the
+# dev dependencies installed, so the generated hook points at the right Python.
+pre-commit install
+```
+
+The pre-commit hooks call the `apdev` CLI (`check-chars`, `check-imports`) and
+`ruff`; all of them come from the `dev` extra above. If you manage Python with
+`pyenv`, run `pyenv rehash` after installing so the `apdev` shim lands on `PATH`.
+
 ## License
 
 Apache-2.0

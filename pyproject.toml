@@ -92,6 +92,8 @@ dev = [
     "build>=1.0.0",
     "twine>=4.0.0",
     "pre-commit>=3.0.0",
+    # Provides the `apdev` CLI used by the check-chars / check-imports hooks.
+    "apdev>=0.2.3",
 ]
 
 [tool.setuptools.packages.find]

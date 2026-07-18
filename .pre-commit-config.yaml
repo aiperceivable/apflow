@@ -1,5 +1,6 @@
 repos:
-  # Custom import checks
+  # Custom import checks. These call the `apdev` CLI, which is provided by the
+  # `dev` optional-dependency group (`pip install -e ".[dev]"`).
   - repo: local
     hooks:
       - id: check-chars
