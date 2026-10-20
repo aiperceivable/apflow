@@ -1,10 +1,12 @@
-.PHONY: help check-imports check-circular check-performance check-heavy test clean docs-prep docs-serve docs-build
+.PHONY: help check lint check-imports check-circular check-performance check-heavy test clean docs-prep docs-serve docs-build
 
 PYTHON ?= python
 APDEV ?= apdev
 
 help:
 	@echo "Available commands:"
+	@echo "  make check             - Run lint, formatting checks, and tests"
+	@echo "  make lint              - Run Ruff and Black checks"
 	@echo "  make check-imports     - Run all import checks"
 	@echo "  make check-circular    - Detect circular imports"
 	@echo "  make check-performance - Check import performance"
@@ -17,6 +19,12 @@ help:
 
 # Run all import checks
 check-imports: check-circular check-performance check-heavy
+
+check: lint test
+
+lint:
+	$(PYTHON) -m ruff check src/ tests/
+	$(PYTHON) -m black --check .
 
 # Detect circular imports
 check-circular:
@@ -35,7 +43,7 @@ check-heavy:
 
 # Run tests
 test:
-	@pytest tests/ -v
+	@$(PYTHON) -m pytest tests/ -v
 
 # Clean cache files
 clean:

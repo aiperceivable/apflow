@@ -193,7 +193,7 @@ wheels = [
 
 [[package]]
 name = "apflow"
-version = "0.22.1"
+version = "0.23.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -262,7 +262,7 @@ requires-dist = [
     { name = "apdev", marker = "extra == 'dev'", specifier = ">=0.2.3" },
     { name = "apflow", extras = ["postgres", "scheduling", "email"], marker = "extra == 'all'" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.29.0" },
-    { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
+    { name = "black", marker = "extra == 'dev'", specifier = "==26.1.0" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "click", specifier = ">=8.0" },
     { name = "croniter", marker = "extra == 'scheduling'", specifier = ">=1.0.0" },
@@ -282,7 +282,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
     { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.1" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
     { name = "sqlalchemy-session-proxy", specifier = ">=0.1.0" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=4.0.0" },

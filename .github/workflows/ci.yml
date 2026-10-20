@@ -34,18 +34,17 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # Install [dev,cli,a2a] to run tests without heavy optional deps (crewai, docker, grpc, ssh).
-        # This includes pytest and core CLI/API dependencies for comprehensive test coverage.
+        # Install development tools and core CLI/API dependencies.
         # If a constraints.txt file is present, use it to pin critical dependency versions.
         if [ -f constraints.txt ]; then
-          pip install -e ".[dev,cli,a2a,tools]" -c constraints.txt
+          pip install -e ".[dev]" -c constraints.txt
         else
-          pip install -e ".[dev,cli,a2a,tools]"
+          pip install -e ".[dev]"
         fi
 
-    - name: Lint with Ruff
+    - name: Check lint and formatting
       run: |
-        ruff check src/ tests/
+        make lint
 
     - name: Run tests
       run: |
