@@ -220,7 +220,7 @@ async def _execute(
 def _sse_event(data: dict[str, Any], *, event: Optional[str] = None) -> str:
     """Format a single Server-Sent Events frame."""
     prefix = f"event: {event}\n" if event else ""
-    return f"{prefix}data: {json.dumps(data)}\n\n"
+    return f"{prefix}data: {json.dumps(_json_safe(data))}\n\n"
 
 
 async def _stream_events(

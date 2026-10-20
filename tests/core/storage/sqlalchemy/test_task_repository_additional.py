@@ -42,6 +42,7 @@ class TestTaskRepositoryAdditional:
         await repo.update_task(task.id, name="updated_name")
 
         updated_task = await repo.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.name == "updated_name"
 
     @pytest.mark.asyncio
@@ -53,6 +54,7 @@ class TestTaskRepositoryAdditional:
         await repo.update_task(task.id, priority=10)
 
         updated_task = await repo.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.priority == 10
 
     @pytest.mark.asyncio
@@ -65,6 +67,7 @@ class TestTaskRepositoryAdditional:
         await repo.update_task(task.id, params=new_params)
 
         updated_task = await repo.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.params == new_params
 
     @pytest.mark.asyncio
@@ -77,6 +80,7 @@ class TestTaskRepositoryAdditional:
         await repo.update_task(task.id, schemas=new_schemas)
 
         updated_task = await repo.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.schemas == new_schemas
 
     @pytest.mark.asyncio
@@ -89,6 +93,7 @@ class TestTaskRepositoryAdditional:
         await repo.update_task(task_id=task.id, status="completed", result=result_data)
 
         updated_task = await repo.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.result == result_data
 
     @pytest.mark.asyncio
@@ -101,6 +106,7 @@ class TestTaskRepositoryAdditional:
         await repo.update_task(task.id, inputs=new_inputs)
 
         updated_task = await repo.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.inputs == new_inputs
 
     @pytest.mark.asyncio
@@ -139,6 +145,7 @@ class TestIncrementTokenUsage:
         await repo.increment_token_usage(task.id, input_delta=30, output_delta=10, total_delta=40)
 
         refreshed = await repo.get_task_by_id(task.id)
+        assert refreshed is not None
         assert refreshed.token_usage == {"input": 80, "output": 30, "total": 110}
 
     @pytest.mark.asyncio
@@ -150,6 +157,7 @@ class TestIncrementTokenUsage:
         await repo.increment_token_usage(task.id, input_delta=5, output_delta=5, total_delta=10)
 
         refreshed = await repo.get_task_by_id(task.id)
+        assert refreshed is not None
         assert refreshed.token_usage == {"input": 5, "output": 5, "total": 10}
 
     @pytest.mark.asyncio

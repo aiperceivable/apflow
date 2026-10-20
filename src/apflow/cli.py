@@ -125,12 +125,13 @@ def _build_cli() -> click.Group:
     # _group_cache["apflow"], so we can safely remove "apflow" from _group_map
     # to suppress the "Groups: apflow (25 commands)" line in --help output.
     # The group remains fully accessible as `apflow apflow <cmd>` via the cache.
-    module_grp = cli.get_command(None, "apflow")
+    module_grp = cli.get_command(click.Context(cli), "apflow")
     if module_grp is not None:
         for grp in _build_module_subgroups(module_grp):
             cli.add_command(grp)
-        if hasattr(cli, "_group_map"):
-            cli._group_map.pop("apflow", None)
+        group_map = getattr(cli, "_group_map", None)
+        if isinstance(group_map, dict):
+            group_map.pop("apflow", None)
 
     return cli
 

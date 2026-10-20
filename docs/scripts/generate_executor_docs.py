@@ -48,7 +48,7 @@ def generate_executor_docs(output_dir: Path) -> None:
             doc_file.write_text(doc_content, encoding="utf-8")
 
             index_lines.append(
-                f"- [{executor.name}]({executor_id}.md) - {executor.description[:100]}\n"
+                f"- [{executor.name}]({executor_id}.md) - {getattr(executor, 'description', '')[:100]}\n"
             )
 
         except Exception as e:
@@ -76,8 +76,8 @@ def generate_single_executor_doc(executor: Any) -> str:
     lines.append(f"# {executor.name}\n\n")
     lines.append(f"**Executor ID:** `{executor.id}`\n\n")
 
-    if executor.description:
-        lines.append(f"## Description\n\n{executor.description}\n\n")
+    if getattr(executor, "description", ""):
+        lines.append(f"## Description\n\n{getattr(executor, 'description', '')}\n\n")
 
     if hasattr(executor, "tags") and executor.tags:
         lines.append(f"**Tags:** {', '.join(executor.tags)}\n\n")

@@ -8,6 +8,7 @@ description, and execute() is a valid module.
 from typing import Any, Dict
 
 from apcore import Change, ModuleAnnotations, PreviewResult
+from apflow.core.execution.result_protocol import executor_result_schema, normalize_executor_result
 
 from apflow.logger import get_logger
 
@@ -45,16 +46,24 @@ class ExecutableTaskModuleAdapter:
         self._executor_id = executor_id
         self._executor_name = executor_name
         self.executor_id = executor_id
+        self._result_format = getattr(executor_class, "result_format", "legacy")
+        if self._result_format not in ("legacy", "raw", "envelope"):
+            raise ValueError(f"Unknown executor result format: {self._result_format}")
         # apcore expects plain attributes (not properties) — it may set them during registration
         self.input_schema = input_schema or {"type": "object", "properties": {}}
-        self.output_schema = output_schema or {"type": "object", "properties": {}}
+        self.output_schema = (
+            executor_result_schema(output_schema)
+            if self._result_format == "raw"
+            else output_schema or {"type": "object", "properties": {}}
+        )
         self.description = executor_description or executor_name
         self.annotations = ModuleAnnotations()
         self.tags = tags or []
         self.metadata = {
             "executor_id": executor_id,
-            "dependencies": dependencies or [],
+            "executor_dependencies": dependencies or [],
             "always_available": always_available,
+            "executor_result_format": self._result_format,
         }
 
     async def preview(self, inputs: Dict[str, Any], context: Any = None) -> PreviewResult:
@@ -84,4 +93,10 @@ class ExecutableTaskModuleAdapter:
                 raise RuntimeError(f"Cannot instantiate executor {self._executor_id}: {e}") from e
 
         result = await executor.execute(inputs)
+        if self._result_format == "raw":
+            # apcore module outputs must be objects, including for raw scalars.
+            return dict(normalize_executor_result(result, self._result_format))
+        if self._result_format == "envelope":
+            # Validate without adding fields absent from the declared wire schema.
+            normalize_executor_result(result, self._result_format)
         return result

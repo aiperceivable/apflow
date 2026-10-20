@@ -117,6 +117,7 @@ class TestResendProvider:
             mock_instance.post = AsyncMock(return_value=mock_response)
 
             result = await executor.execute(self._base_inputs())
+            result = result["result"]
 
             assert result["success"] is True
             assert result["provider"] == "resend"
@@ -139,6 +140,7 @@ class TestResendProvider:
             mock_instance.post = AsyncMock(return_value=mock_response)
 
             result = await executor.execute(self._base_inputs(body=None, html="<h1>Hello</h1>"))
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_instance.post.call_args[1]
@@ -165,6 +167,7 @@ class TestResendProvider:
                     bcc=["bcc@example.com"],
                 )
             )
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_instance.post.call_args[1]
@@ -186,6 +189,7 @@ class TestResendProvider:
             mock_instance.post = AsyncMock(return_value=mock_response)
 
             result = await executor.execute(self._base_inputs(reply_to="reply@example.com"))
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_instance.post.call_args[1]
@@ -206,6 +210,7 @@ class TestResendProvider:
             mock_instance.post = AsyncMock(return_value=mock_response)
 
             result = await executor.execute(self._base_inputs())
+            result = result["result"]
 
             assert result["success"] is False
             assert result["provider"] == "resend"
@@ -235,6 +240,7 @@ class TestResendProvider:
             mock_instance.post = AsyncMock(return_value=mock_response)
 
             result = await executor.execute(self._base_inputs(to="single@example.com"))
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_instance.post.call_args[1]
@@ -268,9 +274,10 @@ class TestSmtpProvider:
             patch("apflow.extensions.email.send_email_executor.AIOSMTPLIB_AVAILABLE", True),
             patch("apflow.extensions.email.send_email_executor.aiosmtplib") as mock_aiosmtplib,
         ):
-            mock_aiosmtplib.send = AsyncMock()
+            mock_aiosmtplib.send = AsyncMock(return_value=({}, "Message accepted"))
 
             result = await executor.execute(self._base_inputs())
+            result = result["result"]
 
             assert result["success"] is True
             assert result["provider"] == "smtp"
@@ -286,13 +293,13 @@ class TestSmtpProvider:
             patch("apflow.extensions.email.send_email_executor.AIOSMTPLIB_AVAILABLE", True),
             patch("apflow.extensions.email.send_email_executor.aiosmtplib") as mock_aiosmtplib,
         ):
-            mock_aiosmtplib.send = AsyncMock()
+            mock_aiosmtplib.send = AsyncMock(return_value=({}, "Message accepted"))
 
             result = await executor.execute(self._base_inputs(body=None, html="<h1>Hello</h1>"))
+            result = result["result"]
 
             assert result["success"] is True
-            call_kwargs = mock_aiosmtplib.send.call_args[1]
-            msg = call_kwargs["message"]
+            msg = mock_aiosmtplib.send.call_args[0][0]
             assert msg.get_content_type() == "text/html"
 
     @pytest.mark.asyncio
@@ -304,13 +311,13 @@ class TestSmtpProvider:
             patch("apflow.extensions.email.send_email_executor.AIOSMTPLIB_AVAILABLE", True),
             patch("apflow.extensions.email.send_email_executor.aiosmtplib") as mock_aiosmtplib,
         ):
-            mock_aiosmtplib.send = AsyncMock()
+            mock_aiosmtplib.send = AsyncMock(return_value=({}, "Message accepted"))
 
             result = await executor.execute(self._base_inputs(html="<h1>Hello</h1>"))
+            result = result["result"]
 
             assert result["success"] is True
-            call_kwargs = mock_aiosmtplib.send.call_args[1]
-            msg = call_kwargs["message"]
+            msg = mock_aiosmtplib.send.call_args[0][0]
             # multipart/alternative when both body and html provided
             assert msg.get_content_type() == "multipart/alternative"
 
@@ -323,7 +330,7 @@ class TestSmtpProvider:
             patch("apflow.extensions.email.send_email_executor.AIOSMTPLIB_AVAILABLE", True),
             patch("apflow.extensions.email.send_email_executor.aiosmtplib") as mock_aiosmtplib,
         ):
-            mock_aiosmtplib.send = AsyncMock()
+            mock_aiosmtplib.send = AsyncMock(return_value=({}, "Message accepted"))
 
             result = await executor.execute(
                 self._base_inputs(
@@ -331,10 +338,11 @@ class TestSmtpProvider:
                     bcc=["bcc@example.com"],
                 )
             )
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_aiosmtplib.send.call_args[1]
-            msg = call_kwargs["message"]
+            msg = mock_aiosmtplib.send.call_args[0][0]
             assert "cc@example.com" in msg["Cc"]
             # bcc should not be in headers but should be in recipients
             recipients = call_kwargs["recipients"]
@@ -368,9 +376,10 @@ class TestSmtpProvider:
             patch("apflow.extensions.email.send_email_executor.AIOSMTPLIB_AVAILABLE", True),
             patch("apflow.extensions.email.send_email_executor.aiosmtplib") as mock_aiosmtplib,
         ):
-            mock_aiosmtplib.send = AsyncMock()
+            mock_aiosmtplib.send = AsyncMock(return_value=({}, "Message accepted"))
 
             result = await executor.execute(self._base_inputs(smtp_use_tls=False))
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_aiosmtplib.send.call_args[1]
@@ -415,7 +424,7 @@ class TestSchemaAndDemo:
     def test_get_output_schema(self):
         """Test output schema contains expected fields"""
         executor = SendEmailExecutor()
-        schema = executor.get_output_schema()
+        schema = executor.get_output_schema()["$defs"]["business_result"]["anyOf"][0]
 
         assert schema["type"] == "object"
         assert "success" in schema["required"]
@@ -494,6 +503,7 @@ class TestEnvVarDefaults:
                     "body": "Hello",
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_instance.post.call_args[1]
@@ -526,6 +536,7 @@ class TestEnvVarDefaults:
                     "body": "Hello",
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_instance.post.call_args[1]
@@ -557,6 +568,7 @@ class TestEnvVarDefaults:
                     "body": "Hello",
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_instance.post.call_args[1]
@@ -587,6 +599,7 @@ class TestEnvVarDefaults:
                     "body": "Hello",
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             assert result["provider"] == "resend"
@@ -601,7 +614,7 @@ class TestEnvVarDefaults:
             patch("apflow.extensions.email.send_email_executor.AIOSMTPLIB_AVAILABLE", True),
             patch("apflow.extensions.email.send_email_executor.aiosmtplib") as mock_aiosmtplib,
         ):
-            mock_aiosmtplib.send = AsyncMock()
+            mock_aiosmtplib.send = AsyncMock(return_value=({}, "Message accepted"))
 
             result = await executor.execute(
                 {
@@ -611,6 +624,7 @@ class TestEnvVarDefaults:
                     "body": "Hello",
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             assert result["provider"] == "smtp"
@@ -633,7 +647,7 @@ class TestEnvVarDefaults:
             patch("apflow.extensions.email.send_email_executor.AIOSMTPLIB_AVAILABLE", True),
             patch("apflow.extensions.email.send_email_executor.aiosmtplib") as mock_aiosmtplib,
         ):
-            mock_aiosmtplib.send = AsyncMock()
+            mock_aiosmtplib.send = AsyncMock(return_value=({}, "Message accepted"))
 
             result = await executor.execute(
                 {
@@ -644,6 +658,7 @@ class TestEnvVarDefaults:
                     "body": "Hello",
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_aiosmtplib.send.call_args[1]
@@ -668,7 +683,7 @@ class TestEnvVarDefaults:
             patch("apflow.extensions.email.send_email_executor.AIOSMTPLIB_AVAILABLE", True),
             patch("apflow.extensions.email.send_email_executor.aiosmtplib") as mock_aiosmtplib,
         ):
-            mock_aiosmtplib.send = AsyncMock()
+            mock_aiosmtplib.send = AsyncMock(return_value=({}, "Message accepted"))
 
             result = await executor.execute(
                 {
@@ -681,6 +696,7 @@ class TestEnvVarDefaults:
                     "body": "Hello",
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_aiosmtplib.send.call_args[1]

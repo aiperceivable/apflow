@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 import re
 
+from apflow.core.distributed.config import as_utc
 from apflow.core.storage.sqlalchemy.models import ScheduleType
 from apflow.core.utils.helpers import parse_iso_datetime
 
@@ -31,8 +32,8 @@ class ScheduleCalculator:
 
     @staticmethod
     def calculate_next_run(
-        schedule_type: str,
-        expression: str,
+        schedule_type: Optional[str],
+        expression: Optional[str],
         from_time: Optional[datetime] = None,
         timezone_str: Optional[str] = None,
     ) -> Optional[datetime]:
@@ -61,7 +62,7 @@ class ScheduleCalculator:
         # Get timezone-aware from_time
         if from_time is None:
             from_time = ScheduleCalculator._get_current_time(timezone_str)
-        elif from_time.tzinfo is None and timezone_str:
+        elif timezone_str:
             from_time = ScheduleCalculator._localize_time(from_time, timezone_str)
 
         # Dispatch to appropriate calculator method
@@ -456,12 +457,14 @@ class ScheduleCalculator:
             from datetime import timezone as tz
 
             from_time = datetime.now(tz.utc)
+        else:
+            from_time = as_utc(from_time)
 
         # Check schedule boundaries
-        if schedule_start_at and from_time < schedule_start_at:
+        if schedule_start_at and from_time < as_utc(schedule_start_at):
             return False
 
-        if schedule_end_at and from_time > schedule_end_at:
+        if schedule_end_at and from_time > as_utc(schedule_end_at):
             return False
 
         # Check run count limit

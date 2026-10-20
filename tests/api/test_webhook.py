@@ -8,6 +8,7 @@ with the gateway's DB-backed execution mocked.
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
+from typing import TypedDict, Unpack
 
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
@@ -17,7 +18,14 @@ from apflow.api.webhook import build_webhook_routes
 _TRIGGER = "apflow.scheduler.gateway.webhook.WebhookGateway.trigger_task"
 
 
-def _client(**kwargs: object) -> TestClient:
+class WebhookOptions(TypedDict, total=False):
+    secret_key: str | None
+    allowed_ips: list[str] | None
+    rate_limit: int
+    async_execution: bool
+
+
+def _client(**kwargs: Unpack[WebhookOptions]) -> TestClient:
     return TestClient(Starlette(routes=build_webhook_routes(**kwargs)))
 
 

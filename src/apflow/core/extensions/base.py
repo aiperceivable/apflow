@@ -6,7 +6,7 @@ in the framework.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, TYPE_CHECKING
 from apflow.core.extensions.types import ExtensionCategory
 
 
@@ -37,19 +37,27 @@ class Extension(ABC):
                 ...
     """
 
-    @property
-    @abstractmethod
-    def id(self) -> str:
-        """
-        Globally unique identifier for this extension
+    # Metadata supports fields and properties while retaining runtime ABC enforcement.
+    if TYPE_CHECKING:
+        id: str
+        name: str
+        version: str
 
-        This ID must be unique across all extensions in the system.
-        Used for precise lookup and conflict detection.
+    if not TYPE_CHECKING:
 
-        Returns:
-            Unique identifier string
-        """
-        pass
+        @property
+        @abstractmethod
+        def id(self) -> str:
+            """
+            Globally unique identifier for this extension
+
+            This ID must be unique across all extensions in the system.
+            Used for precise lookup and conflict detection.
+
+            Returns:
+                Unique identifier string
+            """
+            pass
 
     @property
     @abstractmethod
@@ -65,26 +73,30 @@ class Extension(ABC):
         """
         pass
 
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        """
-        Display name for this extension
+    if not TYPE_CHECKING:
 
-        Returns:
-            Human-readable name string
-        """
-        pass
+        @property
+        @abstractmethod
+        def name(self) -> str:
+            """
+            Display name for this extension
 
-    @property
-    def version(self) -> str:
-        """
-        Extension version
+            Returns:
+                Human-readable name string
+            """
+            pass
 
-        Returns:
-            Version string (default: "1.0.0")
-        """
-        return "1.0.0"
+    if not TYPE_CHECKING:
+
+        @property
+        def version(self) -> str:
+            """
+            Extension version
+
+            Returns:
+                Version string (default: "1.0.0")
+            """
+            return "1.0.0"
 
     @property
     def type(self) -> Optional[str]:

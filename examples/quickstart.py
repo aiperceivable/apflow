@@ -93,6 +93,7 @@ async def main():
     # Step 5: Get results
     for task_id in ["fetch_widget", "fetch_gadget", "total"]:
         task = await app.task_repository.get_task_by_id(task_id)
+        assert task is not None
         print(f"  {task.name}: status={task.status}, result={task.result}")
 
 

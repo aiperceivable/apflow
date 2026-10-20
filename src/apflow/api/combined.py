@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Optional
 
-from apcore.registry.registry import Registry
+from apcore import Registry
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.routing import Mount

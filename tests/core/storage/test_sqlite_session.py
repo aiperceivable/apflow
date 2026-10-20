@@ -4,7 +4,8 @@ import os
 import tempfile
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import Engine, text
+from sqlalchemy.orm import Session
 
 from apflow.core.storage.factory import create_session, reset_default_session
 
@@ -20,12 +21,14 @@ class TestSQLiteSessionCreation:
     def test_create_session_memory(self):
         """Create session with SQLite in-memory mode."""
         session = create_session(connection_string="sqlite:///:memory:")
+        assert isinstance(session, Session)
         assert session is not None
         session.close()
 
     def test_create_session_default(self):
         """Default create_session uses SQLite."""
         session = create_session(path=":memory:")
+        assert isinstance(session, Session)
         assert session is not None
         session.close()
 
@@ -35,6 +38,7 @@ class TestSQLiteSessionCreation:
             db_path = f.name
         try:
             session = create_session(connection_string=f"sqlite:///{db_path}")
+            assert isinstance(session, Session)
             assert session is not None
             session.close()
             assert os.path.exists(db_path)
@@ -54,6 +58,7 @@ class TestSQLiteWALMode:
             db_path = f.name
         try:
             session = create_session(connection_string=f"sqlite:///{db_path}")
+            assert isinstance(session, Session)
             result = session.execute(text("PRAGMA journal_mode"))
             journal_mode = result.scalar()
             assert journal_mode == "wal"
@@ -68,6 +73,7 @@ class TestSQLiteWALMode:
     def test_foreign_keys_enabled(self):
         """SQLite should have foreign_keys=ON."""
         session = create_session(connection_string="sqlite:///:memory:")
+        assert isinstance(session, Session)
         result = session.execute(text("PRAGMA foreign_keys"))
         assert result.scalar() == 1
         session.close()
@@ -75,6 +81,7 @@ class TestSQLiteWALMode:
     def test_busy_timeout_set(self):
         """SQLite should have busy_timeout configured."""
         session = create_session(connection_string="sqlite:///:memory:")
+        assert isinstance(session, Session)
         result = session.execute(text("PRAGMA busy_timeout"))
         assert result.scalar() == 5000
         session.close()
@@ -86,6 +93,7 @@ class TestSQLiteTaskCRUD:
         from apflow.core.storage.sqlalchemy.models import TaskModel
 
         session = create_session(connection_string="sqlite:///:memory:")
+        assert isinstance(session, Session)
 
         task = TaskModel.create(
             {
@@ -115,6 +123,7 @@ class TestSQLiteMigrations:
         from sqlalchemy import inspect as sa_inspect
 
         session = create_session(connection_string="sqlite:///:memory:")
+        assert isinstance(session, Session)
         engine = session.get_bind()
         inspector = sa_inspect(engine)
         table_names = inspector.get_table_names()
@@ -128,7 +137,9 @@ class TestSQLiteMigrations:
         from apflow.core.storage.migrate import MigrationHistoryTable
 
         session = create_session(connection_string="sqlite:///:memory:")
+        assert isinstance(session, Session)
         engine = session.get_bind()
+        assert isinstance(engine, Engine)
         applied = MigrationHistoryTable.get_applied(engine)
         assert len(applied) > 0, "No migrations recorded after create_session()"
         session.close()

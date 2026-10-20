@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from typing import Optional, Union, Callable, TYPE_CHECKING
 from functools import wraps
 from contextlib import asynccontextmanager
+from sqlalchemy_session_proxy import SqlalchemySessionProxy
 from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,7 +53,7 @@ def get_request_session() -> Optional[Union[Session, AsyncSession]]:
     return _db_session_context.get()
 
 
-def get_hook_session() -> Optional[Union[Session, AsyncSession]]:
+def get_hook_session() -> Optional[SqlalchemySessionProxy]:
     """
     Get the database session for hook execution context
 

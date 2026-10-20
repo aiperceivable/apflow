@@ -155,6 +155,9 @@ class WorkerRuntime:
         On PostgreSQL, uses SELECT FOR UPDATE SKIP LOCKED so concurrent
         workers get non-overlapping task batches, reducing contention.
         """
+        available = self._config.max_parallel_tasks_per_node - len(self._running_tasks)
+        if available <= 0:
+            return []
         with self._session_factory() as session:
             query = session.query(TaskModel).filter(
                 TaskModel.status == "pending",
@@ -162,8 +165,13 @@ class WorkerRuntime:
             )
             if is_postgresql(session):
                 query = query.with_for_update(skip_locked=True)
-            query = query.limit(self._config.max_parallel_tasks_per_node)
-            tasks = query.all()
+            tasks = []
+            for task in query.yield_per(self._config.max_parallel_tasks_per_node):
+                if str(task.id) in self._running_tasks or not self._is_eligible_for_this_node(task):
+                    continue
+                tasks.append(task)
+                if len(tasks) >= available:
+                    break
             session.expunge_all()
             return tasks
 
@@ -244,6 +252,19 @@ class WorkerRuntime:
                 else:
                     emit_task_event(self._session_factory, task_id, "task_started", self._node_id)
                     result = await self._task_executor(task)
+
+                if result.get("status") in ("failed", "error"):
+                    self._report_failure(
+                        task_id,
+                        attempt_id,
+                        token,
+                        str(
+                            result.get("error") or result.get("message") or "Task execution failed"
+                        ),
+                        key,
+                    )
+                    return
+                if not is_cached:
                     self._idempotency.store_result(task_id, attempt_id, key, result, "completed")
 
                 self._report_completion(task_id, token, result)

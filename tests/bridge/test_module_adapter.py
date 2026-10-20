@@ -1,5 +1,7 @@
 """Tests for ExecutableTaskModuleAdapter"""
 
+from typing import Any, cast
+
 import pytest
 from apflow.bridge.module_adapter import ExecutableTaskModuleAdapter
 
@@ -52,7 +54,8 @@ class TestAdapterCreation:
         adapter = _make_adapter(tags=["http", "api"], dependencies=["httpx"])
         assert adapter.metadata["executor_id"] == "mock_executor"
         assert adapter.tags == ["http", "api"]
-        assert adapter.metadata["dependencies"] == ["httpx"]
+        assert adapter.metadata["executor_dependencies"] == ["httpx"]
+        assert "dependencies" not in adapter.metadata
         assert adapter.metadata["always_available"] is True
         # apcore ModuleAnnotations should be present
         assert hasattr(adapter.annotations, "readonly")
@@ -69,7 +72,7 @@ class TestAdapterExecution:
     async def test_execute_non_dict_raises(self):
         adapter = _make_adapter()
         with pytest.raises(TypeError, match="must be a dict"):
-            await adapter.execute("not a dict")
+            await adapter.execute(cast(Any, "not a dict"))
 
     @pytest.mark.asyncio
     async def test_execute_empty_inputs(self):

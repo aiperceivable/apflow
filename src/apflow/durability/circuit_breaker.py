@@ -3,6 +3,7 @@ Circuit breaker pattern for executor fault isolation.
 """
 
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 from threading import Lock
@@ -68,6 +69,10 @@ class CircuitBreaker:
         self._half_open_attempts = 0
         self._half_open_entered_at: float = 0.0
         self._lock = Lock()
+        self._generation = 0
+        self._admission_generation: ContextVar[Optional[int]] = ContextVar(
+            f"circuit_admission_{executor_id}", default=None
+        )
 
     def _check_and_transition_state(self) -> None:
         """Must be called with self._lock held.
@@ -102,6 +107,7 @@ class CircuitBreaker:
                 )
                 self._half_open_attempts = 0
                 self._half_open_entered_at = now
+                self._generation += 1
 
     @property
     def state(self) -> CircuitState:
@@ -116,10 +122,12 @@ class CircuitBreaker:
             self._check_and_transition_state()
 
             if self._state == CircuitState.CLOSED:
+                self._admission_generation.set(self._generation)
                 return True
             if self._state == CircuitState.HALF_OPEN:
                 if self._half_open_attempts < self._config.half_open_max_attempts:
                     self._half_open_attempts += 1
+                    self._admission_generation.set(self._generation)
                     return True
                 return False
             return False  # OPEN
@@ -127,6 +135,12 @@ class CircuitBreaker:
     def record_success(self) -> None:
         """Record a successful execution."""
         with self._lock:
+            self._check_and_transition_state()
+            admission_generation = self._admission_generation.get()
+            if self._state == CircuitState.OPEN or (
+                admission_generation is not None and admission_generation != self._generation
+            ):
+                return
             if self._state == CircuitState.HALF_OPEN:
                 logger.info(f"Circuit breaker {self._executor_id}: HALF_OPEN -> CLOSED")
             self._state = CircuitState.CLOSED
@@ -136,16 +150,22 @@ class CircuitBreaker:
     def record_failure(self) -> None:
         """Record a failed execution."""
         with self._lock:
+            admission_generation = self._admission_generation.get()
+            if admission_generation is not None and admission_generation != self._generation:
+                return
             self._failure_count += 1
             self._last_failure_time = time.monotonic()
 
             if self._state == CircuitState.HALF_OPEN:
                 self._state = CircuitState.OPEN
+                self._generation += 1
                 self._half_open_attempts = 0
                 logger.warning(
                     f"Circuit breaker {self._executor_id}: HALF_OPEN -> OPEN (failure in test)"
                 )
             elif self._failure_count >= self._config.failure_threshold:
+                if self._state != CircuitState.OPEN:
+                    self._generation += 1
                 self._state = CircuitState.OPEN
                 logger.warning(
                     f"Circuit breaker {self._executor_id}: CLOSED -> OPEN "
@@ -156,8 +176,10 @@ class CircuitBreaker:
         """Force-reset to CLOSED state."""
         with self._lock:
             self._state = CircuitState.CLOSED
+            self._generation += 1
             self._failure_count = 0
             self._half_open_attempts = 0
+            self._admission_generation.set(None)
             logger.info(f"Circuit breaker {self._executor_id}: force-reset to CLOSED")
 
 

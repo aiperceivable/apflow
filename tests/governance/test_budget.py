@@ -167,3 +167,22 @@ class TestBudgetManager:
         bm = BudgetManager(repo)
         with pytest.raises(KeyError):
             await bm.update_usage("nonexistent", {"input": 10, "output": 10, "total": 20})
+
+
+@pytest.mark.asyncio
+async def test_budget_update_derives_total_from_input_and_output() -> None:
+    task = _mock_task(token_budget=100, token_usage={"total": 100})
+    repository = _async_repo(task)
+    await BudgetManager(repository).update_usage("t1", {"input": 80, "output": 20})
+    repository.increment_token_usage.assert_awaited_once_with(
+        "t1", input_delta=80, output_delta=20, total_delta=100
+    )
+
+
+@pytest.mark.asyncio
+async def test_budget_check_derives_total_for_historical_usage() -> None:
+    task = _mock_task(token_budget=100, token_usage={"input": 80, "output": 20})
+    result = await BudgetManager(_async_repo(task)).check_budget("t1")
+    assert not result.allowed
+    assert result.remaining == 0
+    assert result.utilization == 1.0

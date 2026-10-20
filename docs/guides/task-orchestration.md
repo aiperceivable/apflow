@@ -54,6 +54,28 @@ tasks = [
 # report and notify both depend on data, execute in parallel after data completes
 ```
 
+## Dependency Results
+
+The `parent_id` field groups tasks; it does not collect their results. Declare
+`dependencies` on a consumer or aggregation task to receive upstream business
+outputs at `inputs[dependency_id]`. This applies regardless of executor schemas;
+matching field names do not automatically bind inputs. Select the needed fields
+explicitly, and use the current dependency IDs when copying workflows.
+
+New executor classes declare `result_format = "envelope"` and return
+`{"result": business_output, "token_usage": {"total": 120}}`. TaskManager extracts
+one outer `result` into storage and handles usage separately. Put business evidence
+inside `result`; use optional outer `error` for an explicit failure. Empty values
+and `null` are valid business outputs. Aggregation receives business outputs,
+without the execution wrapper. The root API also puts its business output under
+`result`, alongside execution status and progress.
+
+Existing executor classes default to `legacy`, preserving the complete old return
+value and its top-level error/usage convention. Use explicit `raw` to treat all
+returned fields as business data. Historical database results remain unchanged;
+only explicitly convert known envelopes. See the
+[result protocol and migration rules](../architecture/task-orchestration.md#executor-result-protocol).
+
 ## Reusing Workflows
 
 ### Copy (re-run with changes)
@@ -104,6 +126,13 @@ async def call_api(inputs: dict) -> dict:
         resp = await client.get(inputs["url"])
         return {"status": resp.status_code, "data": resp.text[:1000]}
 ```
+
+The original decorated function still returns business data. Its registered
+executor returns `{"result": business_data}` and advertises the matching outer
+schema through REST, MCP, A2A, and CLI. For a function that already returns an
+execution envelope, pass `result_format="envelope"` and describe that complete
+return with its output schema. Functions using the old top-level error/usage
+convention can explicitly request `result_format="legacy"`.
 
 ## Durability
 

@@ -76,7 +76,7 @@ def get_executor_metadata(executor_id: str) -> Optional[Dict[str, Any]]:
 
     # Get input schema from executor instance
     input_schema = {}
-    if hasattr(executor_instance, "get_input_schema"):
+    if executor_instance is not None and hasattr(executor_instance, "get_input_schema"):
         try:
             input_schema = executor_instance.get_input_schema()
         except Exception as e:

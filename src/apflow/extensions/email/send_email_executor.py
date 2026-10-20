@@ -20,11 +20,12 @@ If provider is not specified, it will be auto-detected based on available env va
 import os
 import httpx
 from email.message import EmailMessage
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
 from apflow.core.base import BaseTask
+from apflow.core.execution.result_protocol import executor_result_schema
 from apflow.core.execution.errors import ConfigurationError, ValidationError
 from apflow.core.extensions.decorators import executor_register
 from apflow.logger import get_logger
@@ -106,6 +107,12 @@ class SendEmailOutputSchema(BaseModel):
     status_code: Optional[int] = Field(default=None, description="HTTP status code (resend only)")
     message: Optional[str] = Field(default=None, description="Success/error message")
     error: Optional[str] = Field(default=None, description="Error details (on failure)")
+    accepted_recipients: Optional[List[str]] = Field(
+        default=None, description="SMTP recipients that accepted a partially delivered message"
+    )
+    refused_recipients: Optional[List[str]] = Field(
+        default=None, description="SMTP recipients that refused a partially delivered message"
+    )
 
 
 @executor_register()
@@ -150,8 +157,11 @@ class SendEmailExecutor(BaseTask):
     ]
 
     cancelable: bool = False
-    inputs_schema: ClassVar[type[BaseModel]] = SendEmailInputSchema
-    outputs_schema: ClassVar[type[BaseModel]] = SendEmailOutputSchema
+    inputs_schema: type[BaseModel] | Dict[str, Any] | None = SendEmailInputSchema
+    result_format = "envelope"
+    outputs_schema: type[BaseModel] | Dict[str, Any] | None = executor_result_schema(
+        SendEmailOutputSchema.model_json_schema()
+    )
 
     @property
     def type(self) -> str:
@@ -206,6 +216,14 @@ class SendEmailExecutor(BaseTask):
         return merged
 
     async def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """Separate provider business output from execution failure metadata."""
+        response = await self._send_message(inputs)
+        outcome: Dict[str, Any] = {"result": response}
+        if response.get("success") is False:
+            outcome["error"] = str(response.get("error") or "Email delivery failed")
+        return outcome
+
+    async def _send_message(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """
         Send an email using the specified provider.
 
@@ -382,7 +400,6 @@ class SendEmailExecutor(BaseTask):
         logger.info(f"Sending email via SMTP ({smtp_host}:{smtp_port}) to {to_list}")
 
         send_kwargs: Dict[str, Any] = {
-            "message": msg,
             "hostname": smtp_host,
             "port": smtp_port,
             "recipients": all_recipients,
@@ -396,7 +413,18 @@ class SendEmailExecutor(BaseTask):
         if smtp_password:
             send_kwargs["password"] = smtp_password
 
-        await aiosmtplib.send(**send_kwargs)  # type: ignore[possibly-undefined]
+        refused, _ = await aiosmtplib.send(msg, **send_kwargs)  # type: ignore[possibly-undefined]
+
+        if refused:
+            return {
+                "success": False,
+                "provider": "smtp",
+                "error": f"Email delivery refused for: {', '.join(refused)}",
+                "accepted_recipients": [
+                    recipient for recipient in all_recipients if recipient not in refused
+                ],
+                "refused_recipients": list(refused),
+            }
 
         return {
             "success": True,

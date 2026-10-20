@@ -11,7 +11,7 @@ Type-specific decorators:
 - @hook_register() - for hooks
 """
 
-from typing import Callable, Optional, Dict, Any, Type, TYPE_CHECKING
+from typing import Callable, Optional, Dict, Any, Type, TYPE_CHECKING, cast
 from apflow.core.extensions.registry import get_registry
 from apflow.core.extensions.base import Extension
 from apflow.core.extensions.protocol import ExecutorFactory
@@ -47,11 +47,12 @@ def _register_extension(
             f"Class {cls.__name__} must implement Extension interface "
             f"to use extension registration decorator"
         )
+    extension_class = cast(Type[Any], cls)
 
     # Create a template instance for metadata
     try:
         # Try to create instance with empty inputs
-        template = cls(inputs={})
+        template = extension_class(inputs={})
     except Exception as e:
         # If instantiation fails, create a minimal template using class attributes
         logger.debug(
@@ -78,11 +79,11 @@ def _register_extension(
         resolved_description = _resolve_class_attr("description", "")
 
         # Create a minimal template class
-        class TemplateClass(cls):
+        class TemplateClass(extension_class):
             """Template instance for registration"""
 
-            id = resolved_id  # type: ignore
-            name = resolved_name  # type: ignore
+            id = resolved_id
+            name = resolved_name
             description = resolved_description
 
             def __init__(self):
@@ -104,19 +105,19 @@ def _register_extension(
     class CategoryOverride:
         """Wrapper to override category property"""
 
-        def __init__(self, wrapped, override_category):
+        def __init__(self, wrapped: Extension, override_category: "ExtensionCategory") -> None:
             self._wrapped = wrapped
             self._category = override_category
 
         @property
-        def category(self):
+        def category(self) -> "ExtensionCategory":
             return self._category
 
-        def __getattr__(self, name):
+        def __getattr__(self, name: str) -> Any:
             # Delegate all other attributes to wrapped object
             return getattr(self._wrapped, name)
 
-        def __setattr__(self, name, value):
+        def __setattr__(self, name: str, value: Any) -> None:
             # Handle our own attributes
             if name in ("_wrapped", "_category"):
                 super().__setattr__(name, value)
@@ -124,7 +125,7 @@ def _register_extension(
                 # Delegate to wrapped object
                 setattr(self._wrapped, name, value)
 
-    template = CategoryOverride(template, category)
+    template = cast(Extension, CategoryOverride(template, category))
     logger.debug(
         f"Category override: {original_category.value} -> {category.value} " f"for {cls.__name__}"
     )
@@ -143,17 +144,17 @@ def _register_extension(
             try:
                 # Try to instantiate with **inputs
                 # This allows passing task_id and other kwargs
-                return cls(**inputs)
+                return extension_class(**inputs)
             except TypeError:
                 # Fallback: separate inputs from other kwargs
                 # Extract 'inputs' key if present, otherwise use all as inputs
                 executor_inputs = inputs.pop("inputs", inputs) if "inputs" in inputs else inputs
                 # Try with inputs parameter and remaining kwargs
                 try:
-                    return cls(inputs=executor_inputs, **inputs)
+                    return extension_class(inputs=executor_inputs, **inputs)
                 except TypeError:
                     # Final fallback: just inputs parameter
-                    return cls(inputs=executor_inputs)
+                    return extension_class(inputs=executor_inputs)
 
         executor_factory = default_factory
 
@@ -253,8 +254,7 @@ def executor_register(
         registered_cls = _register_extension(cls, ExtensionCategory.EXECUTOR, factory, override)
 
         # Store hooks in executor class metadata
-        if not hasattr(registered_cls, "_executor_hooks"):
-            registered_cls._executor_hooks = {}
+        registered_cls._executor_hooks = dict(getattr(registered_cls, "_executor_hooks", {}))
 
         if pre_hook:
             registered_cls._executor_hooks["pre_hook"] = pre_hook

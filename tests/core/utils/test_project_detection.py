@@ -99,6 +99,7 @@ class TestGetProjectDataDir:
         with patch("pathlib.Path.cwd", return_value=subdir):
             result = get_project_data_dir()
             assert result == temp_project_dir / ".data"
+            assert result is not None
             assert result.name == ".data"
 
 

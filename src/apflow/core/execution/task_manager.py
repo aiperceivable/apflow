@@ -5,11 +5,12 @@ Task management service for orchestrating and executing tasks
 from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Dict, Any, Optional, List, Union
+from typing import TYPE_CHECKING, Dict, Any, Optional, List, Union, cast
 import asyncio
+from copy import deepcopy
 from decimal import Decimal
 from inspect import iscoroutinefunction
-from apflow.core.storage.sqlalchemy.models import TaskModelType
+from apflow.core.storage.sqlalchemy.models import TaskModel
 
 if TYPE_CHECKING:
     from apflow.durability.checkpoint import CheckpointManager
@@ -35,7 +36,13 @@ from apflow.core.config import (
 from apflow.core.validator.dependency_validator import (
     are_dependencies_satisfied,
 )
-from apflow.core.execution.errors import BusinessError, ExecutorError
+from apflow.core.execution.errors import (
+    BusinessError,
+    ConfigurationError,
+    ExecutorError,
+    ValidationError,
+)
+from apflow.core.execution.result_protocol import ExecutorResult, normalize_executor_result
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
@@ -100,7 +107,7 @@ class TaskManager:
             db: Database session (sync or async)
             root_task_id: Optional root task ID for streaming
             pre_hooks: Optional list of pre-execution hook functions
-                Each hook receives (task: TaskModelType)
+                Each hook receives (task: TaskModel)
                 Hooks can access and modify task.inputs directly
                 Hooks can be sync or async functions
                 Example:
@@ -110,7 +117,7 @@ class TaskManager:
                             task.inputs["url"] = task.inputs["url"].strip()
                     task_manager = TaskManager(db, pre_hooks=[my_pre_hook])
             post_hooks: Optional list of post-execution hook functions
-                Each hook receives (task: TaskModelType, inputs: Dict[str, Any], result: Any)
+                Each hook receives (task: TaskModel, inputs: Dict[str, Any], result: Any)
                 Hooks can be sync or async functions
                 Example:
                     async def my_post_hook(task, inputs, result):
@@ -128,8 +135,8 @@ class TaskManager:
         self.db = db
         self.is_async = isinstance(db, AsyncSession)
         self.root_task_id = root_task_id
-        # Get task_model_class from config registry (supports custom TaskModelType via decorators)
-        task_model_class = get_task_model_class() or TaskModelType
+        # Get task_model_class from config registry (supports custom TaskModel via decorators)
+        task_model_class = get_task_model_class()
         self.task_repository = TaskRepository(db, task_model_class=task_model_class)
         self.streaming_callbacks = StreamingCallbacks(root_task_id=self.root_task_id)
         self.stream = False
@@ -149,6 +156,7 @@ class TaskManager:
         # Track tasks that should be re-executed (even if they are completed or failed)
         # This allows re-executing failed tasks and ensures dependencies are also re-executed
         self._tasks_to_reexecute: set[str] = set()
+        self._executable_task_ids: Optional[set[str]] = None
         # Demo mode flag - if True, executors return demo data instead of executing
         self.use_demo = use_demo
         # Durability (F-003): checkpoint, retry, circuit breaker
@@ -221,8 +229,10 @@ class TaskManager:
                         if cancel_result and cancel_result.get("status") == "cancelled":
                             token_usage = cancel_result.get("token_usage")
                             # Use result if available, otherwise use partial_result
-                            result_data = cancel_result.get("result") or cancel_result.get(
-                                "partial_result"
+                            result_data = (
+                                cancel_result["result"]
+                                if "result" in cancel_result
+                                else cancel_result.get("partial_result")
                             )
                     except Exception as e:
                         logger.warning(
@@ -246,24 +256,27 @@ class TaskManager:
                 "completed_at": datetime.now(timezone.utc),
             }
 
-            # If we have result data (from executor.cancel()), save it
-            if result_data:
-                update_data["result"] = result_data
-
-            # If token_usage is available, merge it into result
-            # If result_data exists, merge token_usage into it; otherwise create new dict
+            if cancel_result and ("result" in cancel_result or "partial_result" in cancel_result):
+                update_data["result"] = deepcopy(result_data)
             if token_usage:
-                if result_data and isinstance(result_data, dict):
-                    # Merge token_usage into existing result
-                    result_with_token = result_data.copy()
-                    result_with_token["token_usage"] = token_usage
-                    update_data["result"] = result_with_token
-                else:
-                    # Create new result dict with token_usage
-                    update_data["result"] = {"token_usage": token_usage}
+                try:
+                    normalized = normalize_executor_result(
+                        {"result": None, "token_usage": token_usage}, "envelope"
+                    )
+                    token_usage = normalized.get("token_usage")
+                except ValidationError as exc:
+                    logger.warning("Task %s: invalid cancellation usage: %s", task_id, exc)
+                    token_usage = None
 
             # Update task status in one call (combines status, error, result, token_usage)
             await self.task_repository.update_task(task_id=task_id, **update_data)
+            if token_usage:
+                try:
+                    await self._update_token_usage(task_id, token_usage)
+                except Exception as exc:
+                    logger.warning(
+                        "Task %s: failed to persist cancellation usage: %s", task_id, exc
+                    )
 
             # Clear executor reference and task context to prevent memory leaks
             async with self._executor_lock:
@@ -281,7 +294,7 @@ class TaskManager:
             if token_usage:
                 result["token_usage"] = token_usage
 
-            if result_data:
+            if cancel_result and ("result" in cancel_result or "partial_result" in cancel_result):
                 result["result"] = result_data
 
             logger.info(f"Task {task_id} cancelled successfully")
@@ -294,6 +307,20 @@ class TaskManager:
                 "message": f"Failed to cancel task {task_id}",
                 "error": str(e),
             }
+
+    def _get_execution_tree(self, task_tree: TaskTreeNode) -> TaskTreeNode:
+        """Build a summary of selected tasks while retaining the distribution tree."""
+        if self._executable_task_ids is None:
+            return task_tree
+        selected_tasks = [
+            node.task for node in task_tree if str(node.task.id) in self._executable_task_ids
+        ]
+        requested_task = next(task for task in selected_tasks if str(task.id) == self.root_task_id)
+        execution_tree = TaskTreeNode(requested_task)
+        for task in selected_tasks:
+            if task.id != requested_task.id:
+                execution_tree.add_child(TaskTreeNode(task))
+        return execution_tree
 
     async def distribute_task_tree(
         self, task_tree: TaskTreeNode, use_callback: bool = True
@@ -314,10 +341,11 @@ class TaskManager:
         set_hook_context(self.task_repository)
 
         try:
-            root_task = task_tree.task
+            execution_tree = self._get_execution_tree(task_tree)
+            root_task = execution_tree.task
 
             # Call on_tree_created hook
-            await self._call_task_tree_hooks("on_tree_created", root_task, task_tree)
+            await self._call_task_tree_hooks("on_tree_created", root_task, execution_tree)
 
             # Call on_tree_started hook
             await self._call_task_tree_hooks("on_tree_started", root_task)
@@ -327,7 +355,7 @@ class TaskManager:
                 await self._execute_task_tree_recursive(task_tree, use_callback)
 
                 # Check final status
-                final_status = task_tree.calculate_status()
+                final_status = execution_tree.calculate_status()
 
                 # Call on_tree_completed hook
                 if final_status == "completed":
@@ -366,41 +394,46 @@ class TaskManager:
             # Enable streaming mode and set root task ID
             self.stream = True
             self.streaming_final = False
-            self.root_task_id = task_tree.task.id
-
-            root_task = task_tree.task
+            execution_tree = self._get_execution_tree(task_tree)
+            root_task = execution_tree.task
+            self.root_task_id = root_task.id
 
             # Call on_tree_created hook
-            await self._call_task_tree_hooks("on_tree_created", root_task, task_tree)
+            await self._call_task_tree_hooks("on_tree_created", root_task, execution_tree)
 
             # Call on_tree_started hook
             await self._call_task_tree_hooks("on_tree_started", root_task)
 
+            root_task_id = root_task.id
             try:
                 # Send initial status
-                self.streaming_callbacks.progress(
-                    task_tree.task.id, 0.0, "Task tree execution started"
-                )
+                self.streaming_callbacks.progress(root_task.id, 0.0, "Task tree execution started")
 
                 # Save task IDs before execution to avoid accessing them after session rollback
                 root_task_id = root_task.id
-                task_tree_root_id = task_tree.task.id
+                task_tree_root_id = root_task.id
 
                 # Execute task tree with progress streaming
                 await self._execute_task_tree_recursive(task_tree, use_callback)
 
                 # Check final status
-                final_progress = task_tree.calculate_progress()
-                final_status = task_tree.calculate_status()
+                final_progress = execution_tree.calculate_progress()
+                final_status = execution_tree.calculate_status()
 
                 # Ensure progress is a float
                 if isinstance(final_progress, Decimal):
                     final_progress = float(final_progress)
 
+                finished_root = await self.task_repository.get_task_by_id(str(task_tree_root_id))
+                business_result = finished_root.result if finished_root is not None else None
+
                 # Send final status if all tasks are completed
                 if final_status == "completed":
                     self.streaming_callbacks.final(
-                        task_tree_root_id, final_status, result={"progress": final_progress}
+                        task_tree_root_id,
+                        final_status,
+                        result=business_result,
+                        progress=final_progress,
                     )
                     # Call on_tree_completed hook
                     await self._call_task_tree_hooks("on_tree_completed", root_task, "completed")
@@ -408,7 +441,11 @@ class TaskManager:
                     # Send final progress update
                     if final_status == "failed":
                         self.streaming_callbacks.final(
-                            task_tree_root_id, "failed", error=f"Task tree execution {final_status}"
+                            task_tree_root_id,
+                            "failed",
+                            result=business_result,
+                            error=f"Task tree execution {final_status}",
+                            progress=final_progress,
                         )
                     else:
                         self.streaming_callbacks.progress(
@@ -423,9 +460,7 @@ class TaskManager:
                 logger.error(f"Error in distribute_task_tree_with_streaming: {str(e)}")
                 # Use saved task ID to avoid accessing task after session rollback
                 try:
-                    task_tree_root_id = (
-                        task_tree.task.id if task_tree and task_tree.task else root_task_id
-                    )
+                    task_tree_root_id = root_task.id if root_task is not None else root_task_id
                 except Exception:
                     task_tree_root_id = root_task_id
                 self.streaming_callbacks.task_failed(task_tree_root_id, str(e))
@@ -468,8 +503,14 @@ class TaskManager:
                 )
                 return
 
-            # Check if node task should be processed
+            # Structural ancestors remain traversable without running their executors.
             task_id = str(node.task.id)
+            if self._executable_task_ids is not None and task_id not in self._executable_task_ids:
+                for child in sorted(node.children, key=lambda item: item.task.priority or 999):
+                    await self._execute_task_tree_recursive(child, use_callback)
+                return
+
+            # Check if node task should be processed
             if node.task.status in ["completed", "in_progress"]:
                 if task_id not in self._tasks_to_reexecute:
                     logger.info(
@@ -691,7 +732,7 @@ class TaskManager:
                 priority_groups[priority].append(child_node)
                 self._add_children_to_priority_groups(child_node, priority_groups)
 
-    def _get_safe_task_id(self, task: TaskModelType) -> Optional[str]:
+    def _get_safe_task_id(self, task: TaskModel) -> Optional[str]:
         """
         Safely extract task ID avoiding SQLAlchemy lazy loading after session rollback
 
@@ -730,7 +771,7 @@ class TaskManager:
             # If all methods fail, return None
             return None
 
-    async def _check_task_execution_preconditions(self, task: TaskModelType, task_id: str) -> bool:
+    async def _check_task_execution_preconditions(self, task: TaskModel, task_id: str) -> bool:
         """
         Check if task can be executed (status, streaming final, cancellation, in-progress)
 
@@ -780,7 +821,7 @@ class TaskManager:
 
     async def _check_cancellation_and_refresh_task(
         self, task_id: str, stage: str = "pre-execution"
-    ) -> Optional[TaskModelType]:
+    ) -> Optional[TaskModel]:
         """
         Check if task was cancelled and refresh task from database
 
@@ -806,7 +847,7 @@ class TaskManager:
         return task
 
     async def _resolve_and_update_task_inputs(
-        self, task: TaskModelType, task_id: str
+        self, task: TaskModel, task_id: str
     ) -> Dict[str, Any]:
         """
         Resolve task dependencies and update inputs in database if changed
@@ -822,26 +863,28 @@ class TaskManager:
         resolved_inputs = await self.resolve_task_dependencies(task)
 
         # Check cancellation before proceeding
-        task = await self._check_cancellation_and_refresh_task(
+        refreshed_task = await self._check_cancellation_and_refresh_task(
             task_id, "during dependency resolution"
         )
-        if not task:
+        if not refreshed_task:
             return {}
+        task = refreshed_task
 
         # Update inputs if they changed
         if resolved_inputs != (task.inputs or {}):
             logger.debug(f"Dependency resolution modified inputs for task {task_id}")
             await self.task_repository.update_task(task_id, inputs=resolved_inputs)
             # Refresh task object
-            task = await self._check_cancellation_and_refresh_task(task_id, "after input update")
-            if not task:
+            refreshed_task = await self._check_cancellation_and_refresh_task(
+                task_id, "after input update"
+            )
+            if not refreshed_task:
                 return {}
+            task = refreshed_task
 
         return resolved_inputs
 
-    async def _execute_and_apply_pre_hooks(
-        self, task: TaskModelType, task_id: str
-    ) -> Dict[str, Any]:
+    async def _execute_and_apply_pre_hooks(self, task: TaskModel, task_id: str) -> Dict[str, Any]:
         """
         Execute pre-hooks and apply any input modifications to database
 
@@ -874,11 +917,12 @@ class TaskManager:
             await self.task_repository.update_task(task_id, inputs=inputs_to_save)
 
             # Refresh task and check cancellation
-            task = await self._check_cancellation_and_refresh_task(
+            refreshed_task = await self._check_cancellation_and_refresh_task(
                 task_id, "after pre-hook input update"
             )
-            if not task:
+            if not refreshed_task:
                 return {}
+            task = refreshed_task
 
             logger.info(f"Pre-hooks modified inputs for task {task_id}, updated in database")
         else:
@@ -886,8 +930,15 @@ class TaskManager:
 
         return task.inputs or {}
 
+    async def _update_token_usage(self, task_id: str, usage: Dict[str, int]) -> None:
+        """Persist execution metadata regardless of budget-policy configuration."""
+        from apflow.governance.budget import BudgetManager
+
+        manager = self._budget_manager or BudgetManager(self.task_repository)
+        await manager.update_usage(task_id, usage)
+
     async def _handle_task_execution_result(
-        self, task: TaskModelType, task_id: str, task_result: Dict[str, Any]
+        self, task: TaskModel, task_id: str, task_result: ExecutorResult
     ) -> None:
         """
         Handle task execution result: update status, clear executor, call post-hooks
@@ -902,8 +953,11 @@ class TaskManager:
         # This prevents blocking in sync sessions when there are uncommitted transactions
         if not self.is_async:
             self.db.expire_all()
-        task = await self.task_repository.get_task_by_id(task_id)
-        if task and task.status == "cancelled":
+        refreshed_task = await self.task_repository.get_task_by_id(task_id)
+        if refreshed_task is None:
+            raise ValueError(f"Task {task_id} not found after execution")
+        task = refreshed_task
+        if task.status == "cancelled":
             logger.info(f"Task {task_id} was cancelled during execution, stopping")
             # Clear executor reference
             async with self._executor_lock:
@@ -913,8 +967,9 @@ class TaskManager:
                 logger.debug(f"Cleared task context for task {task_id} after cancellation")
 
             if self.stream:
-                if hasattr(self.streaming_callbacks, "task_cancelled"):
-                    self.streaming_callbacks.task_cancelled(task_id)
+                cancellation_callback = getattr(self.streaming_callbacks, "task_cancelled", None)
+                if cancellation_callback is not None:
+                    cancellation_callback(task_id)
                 else:
                     self.streaming_callbacks.task_failed(task_id, "Task was cancelled")
             return
@@ -926,17 +981,22 @@ class TaskManager:
             executor.clear_task_context()
             logger.debug(f"Cleared task context for task {task_id} after successful execution")
 
+        # --- Governance: Update token usage post-execution ---
+        token_usage = task_result.get("token_usage") if isinstance(task_result, dict) else None
+        if token_usage:
+            await self._update_token_usage(task_id, token_usage)
+
         # Check if the result indicates an error (e.g., executor creation failed).
         # Require a truthy error value: a successful payload that merely carries an
         # "error": None / "" field must not be misclassified as a failure.
-        if isinstance(task_result, dict) and task_result.get("error"):
+        error_message = task_result.get("error")
+        if error_message:
             # Task failed - update status to failed
-            error_message = task_result["error"]
             await self.task_repository.update_task(
                 task_id=task_id,
                 status="failed",
                 progress=0.0,
-                result=task_result,
+                result=task_result["result"],
                 error=error_message,
                 completed_at=datetime.now(timezone.utc),
             )
@@ -950,18 +1010,10 @@ class TaskManager:
                 task_id=task_id,
                 status="completed",
                 progress=1.0,
-                result=task_result,
+                result=task_result["result"],
                 error=None,
                 completed_at=datetime.now(timezone.utc),
             )
-
-            # --- Governance: Update token usage post-execution ---
-            token_usage = task_result.get("token_usage") if isinstance(task_result, dict) else None
-            if token_usage and self._budget_manager:
-                try:
-                    await self._budget_manager.update_usage(task_id, token_usage)
-                except Exception as e:
-                    logger.warning(f"Task {task_id}: failed to update token usage: {e}")
 
             # --- Durability: Record success, clean up checkpoints ---
             if self._circuit_breaker_registry:
@@ -977,9 +1029,10 @@ class TaskManager:
             # Refresh and notify
             if not self.is_async:
                 self.db.expire_all()
-            task = await self.task_repository.get_task_by_id(task_id)
-            if not task:
+            refreshed_task = await self.task_repository.get_task_by_id(task_id)
+            if refreshed_task is None:
                 raise ValueError(f"Task {task_id} not found after completion update")
+            task = refreshed_task
 
             if self.stream:
                 self.streaming_callbacks.task_completed(task_id, result=task.result)
@@ -1006,7 +1059,7 @@ class TaskManager:
                         exc_info=True,
                     )
 
-    async def _are_dependencies_satisfied(self, task: TaskModelType) -> bool:
+    async def _are_dependencies_satisfied(self, task: TaskModel) -> bool:
         """
         Check if all dependencies for a task are satisfied
 
@@ -1023,7 +1076,50 @@ class TaskManager:
             task, self.task_repository, self._tasks_to_reexecute
         )
 
-    async def _execute_single_task(self, task: TaskModelType, use_callback: bool = True):
+    async def _apply_budget_policy(self, task: "TaskModel", inputs: Dict[str, Any]) -> bool:
+        """Apply configured thresholds before execution; return whether to proceed."""
+        from apflow.governance.policy import PolicyAction
+
+        if self._budget_manager is None:
+            return True
+        task_id = str(task.id)
+        budget = await self._budget_manager.check_budget(task_id)
+        if budget.utilization < 0:
+            return True
+        error = "Token budget exhausted and no cost policy configured."
+        if self._policy_engine and task.cost_policy:
+            try:
+                evaluation = self._policy_engine.evaluate(
+                    task.cost_policy,
+                    budget.utilization,
+                    current_model_index=(task.params or {}).get("_downgrade_model_index", 0),
+                )
+            except KeyError as exc:
+                raise ConfigurationError(str(exc)) from exc
+            if evaluation.action == PolicyAction.DOWNGRADE and evaluation.model_override:
+                inputs["model"] = evaluation.model_override
+                params = dict(task.params or {})
+                params["_downgrade_model_index"] = evaluation.next_model_index
+                await self.task_repository.update_task(task_id=task_id, params=params)
+                logger.info(f"Task {task_id}: downgrading model to {evaluation.model_override}")
+            elif evaluation.action == PolicyAction.NOTIFY:
+                logger.warning(f"Task {task_id}: {evaluation.message}")
+            if evaluation.action != PolicyAction.BLOCK:
+                return True
+            error = f"Budget policy blocked execution: {evaluation.message}"
+        elif budget.allowed:
+            return True
+        await self.task_repository.update_task(
+            task_id=task_id,
+            status="failed",
+            error=error,
+            completed_at=datetime.now(timezone.utc),
+        )
+        if self.stream:
+            self.streaming_callbacks.task_failed(task_id, error)
+        return False
+
+    async def _execute_single_task(self, task: TaskModel, use_callback: bool = True):
         """
         Execute a single task with proper status management and error handling
 
@@ -1041,6 +1137,11 @@ class TaskManager:
             use_callback: Whether to use callbacks
         """
         task_id = self._get_safe_task_id(task)
+        if task_id is None:
+            logger.error("Cannot execute task without an identifier")
+            return
+        if self._executable_task_ids is not None and task_id not in self._executable_task_ids:
+            return
 
         try:
             # Check pre-execution conditions (streaming final, basic status)
@@ -1048,9 +1149,10 @@ class TaskManager:
                 return
 
             # Refresh task and check cancellation
-            task = await self._check_cancellation_and_refresh_task(task_id)
-            if not task:
+            refreshed_task = await self._check_cancellation_and_refresh_task(task_id)
+            if not refreshed_task:
                 return
+            task = refreshed_task
 
             # Atomically claim task for execution (compare-and-swap).
             # Determines which statuses are claimable based on re-execution context.
@@ -1075,17 +1177,23 @@ class TaskManager:
             await self._resolve_and_update_task_inputs(task, task_id)
 
             # Final cancellation check
-            task = await self._check_cancellation_and_refresh_task(task_id, "before execution")
-            if not task:
+            refreshed_task = await self._check_cancellation_and_refresh_task(
+                task_id, "before execution"
+            )
+            if not refreshed_task:
                 return
+            task = refreshed_task
 
             # Execute pre-hooks
             final_inputs = await self._execute_and_apply_pre_hooks(task, task_id)
 
             # Final cancellation check before execution
-            task = await self._check_cancellation_and_refresh_task(task_id, "before executor call")
-            if not task:
+            refreshed_task = await self._check_cancellation_and_refresh_task(
+                task_id, "before executor call"
+            )
+            if not refreshed_task:
                 return
+            task = refreshed_task
 
             logger.info(f"Task {task_id} execution - calling agent executor (name: {task.name})")
 
@@ -1106,72 +1214,8 @@ class TaskManager:
                         self.streaming_callbacks.task_failed(task_id, error_msg)
                     return
 
-            # --- Governance: Budget pre-check ---
-            if self._budget_manager:
-                try:
-                    budget_check = await self._budget_manager.check_budget(task_id)
-                    if not budget_check.allowed:
-                        # Evaluate cost policy if configured
-                        if self._policy_engine and task.cost_policy:
-                            from apflow.governance.policy import PolicyAction
-
-                            # Resume the downgrade chain from wherever the last
-                            # evaluation for this task left off (persisted in
-                            # params) — without this, current_model_index was
-                            # never threaded and a re-triggered downgrade always
-                            # recomputed the same first tier.
-                            current_model_index = (task.params or {}).get(
-                                "_downgrade_model_index", 0
-                            )
-                            evaluation = self._policy_engine.evaluate(
-                                task.cost_policy,
-                                budget_check.utilization,
-                                current_model_index=current_model_index,
-                            )
-                            if evaluation.action == PolicyAction.BLOCK:
-                                await self.task_repository.update_task(
-                                    task_id=task_id,
-                                    status="failed",
-                                    error=f"Budget exhausted: {evaluation.message}",
-                                    completed_at=datetime.now(timezone.utc),
-                                )
-                                if self.stream:
-                                    self.streaming_callbacks.task_failed(
-                                        task_id, evaluation.message
-                                    )
-                                return
-                            elif (
-                                evaluation.action == PolicyAction.DOWNGRADE
-                                and evaluation.model_override
-                            ):
-                                final_inputs = final_inputs or {}
-                                final_inputs["model"] = evaluation.model_override
-                                # Persist the new chain position so the next
-                                # evaluation for this task (e.g. a retry/re-
-                                # execution still over budget) advances to the
-                                # next tier instead of recomputing this one.
-                                new_params = dict(task.params or {})
-                                new_params["_downgrade_model_index"] = evaluation.next_model_index
-                                await self.task_repository.update_task(
-                                    task_id=task_id, params=new_params
-                                )
-                                logger.info(
-                                    f"Task {task_id}: downgrading model to {evaluation.model_override}"
-                                )
-                            elif evaluation.action == PolicyAction.NOTIFY:
-                                logger.warning(f"Task {task_id}: {evaluation.message}")
-                        else:
-                            await self.task_repository.update_task(
-                                task_id=task_id,
-                                status="failed",
-                                error="Token budget exhausted and no cost policy configured.",
-                                completed_at=datetime.now(timezone.utc),
-                            )
-                            if self.stream:
-                                self.streaming_callbacks.task_failed(task_id, "Budget exhausted")
-                            return
-                except KeyError:
-                    pass  # Task not found in budget check — no budget configured
+            if not await self._apply_budget_policy(task, final_inputs):
+                return
 
             # --- Durability: Load checkpoint ---
             if self._checkpoint_manager:
@@ -1192,8 +1236,13 @@ class TaskManager:
                     backoff_base_seconds=float(task.backoff_base_seconds or 1.0),
                 )
 
-                async def _execute_fn():
-                    return await self._execute_task_with_schemas(task, final_inputs)
+                async def _execute_fn() -> ExecutorResult:
+                    attempt_inputs = dict(final_inputs or {})
+                    if self._checkpoint_manager:
+                        checkpoint = await self._checkpoint_manager.load_checkpoint(task_id)
+                        if checkpoint is not None:
+                            attempt_inputs["_checkpoint"] = checkpoint
+                    return await self._execute_task_with_schemas(task, attempt_inputs)
 
                 async def _on_retry(tid: str, attempt: int, exc: Exception):
                     logger.warning(f"Task {tid} retry {attempt + 1}: {exc}")
@@ -1262,7 +1311,7 @@ class TaskManager:
                         f"Failed to call task_failed callback for {task_id}: {callback_error}"
                     )
 
-    async def _execute_pre_hooks(self, task: TaskModelType) -> None:
+    async def _execute_pre_hooks(self, task: TaskModel) -> None:
         """
         Execute pre-execution hooks
 
@@ -1294,7 +1343,7 @@ class TaskManager:
                 )
 
     async def _execute_post_hooks(
-        self, task: TaskModelType, inputs: Dict[str, Any], result: Any
+        self, task: TaskModel, inputs: Dict[str, Any], result: Any
     ) -> None:
         """
         Execute post-execution hooks
@@ -1323,12 +1372,12 @@ class TaskManager:
                     f"Task execution already completed."
                 )
 
-    async def _get_root_task(self, task: TaskModelType) -> TaskModelType:
+    async def _get_root_task(self, task: TaskModel) -> TaskModel:
         """Get root task of the task tree"""
         # Use repository method
         return await self.task_repository.get_root_task(task)
 
-    async def _get_all_tasks_in_tree(self, root_task: TaskModelType) -> List[TaskModelType]:
+    async def _get_all_tasks_in_tree(self, root_task: TaskModel) -> List[TaskModel]:
         """
         Get all tasks in the task tree (recursive)
 
@@ -1372,7 +1421,7 @@ class TaskManager:
 
         return False
 
-    async def _call_task_tree_hooks(self, hook_type: str, root_task: TaskModelType, *args):
+    async def _call_task_tree_hooks(self, hook_type: str, root_task: TaskModel, *args):
         """
         Call task tree lifecycle hooks
 
@@ -1403,7 +1452,7 @@ class TaskManager:
                     f"failed for root task {root_task.id}: {str(e)}. Continuing with task tree execution."
                 )
 
-    async def execute_after_task(self, completed_task: TaskModelType):
+    async def execute_after_task(self, completed_task: TaskModel):
         """
         Execute after task completion - execute post-hooks and trigger dependent tasks.
 
@@ -1499,7 +1548,9 @@ class TaskManager:
         waiting_tasks = [
             t
             for t in all_tasks
-            if t.status in ["pending", "in_progress"] and t.id != completed_task.id
+            if t.status in ["pending", "in_progress"]
+            and t.id != completed_task.id
+            and (self._executable_task_ids is None or str(t.id) in self._executable_task_ids)
         ]
 
         # Trigger dependent tasks if any
@@ -1548,7 +1599,7 @@ class TaskManager:
         else:
             logger.debug("No waiting tasks found")
 
-    def _record_breaker_failure(self, task: TaskModelType, error: BaseException) -> None:
+    def _record_breaker_failure(self, task: TaskModel, error: BaseException) -> None:
         """Record an executor fault on the circuit breaker.
 
         A BusinessError (ValidationError / ConfigurationError / etc.) is a client
@@ -1562,7 +1613,7 @@ class TaskManager:
         if executor_id:
             self._circuit_breaker_registry.get(executor_id).record_failure()
 
-    def _get_executor_id(self, task: TaskModelType) -> Optional[str]:
+    def _get_executor_id(self, task: TaskModel) -> Optional[str]:
         """
         Get executor ID for the task from params or schemas
 
@@ -1577,7 +1628,7 @@ class TaskManager:
         schemas = task.schemas or {}
         return params.get("executor_id") or schemas.get("method")
 
-    def _load_executor(self, task: TaskModelType) -> Extension:
+    def _load_executor(self, task: TaskModel) -> Extension:
         """
         Load executor instance for the task and store in _executor_instances
 
@@ -1619,8 +1670,8 @@ class TaskManager:
         return extension
 
     async def _execute_task_with_schemas(
-        self, task: TaskModelType, inputs: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, task: TaskModel, inputs: Dict[str, Any]
+    ) -> ExecutorResult:
         """
         Execute task based on schemas configuration
 
@@ -1657,6 +1708,7 @@ class TaskManager:
             error_msg = f"{str(e)}"
             logger.error(f"Executor loading error for task {task.id}: {str(e)}")
             result = {
+                "result": None,
                 "error": error_msg,
                 "task_id": task.id,
                 "name": task.name,
@@ -1671,7 +1723,7 @@ class TaskManager:
                 allowed = get_allowed_executor_ids()
                 if allowed is not None:
                     result["allowed_executors"] = list(allowed)
-            return result
+            return {"result": result, "error": error_msg}
 
         # ============================================================
         # 2. extract executor initialization parameters from params
@@ -1703,7 +1755,7 @@ class TaskManager:
         # Note: Input validation is now handled by executor itself (in BaseTask or executor.execute)
         # Pass task context to executor for full access to task information (including custom fields)
         # This allows executors to:
-        # - Access all task fields (including custom TaskModelType fields)
+        # - Access all task fields (including custom TaskModel fields)
         # - Modify task context (e.g., update status, progress, custom fields)
         # - Share task object efficiently (lifecycle managed by TaskManager)
         registry = get_registry()
@@ -1715,7 +1767,7 @@ class TaskManager:
         executor = registry.create_executor_instance(
             extension_id=executor_id,
             inputs=inputs,  # inputs for execution (will be validated by executor)
-            task=task,  # Pass task context (TaskModelType instance) - supports custom TaskModelType classes
+            task=task,  # Pass task context (TaskModel instance) - supports custom TaskModel classes
             user_id=task.user_id,  # Also pass user_id for backward compatibility
             **executor_config,  # Pass params as kwargs for executor initialization
             cancellation_checker=cancellation_checker,
@@ -1724,7 +1776,7 @@ class TaskManager:
         if executor is None:
             error_msg = f"Failed to create executor instance '{executor_id}'"
             logger.error(error_msg)
-            return {"error": error_msg, "task_id": task.id, "executor_id": executor_id}
+            return {"result": None, "error": error_msg}
 
         # Store executor for cancellation support
         if hasattr(executor, "cancel"):
@@ -1791,22 +1843,10 @@ class TaskManager:
 
                 # Sleep to simulate execution time if configured
                 if sleep_seconds > 0:
-                    import asyncio
-
                     await asyncio.sleep(sleep_seconds)
 
-                # Send task completed event for streaming
-                if self.stream:
-                    self.streaming_callbacks.task_completed(task.id, result=demo_result)
-
-                return demo_result
-            else:
-                # Send task completed event for streaming
-                if self.stream:
-                    self.streaming_callbacks.task_completed(
-                        task.id, result={"result": demo_result, "demo_mode": True}
-                    )
-                return {"result": demo_result, "demo_mode": True}
+                return {"result": demo_result}
+            return {"result": demo_result}
 
         # Get executor class to check for hooks
         executor_class = type(executor)
@@ -1842,11 +1882,13 @@ class TaskManager:
                                 logger.warning(
                                     f"Post_hook failed for executor {executor_id}: {str(e)}"
                                 )
-                        return hook_result
                 except Exception as e:
                     logger.warning(
                         f"Pre_hook failed for executor {executor_id}: {str(e)}. Continuing with execution."
                     )
+
+        if hook_result is not None:
+            return normalize_executor_result(hook_result, executor.result_format)
 
         try:
             result = await executor.execute(inputs)
@@ -1879,7 +1921,7 @@ class TaskManager:
                 )
                 # TODO: Store token usage in a separate statistics system or database
 
-            return result
+            return normalize_executor_result(result, executor.result_format)
         except Exception as e:
             # Log business errors without stack trace, unexpected errors with stack trace
             if isinstance(e, BusinessError):
@@ -1900,358 +1942,29 @@ class TaskManager:
             # Re-raise the exception to let TaskManager mark the task as failed
             raise
 
-    async def resolve_task_dependencies(self, task: TaskModelType) -> Dict[str, Any]:
-        """
-        Resolve task dependencies by merging results from dependency tasks
-
-        Args:
-            task: Task to resolve dependencies for
-
-        Returns:
-            Resolved input data dictionary
-        """
-        inputs = task.inputs.copy() if task.inputs else {}
-
-        # Get task dependencies from the dependencies field
-        task_dependencies = task.dependencies or []
-        if not task_dependencies:
-            logger.debug(f"No dependencies found for task {task.id}")
+    async def resolve_task_dependencies(self, task: TaskModel) -> Dict[str, Any]:
+        """Inject stored business outputs by dependency ID without schema guessing."""
+        declared_inputs = cast(Optional[Dict[str, Any]], task.inputs)
+        inputs = deepcopy(declared_inputs) if declared_inputs else {}
+        dependencies = cast(Optional[List[Any]], task.dependencies)
+        if not dependencies:
             return inputs
-
-        # Get all completed tasks by id in the same task tree
-        completed_tasks_by_id = await self.task_repository.get_completed_tasks_by_id(task)
-
-        logger.info(
-            f"🔍 [Dependency Resolution] Task {task.id} (name: {task.name}) has dependencies: {task_dependencies}"
-        )
-        logger.info(
-            f"🔍 [Dependency Resolution] Available completed tasks: {list(completed_tasks_by_id.keys())}"
-        )
-        # Raw inputs may contain credentials/PII — keep at DEBUG.
-        logger.debug(f"🔍 [Dependency Resolution] Initial inputs: {inputs}")
-
-        # Resolve dependencies based on id
-        for dep in task_dependencies:
-            if isinstance(dep, dict):
-                dep_id = dep.get("id")  # This is the task id of the dependency
-                dep_type = dep.get("type", "result")
-                dep_required = dep.get("required", True)
-
-                logger.info(
-                    f"🔍 [Dependency Resolution] Processing dependency: {dep_id} (type: {dep_type}, required: {dep_required})"
-                )
-
-                if dep_id in completed_tasks_by_id:
-                    # Found the dependency task, get its result
-                    source_task = completed_tasks_by_id[dep_id]
-                    source_result = source_task.result
-
-                    logger.info(
-                        f"🔍 [Dependency Resolution] Found dependency {dep_id} in task {source_task.id}"
+        completed_tasks = await self.task_repository.get_completed_tasks_by_id(task)
+        for dependency in dependencies:
+            dep_id = dependency.get("id") if isinstance(dependency, dict) else dependency
+            if not isinstance(dep_id, str):
+                continue
+            required = dependency.get("required", True) if isinstance(dependency, dict) else True
+            source = completed_tasks.get(dep_id)
+            if source is None:
+                if required:
+                    raise ValidationError(
+                        f"Required dependency '{dep_id}' is not completed for task {task.id}"
                     )
-
-                    if source_result is not None:
-                        # Extract the actual business result
-                        actual_result = source_result
-                        if isinstance(source_result, dict) and "result" in source_result:
-                            actual_result = source_result["result"]
-                            logger.info(
-                                f"🔍 [Dependency Resolution] Extracted 'result' field from {dep_id}: {actual_result}"
-                            )
-
-                        # Schema-based merging
-                        inputs = self._merge_dependency_result_with_schema(
-                            inputs, actual_result, task, source_task, dep_id
-                        )
-                    else:
-                        logger.warning(
-                            f"⚠️ Task {source_task.id} completed but has no result for dependency {dep_id}"
-                        )
-                        if dep_required:
-                            logger.error(
-                                f"❌ Required dependency {dep_id} not resolved for task {task.id}"
-                            )
-                else:
-                    logger.warning(
-                        f"⚠️ Could not resolve dependency {dep_id} for task {task.id} - no completed task found with id {dep_id}"
-                    )
-                    if dep_required:
-                        logger.error(
-                            f"❌ Required dependency {dep_id} not resolved for task {task.id}"
-                        )
-            elif isinstance(dep, str):
-                # Simple string dependency (just the id) - backward compatibility
-                dep_id = dep
-                if dep_id in completed_tasks_by_id:
-                    source_task = completed_tasks_by_id[dep_id]
-                    if source_task.result:
-                        # Extract the actual business result
-                        actual_result = source_task.result
-                        if isinstance(source_task.result, dict) and "result" in source_task.result:
-                            actual_result = source_task.result["result"]
-
-                        # Schema-based merging for backward compatibility
-                        inputs = self._merge_dependency_result_with_schema(
-                            inputs, actual_result, task, source_task, dep_id
-                        )
-
-        logger.info(
-            f"🔍 [Dependency Resolution] Final resolved inputs for task {task.id}: {inputs}"
-        )
-        return inputs
-
-    def _merge_dependency_result_with_schema(
-        self,
-        inputs: Dict[str, Any],
-        actual_result: Any,
-        task: TaskModelType,
-        source_task: TaskModelType,
-        dep_id: str,
-    ) -> Dict[str, Any]:
-        """
-        Merge dependency result into inputs using schema-based mapping
-
-        Args:
-            inputs: Current input dictionary
-            actual_result: The business result from dependency
-            task: Current task that needs inputs
-            source_task: Dependency task that provided the result
-            dep_id: Dependency task ID
-
-        Returns:
-            Updated inputs dictionary
-        """
-        # Get current task's executor to access input schema
-        current_executor = self._get_executor_for_task(task)
-        if not current_executor:
-            logger.warning(
-                f"Could not get executor for task {task.id}, falling back to simple merge"
-            )
-            return self._fallback_merge(inputs, actual_result, dep_id, task)
-
-        # Get input schema
-        input_schema = current_executor.get_input_schema()
-        if not input_schema or not isinstance(input_schema, dict):
-            logger.warning(f"Invalid input schema for task {task.id}, falling back to simple merge")
-            return self._fallback_merge(inputs, actual_result, dep_id, task)
-
-        # Get dependency task's executor to access output schema
-        dep_executor = self._get_executor_for_task(source_task)
-        if not dep_executor:
-            logger.warning(
-                f"Could not get executor for dependency task {source_task.id}, falling back to simple merge"
-            )
-            return self._fallback_merge(inputs, actual_result, dep_id, task)
-
-        # Get output schema
-        output_schema = dep_executor.get_output_schema()
-        if not output_schema or not isinstance(output_schema, dict):
-            logger.warning(
-                f"Invalid output schema for dependency task {source_task.id}, falling back to simple merge"
-            )
-            return self._fallback_merge(inputs, actual_result, dep_id, task)
-
-        # Perform schema-based mapping
-        return self._perform_schema_based_mapping(
-            inputs, actual_result, input_schema, output_schema, dep_id, task.id, task
-        )
-
-    def _get_executor_for_task(self, task: TaskModelType) -> Optional[Any]:
-        """
-        Get executor instance for a task
-
-        Args:
-            task: Task to get executor for
-
-        Returns:
-            Executor instance or None if not found
-
-        Note:
-            This creates a lightweight executor instance for schema discovery only.
-            The instance may not be fully initialized,
-            but should still provide get_input_schema() and get_output_schema() methods.
-        """
-        try:
-            registry = get_registry()
-
-            # Preferred lookup: use executor *ID* from schemas["method"].
-            # Task schemas conventionally store the executor id in "method"
-            # (e.g. "rest_executor", "ssh_executor").
-            method_id: Optional[str] = None
-            if getattr(task, "schemas", None):
-                method_id = task.schemas.get("method")
-
-            executor_instance: Optional[Any] = None
-
-            if method_id:
-                executor_instance = registry.create_executor_instance(
-                    method_id,
-                    inputs=task.inputs or {},
-                    task=task,
-                    task_id=task.id,
-                    user_id=task.user_id,
-                )
-
-            # Fallback: if lookup by id failed but a type is present in schemas,
-            # try resolving by type for backward compatibility.
-            if not executor_instance and getattr(task, "schemas", None):
-                ext_type = task.schemas.get("type")
-                if ext_type:
-                    template = registry.get_by_type(ExtensionCategory.EXECUTOR, ext_type)
-                    if template is not None:
-                        executor_class = template.__class__
-                        # Handle CategoryOverride wrapper used in decorators
-                        if hasattr(template, "_wrapped"):
-                            executor_class = template._wrapped.__class__
-
-                        try:
-                            executor_instance = executor_class(
-                                task=task,
-                                inputs=task.inputs,
-                                user_id=task.user_id,
-                                task_id=task.id,
-                            )
-                        except Exception as e:  # pragma: no cover - defensive
-                            logger.warning(
-                                "Failed to instantiate executor '%s' for task %s via type '%s': %s",
-                                executor_class.__name__,
-                                task.id,
-                                ext_type,
-                                e,
-                                exc_info=True,
-                            )
-
-            return executor_instance
-        except Exception as e:  # pragma: no cover - defensive
-            logger.warning(f"Failed to get executor for task {task.id}: {e}", exc_info=True)
-            return None
-
-    def _perform_schema_based_mapping(
-        self,
-        inputs: Dict[str, Any],
-        actual_result: Any,
-        input_schema: Dict[str, Any],
-        output_schema: Dict[str, Any],
-        dep_id: str,
-        task_id: str,
-        current_task: TaskModelType,
-    ) -> Dict[str, Any]:
-        """
-        Perform schema-based mapping of dependency result to inputs
-
-        Args:
-            inputs: Current input dictionary
-            actual_result: Dependency result to map
-            input_schema: Current task's input schema
-            output_schema: Dependency task's output schema
-            dep_id: Dependency task ID
-            task_id: Current task ID
-
-        Returns:
-            Updated inputs dictionary
-        """
-        # If actual_result is not a dict, store under dep_id
-        if not isinstance(actual_result, dict):
-            inputs[dep_id] = actual_result
-            logger.info(
-                f"✅ [Schema Mapping] Stored non-dict result from {dep_id} in {task_id}: {actual_result}"
-            )
-            return inputs
-
-        # Check if output schema indicates a single result field
-        output_props = output_schema.get("properties", {})
-        if "result" in output_props and len(output_props) == 1:
-            # Dependency produces a single result, check if current task expects it directly
-            input_props = input_schema.get("properties", {})
-
-            # Special handling for aggregation tasks - always store under dep_id
-            task_executor_method = (
-                current_task.schemas.get("method") if current_task.schemas else None
-            )
-            task_executor_id = self._get_executor_id(current_task)
-            if task_executor_id == "aggregate_results_executor" or (
-                task_executor_method and "aggregate" in task_executor_method
-            ):
-                inputs[dep_id] = actual_result
-                logger.info(
-                    f"✅ [Schema Mapping] Stored dependency result under task ID for aggregation task {task_id}: {dep_id}"
-                )
-                return inputs
-
-            # Try to find matching fields by name or type
-            for input_field, input_def in input_props.items():
-                if input_field in actual_result:
-                    # Direct field match
-                    inputs[input_field] = actual_result[input_field]
-                    logger.info(
-                        f"✅ [Schema Mapping] Mapped field '{input_field}' from {dep_id} to {task_id}"
-                    )
-                elif input_field == "content" and "result" in actual_result:
-                    # Common pattern: content field expects the result
-                    inputs[input_field] = actual_result["result"]
-                    logger.info(
-                        f"✅ [Schema Mapping] Mapped 'result' field to 'content' in {task_id}"
-                    )
-                elif input_field == "messages" and isinstance(actual_result.get("result"), list):
-                    # LLM pattern: messages expects the result list
-                    inputs[input_field] = actual_result["result"]
-                    logger.info(
-                        f"✅ [Schema Mapping] Mapped 'result' list to 'messages' in {task_id}"
-                    )
-
-            # If no specific mapping found, merge the result dict
-            if not any(k in actual_result for k in input_props.keys()):
-                inputs.update(actual_result)
-                logger.info(
-                    f"✅ [Schema Mapping] Merged result dict from {dep_id} into {task_id}: {actual_result}"
-                )
-        else:
-            # Complex output, store under dep_id for manual access
-            inputs[dep_id] = actual_result
-            logger.info(
-                f"✅ [Schema Mapping] Stored complex result from {dep_id} in {task_id}: {actual_result}"
-            )
-
-        return inputs
-
-    def _fallback_merge(
-        self, inputs: Dict[str, Any], actual_result: Any, dep_id: str, current_task: TaskModelType
-    ) -> Dict[str, Any]:
-        """
-        Fallback to simple merging when schema-based mapping is not possible
-
-        Args:
-            inputs: Current input dictionary
-            actual_result: Dependency result
-            dep_id: Dependency task ID
-
-        Returns:
-            Updated inputs dictionary
-        """
-        # Special handling for aggregation tasks - always store under dep_id
-        task_executor_id = self._get_executor_id(current_task)
-        if task_executor_id == "aggregate_results_executor":
-            inputs[dep_id] = actual_result
-            logger.info(
-                f"✅ [Fallback Merge] Stored dependency result under task ID for aggregation task {current_task.id}: {dep_id}"
-            )
-            return inputs
-
-        # For task tree dependencies, if actual_result is dict, merge it into inputs
-        if isinstance(actual_result, dict):
-            inputs.update(actual_result)
-            logger.info(
-                f"✅ [Fallback Merge] Merged dict result from {dep_id} into inputs: {actual_result}"
-            )
-        else:
-            # For non-dict results, store under dep_id
-            inputs[dep_id] = actual_result
-            logger.info(
-                f"✅ [Fallback Merge] Stored non-dict result from {dep_id}: {actual_result}"
-            )
+                inputs.pop(dep_id, None)
+                continue
+            inputs[dep_id] = deepcopy(source.result)
         return inputs
 
 
-__all__ = [
-    "TaskManager",
-]
+__all__ = ["TaskManager"]

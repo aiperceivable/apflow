@@ -36,7 +36,6 @@ from apflow.scheduler.gateway.ical import (
     generate_ical_feed_url,
 )
 
-
 # ============================================================================
 # SchedulerConfig Tests
 # ============================================================================
@@ -334,6 +333,7 @@ class TestInternalScheduler:
 
         assert result is True
         # Task should have been in active set when _execute_task was called
+        assert active_ids_snapshot is not None
         assert "task123" in active_ids_snapshot
 
     @pytest.mark.asyncio

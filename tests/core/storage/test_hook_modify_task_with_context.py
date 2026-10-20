@@ -65,6 +65,7 @@ async def test_pre_hook_modifies_inputs_auto_persisted(sync_db_session):
 
         # Verify inputs were persisted to database
         updated_task = await repo.get_task_by_id(task_id)
+        assert updated_task is not None
         assert updated_task.inputs is not None
         assert updated_task.inputs["modified_by_hook"] is True
         assert updated_task.inputs["hook_timestamp"] == "2024-01-01T00:00:00Z"
@@ -117,6 +118,7 @@ async def test_pre_hook_modifies_other_fields_requires_explicit_save(sync_db_ses
 
         # Verify fields were updated in database
         updated_task = await repo.get_task_by_id(task_id)
+        assert updated_task is not None
         assert updated_task.name == "Modified by Hook"
         assert updated_task.priority == 10
     finally:
@@ -176,6 +178,7 @@ async def test_post_hook_modifies_task_after_execution(sync_db_session):
 
         # Verify params were updated
         updated_task = await repo.get_task_by_id(task_id)
+        assert updated_task is not None
         assert updated_task.params is not None
         assert updated_task.params.get("post_hook_executed") is True
         assert "execution_result" in updated_task.params

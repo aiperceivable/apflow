@@ -10,9 +10,21 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, update, text
-from typing import List, Dict, Any, Optional, Union, TYPE_CHECKING, Type, Set
+from typing import (
+    List,
+    Dict,
+    Any,
+    Optional,
+    Union,
+    TYPE_CHECKING,
+    Type,
+    Set,
+    Generic,
+    cast,
+    overload,
+)
 from apflow.core.storage.sqlalchemy.models import TaskModel, TaskOriginType, TaskModelType
-from apflow.core.distributed.config import is_postgresql
+from apflow.core.distributed.config import as_utc, is_postgresql
 from apflow.core.execution.errors import ValidationError
 from sqlalchemy_session_proxy import SqlalchemySessionProxy
 from apflow.logger import get_logger
@@ -23,7 +35,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class TaskRepository:
+class TaskRepository(Generic[TaskModelType]):
     """
     Task repository for database operations
 
@@ -47,9 +59,19 @@ class TaskRepository:
         task = await repo.create_task(..., project_id="proj-123")  # Custom field
     """
 
+    @overload
+    def __init__(self: "TaskRepository[TaskModel]", db: Union[Session, AsyncSession]) -> None: ...
+
+    @overload
     def __init__(
-        self, db: Union[Session, AsyncSession], task_model_class: Type[TaskModelType] = TaskModel
-    ):
+        self, db: Union[Session, AsyncSession], task_model_class: Type[TaskModelType]
+    ) -> None: ...
+
+    def __init__(
+        self,
+        db: Union[Session, AsyncSession],
+        task_model_class: Type[TaskModelType] = cast(Type[TaskModelType], TaskModel),
+    ) -> None:
         """
         Initialize TaskRepository
 
@@ -140,7 +162,7 @@ class TaskRepository:
                 .order_by(self.task_model_class.priority.asc())
             )
             result = await self.db.execute(stmt)
-            return result.scalars().all()
+            return list(result.scalars().all())
         except Exception as e:
             # Re-raise instead of returning []: this method feeds recursive tree
             # traversal (build_task_tree / get_all_tasks_in_tree / children listing),
@@ -254,9 +276,9 @@ class TaskRepository:
             .order_by(self.task_model_class.priority.asc())
         )
         result = await self.db.execute(stmt)
-        return result.scalars().all()
+        return list(result.scalars().all())
 
-    async def build_task_tree_by_tree_id(self, tree_id: str) -> "TaskTreeNode":
+    async def build_task_tree_by_tree_id(self, tree_id: str) -> "TaskTreeNode[TaskModelType]":
         """
         Build a complete task tree structure by tree_id.
 
@@ -303,7 +325,7 @@ class TaskRepository:
         for t in tasks:
             children_by_parent.setdefault(str(t.parent_id), []).append(t)
 
-        def add_children(node: "TaskTreeNode", visited: Set[str]) -> None:
+        def add_children(node: "TaskTreeNode[TaskModelType]", visited: Set[str]) -> None:
             node_id = str(node.task.id)
             if node_id in visited:
                 # Defensive: a corrupt parent_id cycle would otherwise loop forever.
@@ -322,7 +344,7 @@ class TaskRepository:
 
     async def build_task_tree(
         self, task: TaskModelType, _visited: Optional[Set[str]] = None
-    ) -> "TaskTreeNode":
+    ) -> "TaskTreeNode[TaskModelType]":
         """
         Build TaskTreeNode for a task with its children (recursive)
 
@@ -505,7 +527,7 @@ class TaskRepository:
             "total_delta": total_delta,
         }
         try:
-            if is_postgresql(self.db):
+            if is_postgresql(self.db.session):
                 # token_usage is declared as plain JSON (not JSONB) on the
                 # model, and Postgres has no jsonb_set equivalent for json —
                 # cast to jsonb for the computation, then back to json for
@@ -560,7 +582,11 @@ class TaskRepository:
             if result.rowcount == 0:  # type: ignore[union-attr]
                 return None
 
-            return await self.get_task_by_id(task_id)
+            task = await self.get_task_by_id(task_id)
+            if task is not None:
+                # Textual SQL bypasses ORM identity-map synchronization.
+                await self.db.refresh(task)
+            return task
 
         except Exception as e:
             logger.error(f"Error incrementing token usage for task {task_id}: {str(e)}")
@@ -583,8 +609,8 @@ class TaskRepository:
         # Get all tasks in the tree
         all_tasks = await self.get_all_tasks_in_tree(root_task)
 
-        # Filter completed tasks with results
-        completed_tasks = [t for t in all_tasks if t.status == "completed" and t.result is not None]
+        # Completion is independent of whether the business result is null.
+        completed_tasks = [t for t in all_tasks if str(t.status) == "completed"]
 
         # Create a map of completed tasks by id
         completed_tasks_by_id = {t.id: t for t in completed_tasks}
@@ -1113,7 +1139,7 @@ class TaskRepository:
                 logger.info(f"Task {task_id} reached max_runs ({task.max_runs})")
 
             # Check schedule_end_at
-            if task.schedule_end_at is not None and now >= task.schedule_end_at:
+            if task.schedule_end_at is not None and now >= as_utc(task.schedule_end_at):
                 should_disable = True
                 logger.info(f"Task {task_id} passed schedule_end_at")
 
@@ -1184,10 +1210,12 @@ class TaskRepository:
 
             if from_time is None:
                 from_time = datetime.now(tz.utc)
+            else:
+                from_time = as_utc(from_time)
 
             # Check schedule_start_at boundary
-            if task.schedule_start_at and from_time < task.schedule_start_at:
-                from_time = task.schedule_start_at
+            if task.schedule_start_at and from_time < as_utc(task.schedule_start_at):
+                from_time = as_utc(task.schedule_start_at)
 
             from apflow.core.storage.sqlalchemy.schedule_calculator import ScheduleCalculator
 
@@ -1211,7 +1239,7 @@ class TaskRepository:
             return None
 
     async def _set_original_task_has_reference_to_true(
-        self, original_task_id: str
+        self, original_task_id: Optional[str]
     ) -> Optional[TaskModelType]:
         """Update original task's has_references flag to True"""
         if not original_task_id:
@@ -1228,7 +1256,7 @@ class TaskRepository:
 
         return None
 
-    async def save_task_tree(self, root_node: "TaskTreeNode") -> bool:
+    async def save_task_tree(self, root_node: "TaskTreeNode[TaskModelType]") -> bool:
         """Save task tree structure to database recursively"""
         try:
             changed_tasks: List[TaskModelType] = []
@@ -1252,7 +1280,9 @@ class TaskRepository:
             await self.db.rollback()
             return False
 
-    async def _save_task_tree_recursive(self, parent_node: "TaskTreeNode") -> List[TaskModelType]:
+    async def _save_task_tree_recursive(
+        self, parent_node: "TaskTreeNode[TaskModelType]"
+    ) -> List[TaskModelType]:
         """Recursively save children tasks with proper parent_id"""
         changed_tasks: List[TaskModelType] = []
 
@@ -1334,7 +1364,9 @@ class TaskRepository:
             await self.db.rollback()
             return False
 
-    async def get_task_tree_for_api(self, root_task: TaskModelType) -> "TaskTreeNode":
+    async def get_task_tree_for_api(
+        self, root_task: TaskModelType
+    ) -> "TaskTreeNode[TaskModelType]":
         """
         Get the task tree for API/CLI queries, recursively resolving link origin_type for all nodes.
         If any task (root or child) is a link, use its original task's data to build the tree, but keep allowlisted fields from the link node itself.
@@ -1370,13 +1402,11 @@ class TaskRepository:
         else:
             keep_fields = default_keep_fields
 
-        async def resolve_task(task: TaskModelType) -> Optional[TaskModelType]:
+        async def resolve_task(task: TaskModelType) -> TaskModelType:
             # Recursively resolve link, guarding against a link cycle (A -> B -> A)
             # that would otherwise loop forever.
             seen_link_ids: Set[str] = set()
-            while getattr(task, "origin_type", None) == TaskOriginType.link and getattr(
-                task, "original_task_id", None
-            ):
+            while task.origin_type == TaskOriginType.link and task.original_task_id:
                 current_id = str(task.id)
                 if current_id in seen_link_ids:
                     raise ValidationError(f"Link cycle detected while resolving task {task.id}")
@@ -1409,7 +1439,7 @@ class TaskRepository:
             for t in await self.get_tasks_by_tree_id(tree_id):
                 children_by_parent.setdefault(str(t.parent_id), []).append(t)
 
-        async def build_tree(task: TaskModelType) -> TaskTreeNode:
+        async def build_tree(task: TaskModelType) -> TaskTreeNode[TaskModelType]:
             if getattr(task, "origin_type", None) == TaskOriginType.link and getattr(
                 task, "original_task_id", None
             ):

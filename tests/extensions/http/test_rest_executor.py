@@ -48,6 +48,7 @@ class TestRestExecutor:
             result = await executor.execute(
                 {"url": "https://api.example.com/test", "method": "GET"}
             )
+            result = result["result"]
 
             assert result["success"] is True
             assert result["status_code"] == 200
@@ -79,6 +80,7 @@ class TestRestExecutor:
                     "json": {"name": "test"},
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             assert result["status_code"] == 201
@@ -109,6 +111,7 @@ class TestRestExecutor:
                     "auth": {"type": "bearer", "token": "test-token"},
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_client_instance.request.call_args[1]
@@ -138,6 +141,7 @@ class TestRestExecutor:
                     "auth": {"type": "basic", "username": "user", "password": "pass"},
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_client_instance.request.call_args[1]
@@ -198,6 +202,7 @@ class TestRestExecutor:
                     },
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_client_instance.request.call_args[1]
@@ -232,6 +237,7 @@ class TestRestExecutor:
                     },
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_client_instance.request.call_args[1]
@@ -258,6 +264,7 @@ class TestRestExecutor:
             result = await executor.execute(
                 {"url": "https://api.example.com/test", "params": {"page": "1", "limit": "10"}}
             )
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_client_instance.request.call_args[1]
@@ -288,6 +295,7 @@ class TestRestExecutor:
                     "data": {"name": "test", "value": "123"},
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_client_instance.request.call_args[1]
@@ -312,6 +320,7 @@ class TestRestExecutor:
             mock_client_instance.request = AsyncMock(return_value=mock_response)
 
             result = await executor.execute({"url": "https://api.example.com/test"})
+            result = result["result"]
 
             assert result["success"] is False
             assert result["status_code"] == 404
@@ -341,6 +350,7 @@ class TestRestExecutor:
         executor.cancellation_checker = lambda: True
 
         result = await executor.execute({"url": "https://api.example.com/test"})
+        result = result["result"]
 
         assert result["success"] is False
         assert "cancelled" in result["error"].lower()
@@ -373,6 +383,7 @@ class TestRestExecutor:
             mock_client_instance.request = AsyncMock(return_value=mock_response)
 
             result = await executor.execute({"url": "https://api.example.com/test"})
+            result = result["result"]
 
             assert result["success"] is False
             assert "cancelled" in result["error"].lower()
@@ -401,6 +412,7 @@ class TestRestExecutor:
                 result = await executor.execute(
                     {"url": f"https://api.example.com/{method.lower()}", "method": method}
                 )
+                result = result["result"]
 
                 assert result["success"] is True
                 assert result["method"] == method
@@ -426,6 +438,7 @@ class TestRestExecutor:
             result = await executor.execute(
                 {"url": "https://api.example.com/test", "timeout": 60.0}
             )
+            result = result["result"]
 
             assert result["success"] is True
             # timeout is passed to AsyncClient constructor, not request method
@@ -453,6 +466,7 @@ class TestRestExecutor:
             result = await executor.execute(
                 {"url": "https://api.example.com/test", "verify": False}
             )
+            result = result["result"]
 
             assert result["success"] is True
             # verify is passed to AsyncClient constructor, not request method
@@ -512,6 +526,7 @@ class TestRestExecutor:
             mock_client_instance.request = AsyncMock(return_value=mock_response)
 
             result = await executor.execute({"url": "http://192.168.1.1/api"})
+            result = result["result"]
 
             assert result["success"] is True
 
@@ -597,6 +612,7 @@ class TestRestExecutor:
             mock_client_instance.send = AsyncMock(return_value=final_response)
 
             result = await executor.execute({"url": "https://api.example.com/start"})
+            result = result["result"]
 
             assert result["success"] is True
             mock_client_instance.send.assert_called_once()
@@ -622,6 +638,7 @@ class TestRestExecutor:
             mock_client_instance.send = AsyncMock()
 
             result = await executor.execute({"url": "https://api.example.com/redirect"})
+            result = result["result"]
 
             assert result["success"] is False
             assert result["status_code"] == 302

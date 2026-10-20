@@ -6,13 +6,15 @@ All task executors must implement this interface.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, ClassVar, Dict, Optional, TYPE_CHECKING
 from apflow.core.extensions.base import Extension
 from apflow.core.extensions.types import ExtensionCategory
+from apflow.core.execution.result_protocol import ResultFormat
 
 
 class ExecutableTask(Extension, ABC):
     """
+
     Executable task interface - all executable units must implement this interface.
 
     This interface extends Extension, so all executors are registered extensions.
@@ -31,31 +33,42 @@ class ExecutableTask(Extension, ABC):
     - resume_from_checkpoint(): Restore state from checkpoint
     """
 
+    if TYPE_CHECKING:
+        description: str
+
+    result_format: ClassVar[ResultFormat] = "legacy"
+
     @property
     def category(self) -> ExtensionCategory:
         """Extension category - always EXECUTOR for ExecutableTask"""
         return ExtensionCategory.EXECUTOR
 
-    @property
-    @abstractmethod
-    def id(self) -> str:
-        """Unique identifier for this task (required by Extension)"""
-        pass
+    if not TYPE_CHECKING:
 
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        """Display name for this task (required by Extension)"""
-        pass
+        @property
+        @abstractmethod
+        def id(self) -> str:
+            """Unique identifier for this task (required by Extension)"""
+            pass
 
-    @property
-    @abstractmethod
-    def description(self) -> str:
-        """Description of what this task does (required by Extension)"""
-        pass
+    if not TYPE_CHECKING:
+
+        @property
+        @abstractmethod
+        def name(self) -> str:
+            """Display name for this task (required by Extension)"""
+            pass
+
+    if not TYPE_CHECKING:
+
+        @property
+        @abstractmethod
+        def description(self) -> str:
+            """Description of what this task does (required by Extension)"""
+            pass
 
     @abstractmethod
-    async def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, inputs: Dict[str, Any]) -> Any:
         """
         Execute this task
 
@@ -63,7 +76,12 @@ class ExecutableTask(Extension, ABC):
             inputs: Input parameters for task execution
 
         Returns:
-            Execution result dictionary
+            The declared result_format determines the return contract:
+            envelope: {result: business output, error?: string, token_usage?: counters}.
+            raw: the entire return value is business output, with no reserved keys.
+            legacy: preserve the entire return value and recognize top-level error/usage.
+            New executors should declare envelope. The framework stores business
+            output in TaskModel.result and interprets only the declared outer layer.
         """
         pass
 

@@ -230,11 +230,11 @@ class BaseTask(ExecutableTask):
         if self.inputs_schema:
             _check_input_schema(self.inputs_schema, parameters)
 
-    def get_demo_result(self, task: Any, inputs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def get_demo_result(self, task: Any, inputs: Dict[str, Any]) -> Any:
         """
         Optional method to provide custom demo data for this executor
 
-        This method is called when use_demo=True is set in task inputs.
+        This method is called when TaskManager is configured with use_demo=True.
         Executors can override this method to provide realistic demo data
         that matches their actual execution results.
 
@@ -243,9 +243,9 @@ class BaseTask(ExecutableTask):
             inputs: Input parameters for the task
 
         Returns:
-            Demo result dictionary, or None to use default demo data.
-            If returning a dict, it should match the format of actual execution results.
-            The "demo_mode" field will be automatically added by TaskManager.
+            Business example, independent of result_format. None selects the
+            default example. TaskManager wraps the example once and adds a
+            demo_mode business marker to dictionary examples.
 
         Example:
             def get_demo_result(self, task, inputs):

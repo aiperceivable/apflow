@@ -369,6 +369,7 @@ class TestAddTaskTreeFieldsDowngrade:
         # (not the TaskModel ORM) since the ORM's column set no longer matches
         # this hand-rolled legacy schema.
         with engine.begin() as conn:
+            conn.execute(text("DROP INDEX IF EXISTS ix_apflow_tasks_has_references"))
             conn.execute(text("ALTER TABLE apflow_tasks DROP COLUMN has_references"))
             conn.execute(text("ALTER TABLE apflow_tasks ADD COLUMN has_copy BOOLEAN DEFAULT FALSE"))
             conn.execute(
@@ -421,6 +422,7 @@ class TestAddHasReferencesWithCopyFallback:
 
         with engine.begin() as conn:
             # Simulate the caller's precondition: has_references does not exist yet.
+            conn.execute(text("DROP INDEX IF EXISTS ix_apflow_tasks_has_references"))
             conn.execute(text("ALTER TABLE apflow_tasks DROP COLUMN has_references"))
             conn.execute(text("ALTER TABLE apflow_tasks ADD COLUMN has_copy BOOLEAN DEFAULT FALSE"))
             conn.execute(
@@ -483,6 +485,9 @@ class TestCheckpointAtColumnType:
 
     def test_checkpoint_at_declared_with_timezone(self, sync_db_session, migration_manager):
         engine = sync_db_session.get_bind()
+        # Exercise the migration's ADD COLUMN rather than the fresh ORM schema.
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE apflow_tasks DROP COLUMN checkpoint_at"))
         migration_manager.run_pending(engine)
 
         with engine.begin() as conn:

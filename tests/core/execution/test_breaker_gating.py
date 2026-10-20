@@ -6,13 +6,12 @@ would trip the breaker OPEN and reject otherwise-healthy tasks for that executor
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from apflow.core.execution.errors import ValidationError
 from apflow.core.execution.task_manager import TaskManager
+from apflow.core.storage.sqlalchemy.models import TaskModel
 from apflow.durability.circuit_breaker import (
     CircuitBreakerConfig,
     CircuitBreakerRegistry,
@@ -31,7 +30,7 @@ def test_breaker_ignores_business_error_but_records_system_error() -> None:
     registry.get("rest", CircuitBreakerConfig(failure_threshold=1))
     task_manager._circuit_breaker_registry = registry
 
-    task = SimpleNamespace(id="t1", params={"executor_id": "rest"}, schemas={})
+    task = TaskModel(id="t1", name="Breaker probe", params={"executor_id": "rest"}, schemas={})
 
     # A validation error (bad client input) must NOT trip the breaker.
     task_manager._record_breaker_failure(task, ValidationError("url is required"))

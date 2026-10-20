@@ -324,6 +324,7 @@ class WebhookGateway:
         from apflow.core.execution.task_executor import TaskExecutor
         from apflow.scheduler.internal import scheduled_dispatch_key
 
+        run_created = False
         try:
             async with create_pooled_session() as db_session:
                 task_repository = TaskRepository(db_session)
@@ -358,6 +359,7 @@ class WebhookGateway:
                         "task_id": task_id,
                     }
                 run_id = str(run_tree.task.id)
+                run_created = True
 
                 # Load the run tree from DB — unified with the tree execution model.
                 run = await task_repository.get_task_by_id(run_id)
@@ -447,6 +449,7 @@ class WebhookGateway:
                         task_id=task_id,
                         success=False,
                         error=str(e),
+                        count_run=run_created,
                     )
             except Exception:
                 pass

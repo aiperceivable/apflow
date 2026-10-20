@@ -9,14 +9,16 @@ passing parameters through multiple layers.
 import importlib
 import os
 from threading import local
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union, TypeVar
 
 from apflow.core.types import TaskPreHook, TaskPostHook, WebhookVerifyHook
 from apflow.logger import get_logger
 
 if TYPE_CHECKING:
     from apflow.core.distributed.config import DistributedConfig
-    from apflow.core.storage.sqlalchemy.models import TaskModel, TaskModelType
+    from apflow.core.storage.sqlalchemy.models import TaskModel
+
+TaskModelSubclass = TypeVar("TaskModelSubclass", bound="TaskModel")
 
 logger = get_logger(__name__)
 
@@ -38,7 +40,7 @@ class ConfigRegistry:
 
     def __init__(self):
         """Initialize empty registry"""
-        self._task_model_class: Optional["TaskModelType"] = None
+        self._task_model_class: Optional["type[TaskModel]"] = None
         self._pre_hooks: List[TaskPreHook] = []
         self._post_hooks: List[TaskPostHook] = []
         self._use_task_creator: Union[bool, type, None] = None  # None/True -> default TaskCreator
@@ -68,7 +70,7 @@ class ConfigRegistry:
         # Distributed config (lazy-loaded)
         self._distributed_config: Optional["DistributedConfig"] = None
 
-    def set_task_model_class(self, task_model_class: Optional["TaskModel"]) -> None:
+    def set_task_model_class(self, task_model_class: Optional["type[TaskModel]"]) -> None:
         """
         Set the global task model class
 
@@ -123,7 +125,7 @@ class ConfigRegistry:
             f"{task_model_class.__name__ if task_model_class else 'TaskModel'}"
         )
 
-    def get_task_model_class(self) -> "TaskModel":
+    def get_task_model_class(self) -> "type[TaskModel]":
         """
         Get the global task model class
 
@@ -441,7 +443,7 @@ def get_config() -> ConfigRegistry:
     return _get_registry()
 
 
-def set_task_model_class(task_model_class: Optional["TaskModel"]) -> None:
+def set_task_model_class(task_model_class: Optional["type[TaskModel]"]) -> None:
     """
     Set the global task model class
 
@@ -451,7 +453,7 @@ def set_task_model_class(task_model_class: Optional["TaskModel"]) -> None:
     _get_registry().set_task_model_class(task_model_class)
 
 
-def get_task_model_class() -> "TaskModel":
+def get_task_model_class() -> "type[TaskModel]":
     """
     Get the global task model class
 
@@ -786,7 +788,7 @@ def get_task_tree_hooks(hook_type: str) -> List[Callable]:
     return _get_registry().get_task_tree_hooks(hook_type)
 
 
-def task_model_register():
+def task_model_register() -> Callable[[type[TaskModelSubclass]], type[TaskModelSubclass]]:
     """
     Decorator to register a custom TaskModel class
 
@@ -803,7 +805,7 @@ def task_model_register():
     # Import here to avoid circular imports at module level
     from apflow.core.storage.sqlalchemy.models import TaskModel
 
-    def decorator(cls: "TaskModel") -> "TaskModel":
+    def decorator(cls: type[TaskModelSubclass]) -> type[TaskModelSubclass]:
         if not issubclass(cls, TaskModel):
             raise TypeError(
                 f"Class {cls.__name__} must be a subclass of TaskModel. "

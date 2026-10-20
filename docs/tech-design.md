@@ -539,11 +539,11 @@ dependencies = [
     "alembic>=1.13.0",
     # SQLite is Python stdlib -- no additional dependency
     # apcore ecosystem is core (MCP/A2A/CLI are standard apflow features, not extras).
-    "apcore>=0.22.0",
-    "apcore-toolkit>=0.8.0",
-    "apcore-mcp>=0.15.0",
-    "apcore-a2a>=0.4.0",
-    "apcore-cli>=0.10.0",
+    "apcore>=0.32.2",
+    "apcore-toolkit>=0.14.0",
+    "apcore-mcp>=0.23.1",
+    "apcore-a2a>=0.8.4",
+    "apcore-cli>=0.12.5",
 ]
 
 # Storage
@@ -1373,7 +1373,7 @@ from apflow import create_session, TaskManager
 from apflow.core.execution.task_creator import TaskCreator
 from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
 from apflow.bridge.registry_setup import create_apflow_registry
-from apcore_mcp import serve_mcp
+from apcore_mcp import serve as serve_mcp
 
 # Initialize apflow
 session = create_session()
@@ -1388,7 +1388,7 @@ serve_mcp(registry, transport="streamable-http", port=8080)
 
 For A2A:
 ```python
-from apcore_a2a import serve_a2a
+from apcore_a2a import serve as serve_a2a
 registry = create_apflow_registry(manager, creator, repo)
 serve_a2a(registry)
 ```
@@ -1397,7 +1397,7 @@ For CLI:
 ```python
 from apcore_cli import create_cli
 registry = create_apflow_registry(manager, creator, repo)
-cli = create_cli(registry)
+cli = create_cli(registry=registry)
 cli()
 ```
 

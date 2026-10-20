@@ -7,11 +7,12 @@ It's a built-in executor that provides a common aggregation pattern.
 Users can create custom aggregator executors for more complex aggregation logic.
 """
 
-from typing import ClassVar, Dict, Any, Optional
+from typing import Dict, Any, Optional
 
 from pydantic import BaseModel, Field
 
 from apflow.core.base import BaseTask
+from apflow.core.execution.result_protocol import executor_result_schema
 from apflow.core.extensions.decorators import executor_register
 from apflow.logger import get_logger
 
@@ -109,8 +110,11 @@ class AggregateResultsExecutor(BaseTask):
     # Cancellation support: No-op (aggregation is instant)
     cancelable: bool = False
 
-    inputs_schema: ClassVar[type[BaseModel]] = AggregateInputSchema
-    outputs_schema: ClassVar[type[BaseModel]] = AggregateOutputSchema
+    inputs_schema: type[BaseModel] | Dict[str, Any] | None = AggregateInputSchema
+    result_format = "envelope"
+    outputs_schema: type[BaseModel] | Dict[str, Any] | None = executor_result_schema(
+        AggregateOutputSchema.model_json_schema()
+    )
 
     @property
     def type(self) -> str:
@@ -132,7 +136,11 @@ class AggregateResultsExecutor(BaseTask):
         if name:
             self.name = name
 
-    async def execute(self, inputs: Dict[str, Any] = {}) -> Dict[str, Any]:
+    async def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """Return aggregated business output in the execution envelope."""
+        return {"result": await self._aggregate(inputs)}
+
+    async def _aggregate(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """
         Aggregate dependency results from inputs
 

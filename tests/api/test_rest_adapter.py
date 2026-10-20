@@ -112,6 +112,14 @@ def test_execute_module_returns_output(client: TestClient) -> None:
     assert resp.json() == {"echo": "hi"}
 
 
+def test_invalid_input_preserves_canonical_validation_details(client: TestClient) -> None:
+    response = client.post("/modules/echo", json={"message": 42})
+    assert response.status_code == 422
+    errors = response.json()["error"]["details"]["errors"]
+    assert errors[0]["path"] == "/message"
+    assert errors[0]["keyword"] == "type"
+
+
 def test_execute_module_serializes_datetime_output() -> None:
     registry = Registry()
     registry.register("datetime", DatetimeModule())

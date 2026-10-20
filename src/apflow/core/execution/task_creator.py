@@ -12,7 +12,7 @@ This module validates that dependencies exist in the array and hierarchy is corr
 
 """
 
-from typing import List, Dict, Any, Optional, Set, TypeVar
+from typing import cast, List, Dict, Any, Optional, Set, TypeVar
 import copy
 import uuid
 import os
@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
 from apflow.core.types import TaskTreeNode, TaskStatus
 from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
-from apflow.core.storage.sqlalchemy.models import TaskModelType, TaskOriginType
+from apflow.core.storage.sqlalchemy.models import TaskModel, TaskOriginType
 from apflow.logger import get_logger
 from apflow.core.config.registry import get_task_model_class
 from sqlalchemy_session_proxy import SqlalchemySessionProxy
@@ -71,15 +71,15 @@ class TaskCreator:
         self.task_model_class = get_task_model_class()
         self.task_repository = TaskRepository(db, task_model_class=self.task_model_class)
 
-    def task_dicts_to_task_models(self, tasks: List[Dict[str, Any]]) -> List[TaskModelType]:
+    def task_dicts_to_task_models(self, tasks: List[Dict[str, Any]]) -> List[TaskModel]:
         """
-        Convert list of task dicts to list of TaskModelType instances
+        Convert list of task dicts to list of TaskModel instances
 
         Args:
             dicts: List of task dictionaries
 
         Returns:
-            List of TaskModelType instances
+            List of TaskModel instances
         """
         if not tasks:
             return []
@@ -170,7 +170,7 @@ class TaskCreator:
         root_tasks = [task for task in tasks if task.get("parent_id") is None]
         tree_ids: Set[str] = set()
         for root_task in root_tasks:
-            task_tree_id = root_task.get("task_tree_id") or root_task.get("id")
+            task_tree_id = root_task.get("task_tree_id") or root_task["id"]
             self._update_task_tree_id_for_task_dics(tasks, root_task, task_tree_id)
             if task_tree_id in tree_ids:
                 raise ValueError("Different root tasks cannot share the same task_tree_id")
@@ -209,7 +209,7 @@ class TaskCreator:
                                 f"Task at index {idx} has dependency '{dep}' which is not in the task array."
                             )
 
-        tasks_models: List[TaskModelType] = []
+        tasks_models: List[TaskModel] = []
         for task_data in tasks:
             task = self.task_repository.build_task(**task_data)  # type: ignore
             tasks_models.append(task)
@@ -255,7 +255,7 @@ class TaskCreator:
         await self.db.commit()
 
         # Step 5: Build task tree structure
-        root_models: List[TaskModelType] = [task for task in task_models if task.parent_id is None]
+        root_models: List[TaskModel] = [task for task in task_models if task.parent_id is None]
         if len(root_models) == 1:
             task_tree = self.build_task_tree_from_task_models(root_models[0], task_models)
             logger.info(f"Created task tree: root task {task_tree.task.id}")
@@ -337,17 +337,17 @@ class TaskCreator:
                 if existing_task:
                     raise ValueError(f"Task id already exists in database (id: {provided_id}).")
 
-    def build_task_trees_from_task_models(self, tasks: List[TaskModelType]) -> List[TaskTreeNode]:
+    def build_task_trees_from_task_models(self, tasks: List[TaskModel]) -> List[TaskTreeNode]:
         """
         Build task tree structure from flat list of tasks
 
         Args:
-            tasks: List of TaskModelType instances
+            tasks: List of TaskModel instances
 
         Returns:
             List of TaskTreeNode representing the root nodes of the task tree
         """
-        root_tasks: List[TaskModelType] = [task for task in tasks if task.parent_id is None]
+        root_tasks: List[TaskModel] = [task for task in tasks if task.parent_id is None]
         task_trees: List[TaskTreeNode] = []
 
         for root_task in root_tasks:
@@ -357,7 +357,7 @@ class TaskCreator:
         return task_trees
 
     def build_task_tree_from_task_models(
-        self, root_task: TaskModelType, all_tasks: List[TaskModelType]
+        self, root_task: TaskModel, all_tasks: List[TaskModel]
     ) -> TaskTreeNode:
         """
         Build task tree structure from root task
@@ -383,8 +383,8 @@ class TaskCreator:
         return task_node
 
     async def _find_dependent_tasks_for_identifiers(
-        self, task_identifiers: Set[str], all_tasks: List[TaskModelType]
-    ) -> List[TaskModelType]:
+        self, task_identifiers: Set[str], all_tasks: List[TaskModel]
+    ) -> List[TaskModel]:
         """
         Find all tasks that depend on any of the specified task identifiers (including transitive dependencies).
 
@@ -420,7 +420,7 @@ class TaskCreator:
         all_dependent_tasks = set(dependent_tasks)
         processed_identifiers = set(task_identifiers)
 
-        async def find_transitive_dependents(current_dependent_tasks: List[TaskModelType]):
+        async def find_transitive_dependents(current_dependent_tasks: List[TaskModel]):
             """Recursively find tasks that depend on current dependent tasks"""
             new_dependents = []
             for dep_task in current_dependent_tasks:
@@ -459,9 +459,9 @@ class TaskCreator:
     async def _find_dependency_tasks_for_identifiers(
         self,
         task_identifiers: Set[str],
-        all_tasks: List[TaskModelType],
+        all_tasks: List[TaskModel],
         max_depth: int = DEFAULT_MAX_DEPTH,
-    ) -> List[TaskModelType]:
+    ) -> List[TaskModel]:
         """
         Find all tasks that the specified task identifiers depend on (upstream dependencies, including transitive).
 
@@ -477,7 +477,7 @@ class TaskCreator:
             return []
 
         # Build a map of task identifier to task for quick lookup
-        tasks_by_identifier: Dict[str, TaskModelType] = {}
+        tasks_by_identifier: Dict[str, TaskModel] = {}
         for task in all_tasks:
             task_id = str(task.id)
             tasks_by_identifier[task_id] = task
@@ -599,7 +599,7 @@ class TaskCreator:
 
         return build_minimal_subtree(root_tree)
 
-    async def _get_original_task_for_link(self, task: TaskModelType) -> TaskModelType:
+    async def _get_original_task_for_link(self, task: TaskModel) -> TaskModel:
         """
         Recursively find the most original (non-link) task for linking.
         """
@@ -611,7 +611,10 @@ class TaskCreator:
         ):
             orig_id = current.original_task_id
             # get original task object (sync or async)
-            current = await self.task_repository.get_task_by_id(orig_id)
+            original = await self.task_repository.get_task_by_id(orig_id)
+            if original is None:
+                raise ValueError(f"Original task {orig_id} not found")
+            current = original
             iterations += 1
             if iterations >= max_iterations:
                 raise RuntimeError(
@@ -634,7 +637,7 @@ class TaskCreator:
 
     async def from_link(
         self,
-        _original_task: TaskModelType,
+        _original_task: TaskModel,
         _save: bool = True,
         _recursive: bool = True,
         _auto_include_deps: bool = True,
@@ -673,7 +676,7 @@ class TaskCreator:
             )
 
         if "user_id" in reset_kwargs and not check_tasks_user_ownership(
-            task_tree, reset_kwargs.get("user_id")
+            task_tree, reset_kwargs["user_id"]
         ):
             raise ValueError("Deny linking to a different user's task.")
 
@@ -722,7 +725,7 @@ class TaskCreator:
 
     async def from_copy(
         self,
-        _original_task: TaskModelType,
+        _original_task: TaskModel,
         _save: bool = True,
         _recursive: bool = True,
         _auto_include_deps: bool = True,
@@ -803,7 +806,7 @@ class TaskCreator:
 
     async def instantiate_scheduled_run(
         self,
-        _definition_task: TaskModelType,
+        _definition_task: TaskModel,
         _save: bool = True,
         idempotency_key: Optional[str] = None,
     ) -> Optional[TaskTreeNode]:
@@ -896,7 +899,7 @@ class TaskCreator:
 
     async def from_archive(
         self,
-        _original_task: TaskModelType,
+        _original_task: TaskModel,
         _save: bool = True,
         _recursive: bool = True,
         _auto_include_deps: bool = True,
@@ -964,14 +967,14 @@ class TaskCreator:
 
     async def from_mixed(
         self,
-        _original_task: TaskModelType,
+        _original_task: TaskModel,
         _save: bool = True,
         _recursive: bool = True,
         _link_task_ids: Optional[List[str]] = None,
         _auto_include_deps: bool = True,
         _include_dependents: bool = False,
         **reset_kwargs,
-    ) -> TaskModelType | TaskTreeNode | List[Dict[str, Any]]:
+    ) -> TaskTreeNode:
         """
         Create task tree with mixed origin types (copy + link)
 
@@ -989,15 +992,13 @@ class TaskCreator:
             **reset_kwargs: Fields to override for copied tasks
 
         Returns:
-            TaskModelType if _recursive=False,
-            TaskTreeNode if _recursive=True and _save=True,
-            List[Dict[str, Any]] if _save=False
+            TaskTreeNode for both recursive and single-task creation.
         """
         if not _recursive:
             # Single task - determine if should link or copy
             if _link_task_ids and str(_original_task.id) in [str(id) for id in _link_task_ids]:
                 if "user_id" in reset_kwargs and not check_tasks_user_ownership(
-                    _original_task, reset_kwargs.get("user_id")
+                    _original_task, reset_kwargs["user_id"]
                 ):
                     raise ValueError("Deny linking to a different user's task.")
 
@@ -1035,7 +1036,7 @@ class TaskCreator:
         # modifiable clones that (like from_copy) permit cross-owner reassignment.
         if _link_task_ids and "user_id" in reset_kwargs:
             linked_tasks = [t for t in original_tree.to_list() if str(t.id) in link_set]
-            if not check_tasks_user_ownership(linked_tasks, reset_kwargs.get("user_id")):
+            if not check_tasks_user_ownership(linked_tasks, reset_kwargs["user_id"]):
                 raise ValueError("Deny linking to a different user's task.")
 
         # Augment subtree with dependencies for copied portions only
@@ -1161,6 +1162,21 @@ class TaskCreator:
             # Fix dependencies for current task
             dependencies = getattr(task_node.task, "dependencies", None)
             if dependencies:
+                old_dependency_ids = {
+                    str(dep.get("id")) if isinstance(dep, dict) else str(dep)
+                    for dep in dependencies
+                }
+                old_inputs = cast(Optional[Dict[str, Any]], task_node.task.inputs)
+                if old_inputs:
+                    task_node.task.update_from_dict(
+                        {
+                            "inputs": {
+                                key: value
+                                for key, value in old_inputs.items()
+                                if key not in old_dependency_ids
+                            }
+                        }
+                    )
                 missing_indexes = []
                 for dep in dependencies:
                     if isinstance(dep, dict):
@@ -1265,10 +1281,10 @@ class TaskCreator:
 
     async def _clone_task(
         self,
-        original_task: TaskModelType,
+        original_task: TaskModel,
         reset_kwargs: Dict[str, Any],
         is_copy: bool = True,
-    ) -> TaskModelType:
+    ) -> TaskModel:
         """
         Clone tasks' field overrides from reset_kwargs
 
@@ -1278,7 +1294,7 @@ class TaskCreator:
             is_copy: If True, return a copy; if False, update original task
 
         Returns:
-            TaskModelType
+            TaskModel
         """
         # Work on a per-call copy: the same reset_kwargs dict is shared across an
         # entire tree clone, so mutating it here (id / lineage) would leak this
@@ -1291,6 +1307,9 @@ class TaskCreator:
         fields["original_task_id"] = most_original_task.id
 
         if is_copy:
+            fields.update(
+                parent_id=None, dependencies=None, task_tree_id=fields["id"], has_children=False
+            )
             task = original_task.copy(fields)
         else:
             task = original_task.update_from_dict(fields)
@@ -1309,7 +1328,7 @@ class TaskCreator:
 
         return task
 
-    async def _validate_no_external_dependencies(self, task: TaskModelType) -> None:
+    async def _validate_no_external_dependencies(self, task: TaskModel) -> None:
         """
         Validate that task and its subtree have no dependencies outside the subtree
 
@@ -1328,7 +1347,7 @@ class TaskCreator:
             if not subtree_task.dependencies:
                 continue
             for dep in subtree_task.dependencies:
-                dep_id = dep.get("id")
+                dep_id = dep.get("id") if isinstance(dep, dict) else dep
                 if not dep_id:
                     continue
                 # Check if dependency is outside the subtree
@@ -1343,7 +1362,7 @@ class TaskCreator:
             f"Validated task '{task.name}' (id: {task.id}) subtree has no external dependencies"
         )
 
-    async def _collect_subtree_tasks(self, root_task_id: str) -> List[TaskModelType]:
+    async def _collect_subtree_tasks(self, root_task_id: str) -> List[TaskModel]:
         """
         Collect all tasks in a subtree rooted at the given task
 
@@ -1351,7 +1370,7 @@ class TaskCreator:
             root_task_id: ID of the root task
 
         Returns:
-            List[TaskModelType]: All tasks in the subtree (including root)
+            List[TaskModel]: All tasks in the subtree (including root)
         """
         # Refresh session state before query to ensure we see latest database state
         # This prevents blocking in sync sessions when there are uncommitted transactions

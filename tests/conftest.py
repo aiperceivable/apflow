@@ -3,6 +3,7 @@ Test configuration and fixtures for apflow
 """
 
 import os
+import importlib
 import uuid
 
 import pytest
@@ -372,18 +373,8 @@ async def async_db_session(temp_db_path):
         logger.info("Using mock AsyncSession for SQLite (SQLite doesn't support async drivers)")
         from unittest.mock import AsyncMock, MagicMock
 
-        # Note: AsyncSession is already imported at module level, don't re-import here
-        # Create a mock that will pass isinstance checks
-        # We subclass MagicMock and set __class__ to make isinstance work
-        class MockAsyncSession(AsyncSession):
-            """Mock AsyncSession that passes isinstance checks"""
-
-            def __init__(self):
-                # Don't call super().__init__() to avoid requiring real engine
-                pass
-
-        # Create instance and configure mock methods
-        mock_session = MockAsyncSession()
+        # A spec mock preserves AsyncSession isinstance checks without a live engine.
+        mock_session = MagicMock(spec=AsyncSession)
         mock_session.commit = AsyncMock()
         mock_session.close = AsyncMock()
         mock_session.refresh = AsyncMock()
@@ -993,7 +984,7 @@ def _stop_background_threads():
 
     # Try to stop CrewAI EventBus if it exists
     try:
-        from crewai.events.event_bus import EventBus
+        EventBus = importlib.import_module("crewai.events.event_bus").EventBus
 
         # EventBus is a singleton, try to stop it
         if hasattr(EventBus, "_instance") and EventBus._instance:
@@ -1020,9 +1011,8 @@ def _stop_background_threads():
                 # Find the CrewAIEventsLoop thread and stop it
                 for thread in threading.enumerate():
                     if "CrewAIEventsLoop" in thread.name or (
-                        hasattr(thread, "_target")
-                        and hasattr(thread._target, "__self__")
-                        and hasattr(thread._target.__self__, "_loop")
+                        hasattr(getattr(thread, "_target", None), "__self__")
+                        and hasattr(getattr(thread, "_target").__self__, "_loop")
                     ):
                         # Try to stop the loop from the thread
                         try:
@@ -1046,7 +1036,7 @@ def _stop_background_threads():
     # Try to stop OpenTelemetry processors
     try:
         # Force flush and shutdown any processors
-        import opentelemetry.sdk.trace as trace_sdk
+        trace_sdk = importlib.import_module("opentelemetry.sdk.trace")
 
         if hasattr(trace_sdk, "_global_tracer_provider"):
             provider = trace_sdk._global_tracer_provider
@@ -1060,22 +1050,22 @@ def _stop_background_threads():
 
     # Try to stop LiteLLM callbacks/threads
     try:
-        import litellm
+        litellm = importlib.import_module("litellm")
 
         # LiteLLM doesn't have explicit shutdown, but we can clear callbacks
         if hasattr(litellm, "callback_list"):
             try:
-                litellm.callback_list = []
+                setattr(litellm, "callback_list", [])
             except Exception:
                 pass
         if hasattr(litellm, "success_callback"):
             try:
-                litellm.success_callback = []
+                setattr(litellm, "success_callback", [])
             except Exception:
                 pass
         if hasattr(litellm, "failure_callback"):
             try:
-                litellm.failure_callback = []
+                setattr(litellm, "failure_callback", [])
             except Exception:
                 pass
     except (ImportError, AttributeError):
@@ -1094,9 +1084,9 @@ def _cleanup_all_global_state():
 
     # 2. Clean up Config registry
     try:
-        from apflow.core.config.registry import get_config_manager
+        from apflow.core.config.registry import get_config
 
-        cm = get_config_manager()
+        cm = get_config()
         cm.clear()
     except (ImportError, AttributeError):
         pass

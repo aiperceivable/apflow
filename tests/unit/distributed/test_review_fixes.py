@@ -6,7 +6,6 @@ placement / shutdown logic directly.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -14,9 +13,12 @@ import pytest
 from apflow.core.distributed.config import DistributedConfig
 from apflow.core.distributed.runtime import DistributedRuntime
 from apflow.core.distributed.worker import WorkerRuntime
+from apflow.core.storage.sqlalchemy.models import TaskModel
 
 
-def _worker(config: DistributedConfig, lease_return=MagicMock()) -> WorkerRuntime:
+def _worker(
+    config: DistributedConfig, lease_return: MagicMock | None = MagicMock()
+) -> WorkerRuntime:
     lease_manager = MagicMock()
     lease_manager.acquire_lease = MagicMock(return_value=lease_return)
     lease_manager.release_lease = MagicMock()
@@ -36,8 +38,8 @@ def test_node_eligibility_uses_configured_executor_types() -> None:
     require_executors beyond 'default' starved. A node configured for 'rest' must
     now be eligible for a rest-constrained task."""
     worker = _worker(DistributedConfig(node_executor_types=["rest"]))
-    ok = SimpleNamespace(id="T", placement_constraints={"require_executors": ["rest"]})
-    bad = SimpleNamespace(id="T2", placement_constraints={"require_executors": ["gpu"]})
+    ok = TaskModel(id="T", placement_constraints={"require_executors": ["rest"]})
+    bad = TaskModel(id="T2", placement_constraints={"require_executors": ["gpu"]})
     assert worker._is_eligible_for_this_node(ok) is True
     assert worker._is_eligible_for_this_node(bad) is False
 
@@ -48,7 +50,7 @@ async def test_execute_task_pops_running_tasks_on_lost_lease() -> None:
     finally that pops _running_tasks, leaking the entry and permanently blocking
     re-attempts by this worker."""
     worker = _worker(DistributedConfig(), lease_return=None)
-    task = SimpleNamespace(id="T", attempt_id=0, inputs={})
+    task = TaskModel(id="T", attempt_id=0, inputs={})
     worker._running_tasks["T"] = MagicMock()  # as _poll_loop registers it
 
     await worker._execute_task(task)

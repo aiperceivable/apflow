@@ -10,6 +10,7 @@ never executes in place.
 from typing import Any, Dict, Optional
 
 import pytest
+from unittest.mock import patch
 
 from apflow.core.config import get_task_model_class
 from apflow.core.extensions.decorators import executor_register
@@ -21,13 +22,13 @@ from apflow.scheduler.internal import InternalScheduler
 
 @executor_register(override=True)
 class _TokenEmittingExecutor(AggregateResultsExecutor):
-    """Test executor that returns a token_usage payload in its result."""
+    """Return business output and execution usage in separate envelope fields."""
 
     id = "test_token_executor"
     name = "Test Token Executor"
 
     async def execute(self, inputs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return {"value": 42, "token_usage": {"input": 11, "output": 22, "total": 33}}
+        return {"result": {"value": 42}, "token_usage": {"input": 11, "output": 22, "total": 33}}
 
 
 @executor_register(override=True)
@@ -54,6 +55,33 @@ async def _make_scheduled_definition(repo: TaskRepository):
         schedule_enabled=True,
         run_count=0,
     )
+
+
+@pytest.mark.asyncio
+async def test_webhook_creation_failure_preserves_run_allowance(use_test_db_session) -> None:
+    from apflow.scheduler.gateway.webhook import WebhookGateway
+
+    repository = TaskRepository(use_test_db_session)
+    definition = await repository.create_task(
+        name="Webhook allowance",
+        schedule_type="interval",
+        schedule_expression="3600",
+        schedule_enabled=True,
+        max_runs=1,
+        run_count=0,
+    )
+    with patch(
+        "apflow.core.execution.task_creator.TaskCreator.instantiate_scheduled_run",
+        side_effect=RuntimeError("Cannot persist run"),
+    ):
+        result = await WebhookGateway()._execute_task(str(definition.id))
+    assert result["success"] is False
+    use_test_db_session.expire_all()
+    stored = await repository.get_task_by_id(str(definition.id))
+    assert stored is not None
+    assert stored.run_count == 0
+    assert stored.schedule_enabled is True
+    assert await repository.list_scheduled_runs(str(definition.id)) == []
 
 
 class TestSchedulerHistoryEndToEnd:
@@ -238,7 +266,7 @@ class TestSchedulerHistoryComplexRuns:
 
     @pytest.mark.asyncio
     async def test_run_history_captures_token_usage(self, use_test_db_session):
-        """The run instance's result carries the fire's token_usage payload."""
+        """The run instance stores business output and usage in separate fields."""
         # The autouse fixture rebuilds the registry with built-ins only, so
         # re-register this test executor into the current registry before firing.
         executor_register(override=True)(_TokenEmittingExecutor)
@@ -262,7 +290,8 @@ class TestSchedulerHistoryComplexRuns:
         run = runs[0]
         assert run.status == "completed"
         assert isinstance(run.result, dict)
-        assert run.result.get("token_usage") == {"input": 11, "output": 22, "total": 33}
+        assert run.result == {"value": 42}
+        assert run.token_usage == {"input": 11, "output": 22, "total": 33}
 
 
 class TestDistributedDispatchOnly:

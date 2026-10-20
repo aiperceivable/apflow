@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from apcore import Change, ModuleAnnotations, PreviewResult
+from apcore.errors import ModuleError
 
 from apflow.bridge.errors import invalid_input_error, not_found_error
 
@@ -213,10 +214,10 @@ class TaskCreateModule:
                 task_data[field] = inputs[field]
         _coerce_int_fields(task_data)
 
-        tasks = await self._creator.create_task_trees_from_array([task_data])
-        root = tasks[0] if tasks else None
-        if root is None:
+        trees = await self._creator.create_task_trees_from_array([task_data])
+        if not trees:
             raise RuntimeError("Task creation returned no tasks")
+        root = trees[0].task
 
         return {
             "id": root.id,
@@ -248,7 +249,7 @@ class TaskExecuteModule:
                 "properties": {
                     "task_id": {"type": "string"},
                     "status": {"type": "string"},
-                    "result": {"type": "object"},
+                    "result": {},
                     "token_usage": {"type": "object"},
                 },
             }
@@ -422,7 +423,10 @@ class TaskDeleteModule:
         if task is None:
             raise not_found_error(f"Task '{task_id}' not found")
 
-        await self._repo.delete_task(task_id)
+        if not await self._repo.delete_task(task_id):
+            raise ModuleError(
+                code="TASK_DELETE_FAILED", message=f"Could not delete task '{task_id}'"
+            )
         return {"task_id": task_id, "deleted": True}
 
 
@@ -792,13 +796,19 @@ class TaskUpdateModule:
                     "name": {"type": "string"},
                     "status": {
                         "type": "string",
-                        "enum": ["pending", "in_progress", "completed", "failed", "cancelled"],
+                        "enum": [
+                            "pending",
+                            "in_progress",
+                            "completed",
+                            "failed",
+                            "cancelled",
+                        ],
                     },
                     "priority": {"type": "integer", "minimum": 0, "maximum": 3},
                     "inputs": {"type": "object"},
                     "params": {"type": "object"},
                     "error": {"type": "string"},
-                    "result": {"type": "object"},
+                    "result": {},
                     "progress": {"type": "number", "minimum": 0, "maximum": 1},
                 },
                 "required": ["task_id"],
@@ -818,7 +828,7 @@ class TaskUpdateModule:
         update_fields = {
             field: inputs[field]
             for field in self._UPDATABLE_FIELDS
-            if inputs.get(field) is not None
+            if field in inputs and (field == "result" or inputs[field] is not None)
         }
         _coerce_int_fields(update_fields)
         if update_fields:

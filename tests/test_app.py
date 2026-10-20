@@ -1,6 +1,8 @@
 """Tests for apflow app bootstrap and CLI entry points."""
 
 from click.testing import CliRunner
+import tomllib
+from pathlib import Path
 
 from apflow.app import ApflowApp, create_app
 from apflow.cli import cli as _get_cli
@@ -63,8 +65,12 @@ class TestCLI:
         assert "apflow" in result.output
         assert "Storage" in result.output
 
-    def test_version(self):
+    def test_version(self) -> None:
+        from apflow import __version__
+
+        project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
         runner = CliRunner()
         result = runner.invoke(cli, ["--version"])
         assert result.exit_code == 0
-        assert "0.22" in result.output
+        assert __version__ == project["project"]["version"]
+        assert __version__ in result.output

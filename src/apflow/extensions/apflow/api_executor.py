@@ -55,10 +55,12 @@ Configuration:
 
 import asyncio
 import httpx
-from typing import Any, ClassVar, Dict, Literal, Optional
+from typing import Any, Dict, Literal, Optional
+from urllib.parse import quote
 
 from pydantic import BaseModel, Field
 from apflow.core.base import BaseTask
+from apflow.core.execution.result_protocol import executor_result_schema
 from apflow.core.extensions.decorators import executor_register
 from apflow.core.utils.network_security import validate_url_not_private
 from apflow.logger import get_logger
@@ -71,7 +73,7 @@ class ApFlowApiInputSchema(BaseModel):
         description='apflow API base URL (e.g., "http://localhost:8000") (required)'
     )
     method: str = Field(
-        description='API method name (e.g., "tasks.execute", "tasks.create") (required)'
+        description='Registry module ID or task method alias (e.g., "apflow.task.get", "tasks.create")'
     )
     params: Dict[str, Any] = Field(description="Method parameters dict (required)")
     auth_token: Optional[str] = Field(
@@ -104,11 +106,11 @@ class ApFlowApiOutputSchema(BaseModel):
     error: Optional[str] = Field(
         default=None, description="Error message (only present on failure)"
     )
-    error_code: Optional[int] = Field(
-        default=None, description="JSON-RPC error code (optional, only present for JSON-RPC errors)"
+    error_code: Optional[int | str] = Field(
+        default=None, description="Remote API error code (optional)"
     )
     error_data: Optional[Dict[str, Any]] = Field(
-        default=None, description="JSON-RPC error data (optional, only present for JSON-RPC errors)"
+        default=None, description="Remote API error details (optional)"
     )
     status_code: Optional[int] = Field(
         default=None, description="HTTP status code (optional, only present for HTTP errors)"
@@ -183,8 +185,11 @@ class ApFlowApiExecutor(BaseTask):
     # Cancellation support: Can be cancelled by stopping HTTP request
     cancelable: bool = True
 
-    inputs_schema: ClassVar[type[BaseModel]] = ApFlowApiInputSchema
-    outputs_schema: ClassVar[type[BaseModel]] = ApFlowApiOutputSchema
+    inputs_schema: type[BaseModel] | Dict[str, Any] | None = ApFlowApiInputSchema
+    result_format = "envelope"
+    outputs_schema: type[BaseModel] | Dict[str, Any] | None = executor_result_schema(
+        ApFlowApiOutputSchema.model_json_schema()
+    )
 
     @property
     def type(self) -> str:
@@ -192,6 +197,14 @@ class ApFlowApiExecutor(BaseTask):
         return "apflow"
 
     async def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """Separate provider business output from execution failure metadata."""
+        response = await self._execute_remote(inputs)
+        outcome: Dict[str, Any] = {"result": response}
+        if response.get("success") is False:
+            outcome["error"] = str(response.get("error") or "Remote apflow call failed")
+        return outcome
+
+    async def _execute_remote(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute an apflow API call
 
@@ -231,7 +244,7 @@ class ApFlowApiExecutor(BaseTask):
         wait_for_completion = inputs.get("wait_for_completion", False)
         poll_interval = inputs.get("poll_interval", 1.0)
         timeout = inputs.get("timeout", 300.0)
-        headers = inputs.get("headers", {})
+        headers = inputs.get("headers") or {}
 
         # Prepare headers
         request_headers = {"Content-Type": "application/json", **headers}
@@ -239,16 +252,12 @@ class ApFlowApiExecutor(BaseTask):
         if auth_token:
             request_headers["Authorization"] = f"Bearer {auth_token}"
 
-        # Prepare JSON-RPC request
-        jsonrpc_request = {
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-            "id": f"apflow_executor_{asyncio.get_event_loop().time()}",
-        }
-
-        # Construct API endpoint URL
-        api_url = f"{base_url.rstrip('/')}/tasks"
+        module_id = method
+        if method.startswith("tasks."):
+            module_id = f"apflow.task.{method.removeprefix('tasks.')}"
+        elif method.startswith(("task.", "schedule.")):
+            module_id = f"apflow.{method}"
+        api_url = f"{base_url.rstrip('/')}/modules/{quote(module_id, safe='.')}"
 
         logger.info(f"Calling apflow API {method} on {base_url}")
 
@@ -270,8 +279,7 @@ class ApFlowApiExecutor(BaseTask):
                         "method": method,
                     }
 
-                # Make JSON-RPC request
-                response = await client.post(api_url, json=jsonrpc_request, headers=request_headers)
+                response = await client.post(api_url, json=params, headers=request_headers)
 
                 # Check for cancellation after request
                 if self.cancellation_checker and self.cancellation_checker():
@@ -289,7 +297,7 @@ class ApFlowApiExecutor(BaseTask):
                     logger.error(
                         f"apflow API returned status {response.status_code}: {response.text}"
                     )
-                    return {
+                    failure: Dict[str, Any] = {
                         "success": False,
                         "error": f"API returned status {response.status_code}",
                         "status_code": response.status_code,
@@ -297,26 +305,23 @@ class ApFlowApiExecutor(BaseTask):
                         "base_url": base_url,
                         "method": method,
                     }
+                    try:
+                        error_payload = response.json()
+                    except ValueError:
+                        error_payload = None
+                    remote_error = (
+                        error_payload.get("error") if isinstance(error_payload, dict) else None
+                    )
+                    if isinstance(remote_error, dict):
+                        failure["error"] = remote_error.get("message") or failure["error"]
+                        failure["error_code"] = remote_error.get("code")
+                        failure["error_data"] = remote_error.get("details")
+                    return failure
 
-                json_response = response.json()
-
-                # Check for JSON-RPC error
-                if "error" in json_response:
-                    error = json_response["error"]
-                    logger.error(f"apflow API error: {error}")
-                    return {
-                        "success": False,
-                        "error": error.get("message", "Unknown error"),
-                        "error_code": error.get("code"),
-                        "error_data": error.get("data"),
-                        "base_url": base_url,
-                        "method": method,
-                    }
-
-                result_data = json_response.get("result", {})
+                result_data = response.json()
 
                 # Handle tasks.execute with wait_for_completion
-                if method == "tasks.execute" and wait_for_completion:
+                if module_id == "apflow.task.execute" and wait_for_completion:
                     task_id = result_data.get("task_id") or result_data.get("root_task_id")
                     if task_id:
                         logger.info(f"Waiting for task {task_id} to complete...")
@@ -364,7 +369,7 @@ class ApFlowApiExecutor(BaseTask):
         auth_token: Optional[str],
         poll_interval: float,
         timeout: float,
-        headers: Dict[str, Any],
+        headers: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """
         Wait for task completion by polling task status with production-grade retry logic
@@ -387,12 +392,12 @@ class ApFlowApiExecutor(BaseTask):
         Returns:
             Final task result
         """
-        request_headers = {"Content-Type": "application/json", **headers}
+        request_headers = {"Content-Type": "application/json", **(headers or {})}
 
         if auth_token:
             request_headers["Authorization"] = f"Bearer {auth_token}"
 
-        api_url = f"{base_url.rstrip('/')}/tasks"
+        api_url = f"{base_url.rstrip('/')}/modules/apflow.task.get"
         # Validated once here, not per poll iteration — base_url is fixed for
         # the lifetime of this polling loop, so re-resolving DNS on every poll
         # would be wasted work.
@@ -445,22 +450,15 @@ class ApFlowApiExecutor(BaseTask):
             current_backoff = base_backoff
 
             try:
-                jsonrpc_request = {
-                    "jsonrpc": "2.0",
-                    "method": "tasks.get",
-                    "params": {"task_id": task_id},
-                    "id": f"apflow_poll_{asyncio.get_event_loop().time()}",
-                }
-
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     response = await client.post(
-                        api_url, json=jsonrpc_request, headers=request_headers
+                        api_url, json={"task_id": task_id}, headers=request_headers
                     )
 
                     if response.status_code == 200:
                         json_response = response.json()
-                        if "result" in json_response:
-                            task = json_response["result"]
+                        if isinstance(json_response, dict) and "status" in json_response:
+                            task = json_response
                             status = task.get("status")
 
                             # Successful poll - reset failure counters
@@ -489,10 +487,10 @@ class ApFlowApiExecutor(BaseTask):
 
                             logger.debug(f"Task {task_id} status: {status}, waiting...")
                         else:
-                            # Missing result field - treat as non-retryable error
+                            # Missing task status counts toward the failure threshold.
                             consecutive_failures += 1
                             total_failures += 1
-                            last_error = "Missing 'result' field in response"
+                            last_error = "Missing 'status' field in response"
                             logger.warning(
                                 f"Task {task_id} poll {poll_count}: {last_error} "
                                 f"(consecutive: {consecutive_failures}, total: {total_failures})"

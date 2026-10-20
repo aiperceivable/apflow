@@ -586,8 +586,11 @@ class TestTaskModelSchedulingFields:
         repo = TaskRepository(sync_db_session)
 
         schedule_start = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        assert schedule_start is not None
         schedule_end = datetime(2024, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+        assert schedule_end is not None
         next_run = datetime(2024, 1, 1, 9, 0, 0, tzinfo=timezone.utc)
+        assert next_run is not None
 
         task = await repo.create_task(
             name="Scheduled Task",
@@ -605,8 +608,11 @@ class TestTaskModelSchedulingFields:
         assert task.schedule_type == ScheduleType.daily.value
         assert task.schedule_expression == "09:00"
         assert task.schedule_enabled is True
+        assert task.schedule_start_at is not None
         assert task.schedule_start_at.replace(tzinfo=None) == schedule_start.replace(tzinfo=None)
+        assert task.schedule_end_at is not None
         assert task.schedule_end_at.replace(tzinfo=None) == schedule_end.replace(tzinfo=None)
+        assert task.next_run_at is not None
         assert task.next_run_at.replace(tzinfo=None) == next_run.replace(tzinfo=None)
         assert task.max_runs == 100
         assert task.run_count == 0
@@ -620,7 +626,9 @@ class TestTaskModelSchedulingFields:
         task = await repo.create_task(name="Test Task", user_id="test-user")
 
         last_run = datetime(2024, 1, 1, 9, 0, 0, tzinfo=timezone.utc)
+        assert last_run is not None
         next_run = datetime(2024, 1, 2, 9, 0, 0, tzinfo=timezone.utc)
+        assert next_run is not None
 
         await repo.update_task(
             task_id=task.id,
@@ -633,10 +641,13 @@ class TestTaskModelSchedulingFields:
         )
 
         updated_task = await repo.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.schedule_type == ScheduleType.daily.value
         assert updated_task.schedule_expression == "09:00"
         assert updated_task.schedule_enabled is True
+        assert updated_task.last_run_at is not None
         assert updated_task.last_run_at.replace(tzinfo=None) == last_run.replace(tzinfo=None)
+        assert updated_task.next_run_at is not None
         assert updated_task.next_run_at.replace(tzinfo=None) == next_run.replace(tzinfo=None)
         assert updated_task.run_count == 1
 
@@ -733,6 +744,7 @@ class TestSchedulingAPISupport:
 
         # Update with scheduling configuration
         next_run = datetime(2024, 1, 15, 9, 0, 0, tzinfo=timezone.utc)
+        assert next_run is not None
         await repo.update_task(
             task.id,
             schedule_type="cron",
@@ -744,9 +756,11 @@ class TestSchedulingAPISupport:
 
         # Verify updates
         updated = await repo.get_task_by_id(task.id)
+        assert updated is not None
         assert updated.schedule_type == "cron"
         assert updated.schedule_expression == "0 9 * * 1-5"
         assert updated.schedule_enabled is True
+        assert updated.next_run_at is not None
         assert updated.next_run_at.replace(tzinfo=None) == next_run.replace(tzinfo=None)
         assert updated.max_runs == 100
 
@@ -772,6 +786,7 @@ class TestSchedulingAPISupport:
 
         # Verify disabled
         updated = await repo.get_task_by_id(task.id)
+        assert updated is not None
         assert updated.schedule_enabled is False
         # Other scheduling fields should remain
         assert updated.schedule_type == "daily"
@@ -987,6 +1002,7 @@ class TestSchedulingRepositoryMethods:
 
         # Verify child was reset
         refreshed_child = await repo.get_task_by_id(child.id)
+        assert refreshed_child is not None
         assert refreshed_child.status == "pending"
         assert refreshed_child.result is None
 
@@ -1027,6 +1043,7 @@ class TestSchedulingRepositoryMethods:
 
         # Child should be reset to pending with result cleared
         refreshed_child = await repo.get_task_by_id(child.id)
+        assert refreshed_child is not None
         assert refreshed_child.status == "pending"
         assert refreshed_child.result is None
 
@@ -1053,6 +1070,7 @@ class TestSchedulingRepositoryMethods:
 
         # Task should remain in_progress
         refreshed = await repo.get_task_by_id(task.id)
+        assert refreshed is not None
         assert refreshed.status == "in_progress"
 
     @pytest.mark.asyncio
@@ -1163,6 +1181,7 @@ class TestSchedulingRepositoryMethods:
         assert updated.run_count == 1
         assert updated.last_run_at is not None
         assert updated.next_run_at is not None
+        assert updated.next_run_at is not None
         assert updated.next_run_at.replace(tzinfo=None) > now.replace(
             tzinfo=None
         )  # Next run should be in the future
@@ -1224,6 +1243,7 @@ class TestSchedulingRepositoryMethods:
         )
 
         updated = await repo.complete_scheduled_run(task.id, success=True)
+        assert updated is not None
 
         assert updated.schedule_enabled is False
         assert updated.status == "completed"  # Preserved from executor
@@ -1298,10 +1318,12 @@ class TestSchedulingRepositoryMethods:
 
         # Children should NOT be reset — results stay visible until next execution
         refreshed_child1 = await repo.get_task_by_id(child1.id)
+        assert refreshed_child1 is not None
         assert refreshed_child1.status == "completed"
         assert refreshed_child1.result == {"output": "child1-result"}
 
         refreshed_child2 = await repo.get_task_by_id(child2.id)
+        assert refreshed_child2 is not None
         assert refreshed_child2.status == "completed"
         assert refreshed_child2.result == {"output": "child2-result"}
 
@@ -1362,6 +1384,7 @@ class TestSchedulingRepositoryMethods:
 
         # Child should NOT be reset (no more runs)
         refreshed_child = await repo.get_task_by_id(child.id)
+        assert refreshed_child is not None
         assert refreshed_child.status == "completed"
         assert refreshed_child.result == {"output": "child-final"}
 
@@ -1456,7 +1479,9 @@ class TestSchedulingMigration:
         migration_path = os.path.abspath(migration_path)
 
         spec = importlib.util.spec_from_file_location("migration_002", migration_path)
+        assert spec is not None
         migration_module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
         spec.loader.exec_module(migration_module)
 
         AddSchedulingFields = migration_module.AddSchedulingFields
@@ -1479,7 +1504,9 @@ class TestSchedulingMigration:
         migration_path = os.path.abspath(migration_path)
 
         spec = importlib.util.spec_from_file_location("migration_002", migration_path)
+        assert spec is not None
         migration_module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
         spec.loader.exec_module(migration_module)
 
         AddSchedulingFields = migration_module.AddSchedulingFields
@@ -1499,7 +1526,9 @@ class TestSchedulingMigration:
         migration_path = os.path.abspath(migration_path)
 
         spec = importlib.util.spec_from_file_location("migration_002", migration_path)
+        assert spec is not None
         migration_module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
         spec.loader.exec_module(migration_module)
 
         AddSchedulingFields = migration_module.AddSchedulingFields

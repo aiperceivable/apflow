@@ -5,9 +5,10 @@ Checkpoint manager for saving and restoring task execution state.
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, cast
 
 from sqlalchemy import select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -155,7 +156,7 @@ class CheckpointManager:
             result = await db.execute(
                 sa_delete(TaskCheckpointModel).where(TaskCheckpointModel.task_id == task_id)
             )
-            count = result.rowcount or 0
+            count = cast(CursorResult[Any], result).rowcount or 0
         else:
             count = (
                 db.query(TaskCheckpointModel)

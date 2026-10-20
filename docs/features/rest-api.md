@@ -211,6 +211,7 @@ The task-scheduling lifecycle is exposed as apcore modules, so it surfaces on ev
 | `schedule.due` | List scheduled tasks whose next run time has arrived |
 | `schedule.trigger` | Execute a scheduled task now (registry-native inbound trigger) |
 | `schedule.complete` | Record a scheduled run complete and advance the next run |
+| `schedule.history` | List a scheduled definition's run instances |
 | `schedule.export_ical` | Export scheduled tasks as an iCalendar (`.ics`) feed |
 
 These complement the existing `task.scheduled` module (which lists configured schedules).

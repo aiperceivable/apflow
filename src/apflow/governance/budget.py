@@ -25,7 +25,7 @@ class TokenBudget:
     Args:
         scope: Budget scope (TASK or USER).
         scope_id: Identifier for the scope (task_id or user_id).
-        limit: Token limit (>= 1).
+        limit: Token limit (>= 0); zero is immediately exhausted.
         used: Tokens consumed so far (>= 0).
     """
 
@@ -96,7 +96,9 @@ class BudgetManager:
 
         current_usage = 0
         if task.token_usage and isinstance(task.token_usage, dict):
-            current_usage = task.token_usage.get("total", 0)
+            current_usage = task.token_usage.get(
+                "total", task.token_usage.get("input", 0) + task.token_usage.get("output", 0)
+            )
 
         budget = TokenBudget(
             scope=BudgetScope.TASK,
@@ -136,7 +138,9 @@ class BudgetManager:
             task_id,
             input_delta=token_usage.get("input", 0),
             output_delta=token_usage.get("output", 0),
-            total_delta=token_usage.get("total", 0),
+            total_delta=token_usage.get(
+                "total", token_usage.get("input", 0) + token_usage.get("output", 0)
+            ),
         )
         if task is None:
             raise KeyError(f"Task '{task_id}' not found")

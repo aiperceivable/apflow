@@ -1,10 +1,10 @@
-from apflow.core.storage.sqlalchemy.models import TaskModelType
+from apflow.core.storage.sqlalchemy.models import TaskModel
 from apflow.core.types import TaskTreeNode
 from typing import List, Union
 
 
 def check_tasks_user_ownership(
-    tasks: Union[TaskTreeNode, TaskModelType, List[TaskModelType]], user_id: str
+    tasks: Union[TaskTreeNode, TaskModel, List[TaskModel]], user_id: str
 ) -> bool:
     """
     Check tasks belong to the specified user ID.

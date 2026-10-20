@@ -33,11 +33,7 @@ class TestApFlowApiExecutor:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "jsonrpc": "2.0",
-            "result": {"task_id": "task-123", "status": "started"},
-            "id": "test-id",
-        }
+        mock_response.json.return_value = {"task_id": "task-123", "status": "started"}
 
         with patch("httpx.AsyncClient") as mock_client:
             mock_client_instance = AsyncMock()
@@ -51,6 +47,7 @@ class TestApFlowApiExecutor:
                     "params": {"task_id": "task-123"},
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             assert result["result"]["task_id"] == "task-123"
@@ -63,11 +60,7 @@ class TestApFlowApiExecutor:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "jsonrpc": "2.0",
-            "result": {"task_id": "task-123"},
-            "id": "test-id",
-        }
+        mock_response.json.return_value = {"task_id": "task-123"}
 
         with patch("httpx.AsyncClient") as mock_client:
             mock_client_instance = AsyncMock()
@@ -82,6 +75,7 @@ class TestApFlowApiExecutor:
                     "auth_token": "test-token",
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_client_instance.post.call_args[1]
@@ -93,11 +87,10 @@ class TestApFlowApiExecutor:
         executor = ApFlowApiExecutor()
 
         mock_response = MagicMock()
-        mock_response.status_code = 200
+        mock_response.status_code = 404
+        mock_response.text = "Method not found"
         mock_response.json.return_value = {
-            "jsonrpc": "2.0",
-            "error": {"code": -32601, "message": "Method not found"},
-            "id": "test-id",
+            "error": {"code": "MODULE_NOT_FOUND", "message": "Method not found"}
         }
 
         with patch("httpx.AsyncClient") as mock_client:
@@ -108,6 +101,7 @@ class TestApFlowApiExecutor:
             result = await executor.execute(
                 {"base_url": "http://localhost:8000", "method": "tasks.invalid", "params": {}}
             )
+            result = result["result"]
 
             assert result["success"] is False
             assert "error" in result
@@ -146,6 +140,7 @@ class TestApFlowApiExecutor:
                     "timeout": 5.0,
                 }
             )
+            result = result["result"]
 
             assert result["success"] is False
             assert "timeout" in result["error"].lower()
@@ -158,32 +153,20 @@ class TestApFlowApiExecutor:
         # Mock initial execute response
         mock_execute_response = MagicMock()
         mock_execute_response.status_code = 200
-        mock_execute_response.json.return_value = {
-            "jsonrpc": "2.0",
-            "result": {"task_id": "task-123", "status": "started"},
-            "id": "test-id",
-        }
+        mock_execute_response.json.return_value = {"task_id": "task-123", "status": "started"}
 
         # Mock polling responses
         mock_poll_responses = [
             MagicMock(
                 status_code=200,
-                json=lambda: {
-                    "jsonrpc": "2.0",
-                    "result": {"id": "task-123", "status": "in_progress"},
-                    "id": "poll-1",
-                },
+                json=lambda: {"id": "task-123", "status": "in_progress"},
             ),
             MagicMock(
                 status_code=200,
                 json=lambda: {
-                    "jsonrpc": "2.0",
-                    "result": {
-                        "id": "task-123",
-                        "status": "completed",
-                        "result": {"output": "done"},
-                    },
-                    "id": "poll-2",
+                    "id": "task-123",
+                    "status": "completed",
+                    "result": {"output": "done"},
                 },
             ),
         ]
@@ -204,6 +187,7 @@ class TestApFlowApiExecutor:
                     "poll_interval": 0.1,
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             assert result["status"] == "completed"
@@ -220,21 +204,13 @@ class TestApFlowApiExecutor:
 
         mock_execute_response = MagicMock()
         mock_execute_response.status_code = 200
-        mock_execute_response.json.return_value = {
-            "jsonrpc": "2.0",
-            "result": {"task_id": "task-123", "status": "started"},
-            "id": "test-id",
-        }
+        mock_execute_response.json.return_value = {"task_id": "task-123", "status": "started"}
 
         # Mock polling that never completes - return in_progress status
         def create_poll_response():
             mock_poll = MagicMock()
             mock_poll.status_code = 200
-            mock_poll.json.return_value = {
-                "jsonrpc": "2.0",
-                "result": {"id": "task-123", "status": "in_progress"},
-                "id": "poll-1",
-            }
+            mock_poll.json.return_value = {"id": "task-123", "status": "in_progress"}
             return mock_poll
 
         with patch("httpx.AsyncClient") as mock_client:
@@ -285,6 +261,7 @@ class TestApFlowApiExecutor:
                         "timeout": 1.0,
                     }
                 )
+                result = result["result"]
 
             # Should timeout
             assert result["success"] is False
@@ -311,6 +288,7 @@ class TestApFlowApiExecutor:
                     "params": {"task_id": "task-123"},
                 }
             )
+            result = result["result"]
 
             assert result["success"] is False
             assert result["status_code"] == 500
@@ -334,6 +312,7 @@ class TestApFlowApiExecutor:
                     "params": {"task_id": "task-123"},
                 }
             )
+            result = result["result"]
 
             assert result["success"] is False
             assert "error" in result
@@ -351,6 +330,7 @@ class TestApFlowApiExecutor:
                 "params": {"task_id": "task-123"},
             }
         )
+        result = result["result"]
 
         assert result["success"] is False
         assert "cancelled" in result["error"].lower()
@@ -365,11 +345,7 @@ class TestApFlowApiExecutor:
         for method in methods:
             mock_response = MagicMock()
             mock_response.status_code = 200
-            mock_response.json.return_value = {
-                "jsonrpc": "2.0",
-                "result": {"success": True},
-                "id": "test-id",
-            }
+            mock_response.json.return_value = {"success": True}
 
             with patch("httpx.AsyncClient") as mock_client:
                 mock_client_instance = AsyncMock()
@@ -379,11 +355,15 @@ class TestApFlowApiExecutor:
                 result = await executor.execute(
                     {"base_url": "http://localhost:8000", "method": method, "params": {}}
                 )
+                result = result["result"]
 
                 assert result["success"] is True
                 call_args = mock_client_instance.post.call_args
-                request_data = call_args[1]["json"]
-                assert request_data["method"] == method
+                assert (
+                    call_args[0][0]
+                    == f"http://localhost:8000/modules/apflow.task.{method.removeprefix('tasks.')}"
+                )
+                assert call_args[1]["json"] == {}
 
     @pytest.mark.asyncio
     async def test_execute_with_custom_headers(self):
@@ -392,11 +372,7 @@ class TestApFlowApiExecutor:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "jsonrpc": "2.0",
-            "result": {"task_id": "task-123"},
-            "id": "test-id",
-        }
+        mock_response.json.return_value = {"task_id": "task-123"}
 
         with patch("httpx.AsyncClient") as mock_client:
             mock_client_instance = AsyncMock()
@@ -411,6 +387,7 @@ class TestApFlowApiExecutor:
                     "headers": {"X-Custom-Header": "custom-value"},
                 }
             )
+            result = result["result"]
 
             assert result["success"] is True
             call_kwargs = mock_client_instance.post.call_args[1]
@@ -428,11 +405,7 @@ class TestApFlowApiExecutor:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "jsonrpc": "2.0",
-            "result": {"success": True},
-            "id": "test-id",
-        }
+        mock_response.json.return_value = {"success": True}
 
         with (
             patch("httpx.AsyncClient") as mock_client,
@@ -452,6 +425,7 @@ class TestApFlowApiExecutor:
                     "params": {},
                 }
             )
+            result = result["result"]
 
         assert result["success"] is False
         assert "private" in result["error"].lower() or "reserved" in result["error"].lower()
@@ -468,11 +442,7 @@ class TestApFlowApiExecutor:
 
         mock_execute_response = MagicMock()
         mock_execute_response.status_code = 200
-        mock_execute_response.json.return_value = {
-            "jsonrpc": "2.0",
-            "result": {"task_id": "task-123", "status": "started"},
-            "id": "test-id",
-        }
+        mock_execute_response.json.return_value = {"task_id": "task-123", "status": "started"}
 
         with patch("httpx.AsyncClient") as mock_client:
             mock_client_instance = AsyncMock()
@@ -492,6 +462,7 @@ class TestApFlowApiExecutor:
                         "poll_interval": 0.01,
                     }
                 )
+                result = result["result"]
 
         assert result["success"] is False
         assert "private" in result["error"].lower() or "reserved" in result["error"].lower()

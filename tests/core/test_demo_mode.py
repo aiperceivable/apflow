@@ -3,7 +3,7 @@ Test demo mode functionality (use_demo parameter)
 """
 
 import pytest
-from typing import Dict, Any, Optional
+from typing import TYPE_CHECKING, Dict, Any, Optional
 from apflow.core.base import BaseTask
 from apflow.core.execution.task_manager import TaskManager
 from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
@@ -31,7 +31,7 @@ class TestDemoMode:
             name = "Test Executor"
             description = "Test executor without get_demo_result"
 
-            def __init__(self, inputs=None):
+            def __init__(self, inputs: Optional[Dict[str, Any]] = None) -> None:
                 super().__init__(inputs=inputs or {})
 
             async def execute(self, inputs):
@@ -59,6 +59,7 @@ class TestDemoMode:
 
         # Execute task
         result = await task_manager._execute_task_with_schemas(task, task.inputs)
+        result = result["result"]
 
         # Verify demo result
         assert result["demo_mode"] is True
@@ -74,7 +75,7 @@ class TestDemoMode:
             name = "Test Executor"
             description = "Test executor with get_demo_result"
 
-            def __init__(self, inputs=None):
+            def __init__(self, inputs: Optional[Dict[str, Any]] = None) -> None:
                 super().__init__(inputs=inputs or {})
 
             async def execute(self, inputs):
@@ -110,6 +111,7 @@ class TestDemoMode:
 
         # Execute task
         result = await task_manager._execute_task_with_schemas(task, task.inputs)
+        result = result["result"]
 
         # Verify custom demo result
         assert result["demo_mode"] is True
@@ -128,7 +130,7 @@ class TestDemoMode:
             name = "Test Executor"
             description = "Test executor returning string demo result"
 
-            def __init__(self, inputs=None):
+            def __init__(self, inputs: Optional[Dict[str, Any]] = None) -> None:
                 super().__init__(inputs=inputs or {})
 
             async def execute(self, inputs):
@@ -160,10 +162,10 @@ class TestDemoMode:
 
         # Execute task
         result = await task_manager._execute_task_with_schemas(task, task.inputs)
+        result = result["result"]
 
         # Verify result format
-        assert result["demo_mode"] is True
-        assert result["result"] == "String demo result"
+        assert result == "String demo result"
 
     @pytest.mark.asyncio
     async def test_demo_mode_get_demo_result_exception(self, sync_db_session):
@@ -175,7 +177,7 @@ class TestDemoMode:
             name = "Test Executor"
             description = "Test executor with get_demo_result that raises error"
 
-            def __init__(self, inputs=None):
+            def __init__(self, inputs: Optional[Dict[str, Any]] = None) -> None:
                 super().__init__(inputs=inputs or {})
 
             async def execute(self, inputs):
@@ -207,6 +209,7 @@ class TestDemoMode:
 
         # Execute task (should fall back to default demo)
         result = await task_manager._execute_task_with_schemas(task, task.inputs)
+        result = result["result"]
 
         # Verify fallback to default
         assert result["demo_mode"] is True
@@ -223,7 +226,7 @@ class TestDemoMode:
             name = "Test Executor"
             description = "Test executor for normal execution"
 
-            def __init__(self, inputs=None):
+            def __init__(self, inputs: Optional[Dict[str, Any]] = None) -> None:
                 super().__init__(inputs=inputs or {})
 
             async def execute(self, inputs):
@@ -252,6 +255,7 @@ class TestDemoMode:
 
         # Execute task
         result = await task_manager._execute_task_with_schemas(task, task.inputs)
+        result = result["result"]
 
         # Verify normal execution
         assert "demo_mode" not in result
@@ -268,7 +272,8 @@ class TestDemoMode:
         @executor_register()
         class TestExecutor(BaseTask):
             id = "test_executor_sleep_scale"
-            type = "test"
+            if not TYPE_CHECKING:
+                type = "test"
 
             async def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
                 return {"result": "Real execution"}
@@ -311,6 +316,7 @@ class TestDemoMode:
         # Execute task and measure time
         start_time = time.time()
         result = await task_manager._execute_task_with_schemas(task, task.inputs)
+        result = result["result"]
         elapsed_time = time.time() - start_time
 
         # Verify demo result
@@ -327,6 +333,7 @@ class TestDemoMode:
         set_demo_sleep_scale(2.0)
         start_time = time.time()
         result = await task_manager._execute_task_with_schemas(task, task.inputs)
+        result = result["result"]
         elapsed_time = time.time() - start_time
 
         # Verify doubled sleep (0.2 * 2.0 = 0.4 seconds)
@@ -339,6 +346,7 @@ class TestDemoMode:
         set_demo_sleep_scale(0.0)
         start_time = time.time()
         result = await task_manager._execute_task_with_schemas(task, task.inputs)
+        result = result["result"]
         elapsed_time = time.time() - start_time
 
         # Verify no sleep (should be very fast)
@@ -356,7 +364,8 @@ class TestDemoMode:
         @executor_register()
         class TestExecutor(BaseTask):
             id = "test_executor_no_sleep"
-            type = "test"
+            if not TYPE_CHECKING:
+                type = "test"
 
             async def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
                 return {"result": "Real execution"}
@@ -394,6 +403,7 @@ class TestDemoMode:
         # Execute task and measure time
         start_time = time.time()
         result = await task_manager._execute_task_with_schemas(task, task.inputs)
+        result = result["result"]
         elapsed_time = time.time() - start_time
 
         # Verify demo result

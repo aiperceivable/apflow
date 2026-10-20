@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 import time
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -27,11 +28,11 @@ def test_redact_connection_string_handles_empty() -> None:
 async def test_rest_execute_does_not_leak_exception_text() -> None:
     from apflow.api.rest import _execute
 
-    class _Boom:
-        async def call_async(self, module_id, inputs):  # noqa: ANN001
-            raise RuntimeError("secret DSN postgresql://u:p@h/db in message")
-
-    status, payload = await _execute(_Boom(), "apflow.task.get", {})
+    executor = MagicMock()
+    executor.call_async = AsyncMock(
+        side_effect=RuntimeError("secret DSN postgresql://u:p@h/db in message")
+    )
+    status, payload = await _execute(executor, "apflow.task.get", {})
     assert status == 500
     # The raw exception text (which can carry DSNs / hostnames) must not reach the client.
     assert payload["error"]["message"] == "Internal server error"

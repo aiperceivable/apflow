@@ -220,10 +220,18 @@ class TestExtensionScanner:
 
     def test_rescan_drops_stale_cache_entries(self) -> None:
         """A stale executor id (deleted/renamed) must not survive a rescan."""
-        from types import SimpleNamespace
+        from apflow.core.extensions.scanner import ExecutorMetadata
 
         # Inject a ghost that no longer exists on disk.
-        ExtensionScanner._metadata_cache["ghost_executor"] = SimpleNamespace(id="ghost_executor")
+        ExtensionScanner._metadata_cache["ghost_executor"] = ExecutorMetadata(
+            id="ghost_executor",
+            name="Ghost executor",
+            description="Removed executor",
+            module_path="apflow.extensions.ghost",
+            class_name="GhostExecutor",
+            file_path="ghost.py",
+            dependencies=[],
+        )
 
         metadata = ExtensionScanner.scan_builtin_executors(force_rescan=True)
 

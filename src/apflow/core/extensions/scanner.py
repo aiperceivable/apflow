@@ -15,7 +15,7 @@ Key features:
 import ast
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, cast
 from dataclasses import dataclass, asdict, field
 
 from apflow.logger import get_logger
@@ -262,15 +262,15 @@ class ExtensionScanner:
                 always_available = cls._is_always_available(module_path)
 
                 metadata = ExecutorMetadata(
-                    id=executor_id,
-                    name=executor_name or node.name,
-                    description=description,
+                    id=cast(str, executor_id),
+                    name=cast(str, executor_name or node.name),
+                    description=cast(str, description),
                     module_path=module_path,
                     class_name=node.name,
                     file_path=str(file_path),
                     dependencies=dependencies,
                     always_available=always_available,
-                    tags=tags,
+                    tags=cast(List[str], tags),
                 )
 
                 metadata_list.append(metadata)

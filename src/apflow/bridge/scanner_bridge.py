@@ -9,6 +9,7 @@ import importlib
 from typing import Any, Dict
 
 from apflow.bridge.module_adapter import ExecutableTaskModuleAdapter
+from apflow.core.extensions.registry import get_registry
 from apflow.core.extensions.scanner import ExtensionScanner
 from apflow.logger import get_logger
 
@@ -36,42 +37,32 @@ def discover_executor_modules() -> list[ExecutableTaskModuleAdapter]:
         if adapter is not None:
             adapters.append(adapter)
 
-    # Append runtime-registered function executors (invisible to AST scanner)
-    try:
-        from apflow.adapters.function_executor import get_function_executor_classes
-
-        seen_ids = {a.executor_id for a in adapters}
-        for executor_id, executor_class in get_function_executor_classes().items():
-            if executor_id not in seen_ids:
-                adapter = _create_adapter_from_class(executor_id, executor_class)
-                if adapter is not None:
-                    adapters.append(adapter)
-    except ImportError:
-        pass
-
     # Discover executors from entry points (third-party packages)
     try:
         from importlib.metadata import entry_points
 
         eps = entry_points(group="apflow.executors")
-        seen_ids = {a.executor_id for a in adapters}
         for ep in eps:
             try:
                 register_fn = ep.load()
                 register_fn()  # Expected to call @function_executor or @executor_register
-                # Re-scan function executors after registration
-                for eid, ecls in get_function_executor_classes().items():
-                    if eid not in seen_ids:
-                        adapter = _create_adapter_from_class(eid, ecls)
-                        if adapter is not None:
-                            adapters.append(adapter)
-                            seen_ids.add(eid)
             except Exception as e:
                 logger.warning(f"Failed to load executor entry point '{ep.name}': {e}")
     except Exception as e:
         # Surface group-level discovery failures (e.g. broken distribution metadata)
         # rather than silently dropping all entry-point executors.
         logger.warning(f"Failed to enumerate 'apflow.executors' entry points: {e}")
+
+    registry = get_registry()
+    seen_ids = {adapter.executor_id for adapter in adapters}
+    for executor in registry.list_executors():
+        executor_class = registry.get_executor_class(executor.id)
+        if executor.id in seen_ids or executor_class is None:
+            continue
+        adapter = _create_adapter_from_class(executor.id, executor_class)
+        if adapter is not None:
+            adapters.append(adapter)
+            seen_ids.add(executor.id)
 
     logger.info(f"Discovered {len(adapters)} executor modules for apcore registration")
     return adapters
@@ -125,7 +116,9 @@ def _extract_schema(executor_class: type, method_name: str) -> Dict[str, Any]:
         instance = executor_class()
         schema_method = getattr(instance, method_name, None)
         if schema_method and callable(schema_method):
-            return schema_method()
+            schema = schema_method()
+            if isinstance(schema, dict):
+                return schema
     except Exception as e:
         logger.debug(f"Cannot instantiate {executor_class.__name__}(): {e}")
 
@@ -134,7 +127,9 @@ def _extract_schema(executor_class: type, method_name: str) -> Dict[str, Any]:
         instance = executor_class(inputs={})
         schema_method = getattr(instance, method_name, None)
         if schema_method and callable(schema_method):
-            return schema_method()
+            schema = schema_method()
+            if isinstance(schema, dict):
+                return schema
     except Exception as e:
         logger.debug(
             f"Cannot instantiate {executor_class.__name__}(inputs={{}}): {e}, using fallback schema"

@@ -3,7 +3,6 @@ SQLAlchemy models for task storage
 """
 
 from sqlalchemy import (
-    Column,
     String,
     Integer,
     DateTime,
@@ -16,15 +15,19 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.sql import func
-from sqlalchemy.orm import declarative_base
-from typing import Dict, Any, Optional, TypeVar, Type
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from typing import Dict, Any, Optional, Self, TypeVar
 from enum import auto, StrEnum
 import re as _re
 import uuid
 import os
-from datetime import timezone
+from datetime import datetime, timezone
+from decimal import Decimal
 
-Base = declarative_base()
+
+class Base(DeclarativeBase):
+    """Shared declarative registry for storage models."""
+
 
 # Type variable for TaskModel subclasses
 TaskModelType = TypeVar("TaskModelType", bound="TaskModel")
@@ -101,129 +104,153 @@ class TaskModel(Base):
     )
 
     # === Task Definition Identity ===
-    id = Column(
-        String(255), primary_key=True, index=True, default=lambda: str(uuid.uuid4())
+    id: Mapped[str] = mapped_column(
+        String(255), primary_key=True, index=True, default=lambda: str(uuid.uuid4()), nullable=False
     )  # Task definition ID (maps to A2A Task.context_id)
 
     # === Task Tree Structure (TaskManager) ===
-    parent_id = Column(
+    parent_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True, index=True
     )  # Parent task ID (for task tree hierarchy)
-    task_tree_id = Column(
+    task_tree_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True, index=True
     )  # Task tree identifier (for grouping/querying across trees)
 
     # === User Identification (Optional, Multi-user Support) ===
-    user_id = Column(
+    user_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True, index=True
     )  # User ID (optional, for multi-user scenarios)
 
     # === Task Basic Information ===
-    name = Column(String(100), nullable=False, index=True)  # Task name/method identifier
-    status = Column(
-        String(50), default="pending", index=True
+    name: Mapped[str] = mapped_column(
+        String(100), nullable=False, index=True
+    )  # Task name/method identifier
+    status: Mapped[str] = mapped_column(
+        String(50), default="pending", index=True, nullable=True
     )  # Task status: pending, in_progress, completed, failed, cancelled
 
     # === Task Orchestration (TaskManager) ===
-    priority = Column(
-        Integer, default=1
+    priority: Mapped[int] = mapped_column(
+        Integer, default=1, nullable=True
     )  # Priority level: 0=urgent (highest), 1=high (default), 2=normal, 3=low (lowest). ASC order: smaller numbers execute first. NOTE: create() always injects default_values()['priority']=1, so this column default aligns with it.
-    dependencies = Column(
+    dependencies: Mapped[Any] = mapped_column(
         JSON, nullable=True
     )  # Task dependencies: [{"id": "uuid", "required": true}]
 
     # === Task Data ===
-    inputs = Column(
+    inputs: Mapped[Any] = mapped_column(
         JSON, nullable=True
     )  # Execution-time input parameters for executor.execute(inputs)
-    params = Column(
+    params: Mapped[Any] = mapped_column(
         JSON, nullable=True
     )  # Executor initialization parameters for executor.__init__(**params)
-    result = Column(
+    result: Mapped[Any] = mapped_column(
         JSON, nullable=True
-    )  # Latest execution result (extracted from A2A Task.artifacts)
-    error = Column(Text, nullable=True)  # Error message (extracted from A2A TaskStatus.message)
-    schemas = Column(JSON, nullable=True)  # Validation schemas (input_schema, output_schema)
+    )  # Latest business output, normalized at the executor boundary
+    error: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # Execution failure message, separate from business output
+    schemas: Mapped[Any] = mapped_column(
+        JSON, nullable=True
+    )  # Validation schemas (input_schema, output_schema)
 
     # Note: A2A Protocol execution fields (artifacts, history, kind, metadata) are NOT stored here.
     # They are managed by A2A Protocol TaskStore as execution instances.
 
     # === Task Progress ===
-    progress = Column(Numeric(3, 2), default=0.0)  # Progress as decimal (0.00 to 1.00)
+    progress: Mapped[Decimal | float] = mapped_column(
+        Numeric(3, 2), default=0.0, nullable=True
+    )  # Progress as decimal (0.00 to 1.00)
 
     # === Timestamps ===
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    started_at = Column(DateTime(timezone=True), nullable=True)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # === Auxiliary Fields ===
-    has_children = Column(Boolean, default=False)  # UI/performance optimization flag
+    has_children: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=True
+    )  # UI/performance optimization flag
 
     # === Task Origin/Reference Fields ===
-    original_task_id = Column(
+    original_task_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True, index=True
     )  # Source task ID (for copy/reference/link)
-    origin_type = Column(
+    origin_type: Mapped[str | None] = mapped_column(
         String(50), nullable=True, default=None, index=True
     )  # Origin kind: TaskOriginType
-    has_references = Column(
-        Boolean, default=False, index=True
+    has_references: Mapped[bool] = mapped_column(
+        Boolean, default=False, index=True, nullable=True
     )  # Whether this task is referenced/copied by others
 
     # === Scheduling Configuration ===
-    schedule_type = Column(
+    schedule_type: Mapped[str | None] = mapped_column(
         String(20), nullable=True, index=True
     )  # Schedule type: ScheduleType (once, interval, cron, daily, weekly, monthly)
-    schedule_expression = Column(
+    schedule_expression: Mapped[str | None] = mapped_column(
         String(100), nullable=True
     )  # Schedule expression (format depends on schedule_type)
-    schedule_enabled = Column(
-        Boolean, default=False, index=True
+    schedule_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, index=True, nullable=True
     )  # Whether scheduling is enabled for this task
 
     # === Schedule Boundaries ===
-    schedule_start_at = Column(
+    schedule_start_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )  # Earliest time the schedule can trigger
-    schedule_end_at = Column(
+    schedule_end_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )  # Latest time the schedule can trigger (after this, schedule is disabled)
 
     # === Schedule State ===
-    next_run_at = Column(
+    next_run_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )  # Next scheduled execution time (calculated field)
-    last_run_at = Column(
+    last_run_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )  # Last time this scheduled task was executed
 
     # === Execution Control ===
-    max_runs = Column(Integer, nullable=True)  # Maximum number of scheduled runs (null = unlimited)
-    run_count = Column(Integer, default=0)  # Number of times this scheduled task has been executed
+    max_runs: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )  # Maximum number of scheduled runs (null = unlimited)
+    run_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=True
+    )  # Number of times this scheduled task has been executed
 
     # === Distributed Execution Fields (nullable, backward compatible) ===
-    lease_id = Column(String(100), nullable=True)
-    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
-    placement_constraints = Column(JSON, nullable=True)
-    attempt_id = Column(Integer, default=0)
-    idempotency_key = Column(String(255), nullable=True)
-    last_assigned_node = Column(String(100), nullable=True)
+    lease_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    placement_constraints: Mapped[Any] = mapped_column(JSON, nullable=True)
+    attempt_id: Mapped[int] = mapped_column(Integer, default=0, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_assigned_node: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     # === Durability Fields (F-003) ===
-    checkpoint_at = Column(DateTime(timezone=True), nullable=True)
-    resume_from = Column(String(255), nullable=True)
-    attempt_count = Column(Integer, default=0)
-    max_attempts = Column(Integer, default=3)
-    backoff_strategy = Column(String(20), default="exponential")
-    backoff_base_seconds = Column(Numeric(10, 2), default=1.0)
+    checkpoint_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resume_from: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=True)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=True)
+    backoff_strategy: Mapped[str] = mapped_column(String(20), default="exponential", nullable=True)
+    backoff_base_seconds: Mapped[Decimal | float] = mapped_column(
+        Numeric(10, 2), default=1.0, nullable=True
+    )
 
     # === Cost Governance Fields (F-004) ===
-    token_usage = Column(JSON, nullable=True)
-    token_budget = Column(Integer, nullable=True)
-    estimated_cost_usd = Column(Numeric(12, 6), nullable=True)
-    actual_cost_usd = Column(Numeric(12, 6), nullable=True)
-    cost_policy = Column(String(100), nullable=True)
+    token_usage: Mapped[Any] = mapped_column(JSON, nullable=True)
+    token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    estimated_cost_usd: Mapped[Decimal | float | None] = mapped_column(
+        Numeric(12, 6), nullable=True
+    )
+    actual_cost_usd: Mapped[Decimal | float | None] = mapped_column(Numeric(12, 6), nullable=True)
+    cost_policy: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert model to dictionary"""
@@ -301,9 +328,11 @@ class TaskModel(Base):
             "token_usage": self.token_usage,
             "token_budget": self.token_budget,
             "estimated_cost_usd": (
-                float(self.estimated_cost_usd) if self.estimated_cost_usd else None
+                float(self.estimated_cost_usd) if self.estimated_cost_usd is not None else None
             ),
-            "actual_cost_usd": (float(self.actual_cost_usd) if self.actual_cost_usd else None),
+            "actual_cost_usd": (
+                float(self.actual_cost_usd) if self.actual_cost_usd is not None else None
+            ),
             "cost_policy": self.cost_policy,
         }
 
@@ -323,7 +352,7 @@ class TaskModel(Base):
         data["last_run_at"] = self.last_run_at.isoformat() if self.last_run_at else None
         return data
 
-    def copy(self, override: Optional[Dict[str, Any]] = None) -> TaskModelType:
+    def copy(self, override: Optional[Dict[str, Any]] = None) -> Self:
         """
         Return a new instance of this TaskModel (or subclass), optionally overriding fields.
         """
@@ -332,7 +361,7 @@ class TaskModel(Base):
             data.update(override)
         return self.__class__(**data)
 
-    def update_from_dict(self, data: Dict[str, Any]) -> TaskModelType:
+    def update_from_dict(self, data: Dict[str, Any]) -> Self:
         """
         Update model fields from a dictionary
         """
@@ -400,7 +429,7 @@ class TaskModel(Base):
         }
 
     @classmethod
-    def create(cls: Type[TaskModelType], data: Dict[str, Any]) -> TaskModelType:
+    def create(cls: type[Self], data: Dict[str, Any]) -> Self:
         """
         Create a new TaskModel (or subclass) instance from a dictionary,
         applying default values and filtering unavailable columns.
@@ -415,7 +444,7 @@ class TaskModel(Base):
         filtered_data = {k: v for k, v in task_data.items() if k in available_columns}
         return cls(**filtered_data)
 
-    def convert_to_link(self) -> TaskModelType:
+    def convert_to_link(self) -> Self:
         """
         Fields to reset when converting to a linked task.
         """
@@ -435,7 +464,7 @@ class TaskModel(Base):
             return True
         return False
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<TaskModel(id='{self.id}', name='{self.name}', status='{self.status}')>"
 
 
@@ -451,23 +480,27 @@ class SchemaMigration(Base):
     __tablename__ = "apflow_schema_migrations"  # Fixed table name (not configurable)
 
     # === Migration Identity ===
-    id = Column(
-        String(100), primary_key=True, index=True
+    id: Mapped[str] = mapped_column(
+        String(100), primary_key=True, index=True, nullable=False
     )  # Migration ID (filename without .py, e.g., "001_add_task_tree_fields")
 
     # === Migration Info ===
-    description = Column(Text, nullable=False)  # What this migration does
+    description: Mapped[str] = mapped_column(Text, nullable=False)  # What this migration does
 
     # === Version Tracking ===
-    apflow_version = Column(
+    apflow_version: Mapped[str] = mapped_column(
         String(50), nullable=False
     )  # APFlow version when migration was applied (e.g., "0.2.0")
 
     # === Timestamps ===
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
+    )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<SchemaMigration(id='{self.id}', apflow_version='{self.apflow_version}')>"
 
 
@@ -479,12 +512,14 @@ class DistributedNode(Base):
 
     __tablename__ = "apflow_distributed_nodes"
 
-    node_id = Column(String(100), primary_key=True)
-    executor_types = Column(JSON, nullable=False)
-    capabilities = Column(JSON, default=dict)
-    status = Column(String(20), nullable=False)  # healthy, stale, dead
-    heartbeat_at = Column(DateTime(timezone=True), nullable=False)
-    registered_at = Column(DateTime(timezone=True), server_default=func.now())
+    node_id: Mapped[str] = mapped_column(String(100), primary_key=True, nullable=False)
+    executor_types: Mapped[Any] = mapped_column(JSON, nullable=False)
+    capabilities: Mapped[Any] = mapped_column(JSON, default=dict, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)  # healthy, stale, dead
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    registered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
 
     def __repr__(self) -> str:
         return f"<DistributedNode(node_id='{self.node_id}', status='{self.status}')>"
@@ -495,20 +530,22 @@ class TaskLease(Base):
 
     __tablename__ = "apflow_task_leases"
 
-    task_id = Column(
-        String(100),
-        ForeignKey(f"{TASK_TABLE_NAME}.id"),
-        primary_key=True,
+    task_id: Mapped[str] = mapped_column(
+        String(100), ForeignKey(f"{TASK_TABLE_NAME}.id"), primary_key=True, nullable=False
     )
-    node_id = Column(
+    node_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey("apflow_distributed_nodes.node_id"),
         nullable=False,
     )
-    lease_token = Column(String(100), unique=True, index=True, nullable=False)
-    acquired_at = Column(DateTime(timezone=True), server_default=func.now())
-    expires_at = Column(DateTime(timezone=True), index=True, nullable=False)
-    attempt_id = Column(Integer, default=0)
+    lease_token: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
+    acquired_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True, nullable=False
+    )
+    attempt_id: Mapped[int] = mapped_column(Integer, default=0, nullable=True)
 
     def __repr__(self) -> str:
         return f"<TaskLease(task_id='{self.task_id}', node_id='{self.node_id}')>"
@@ -519,12 +556,16 @@ class ExecutionIdempotency(Base):
 
     __tablename__ = "apflow_execution_idempotency"
 
-    task_id = Column(String(100), primary_key=True)
-    attempt_id = Column(Integer, primary_key=True)
-    idempotency_key = Column(String(255), unique=True, index=True, nullable=False)
-    result = Column(JSON, nullable=True)
-    status = Column(String(20), nullable=False)  # pending, completed, failed
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    task_id: Mapped[str] = mapped_column(String(100), primary_key=True, nullable=False)
+    attempt_id: Mapped[int] = mapped_column(Integer, primary_key=True, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(
+        String(255), unique=True, index=True, nullable=False
+    )
+    result: Mapped[Any] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)  # pending, completed, failed
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
 
     def __repr__(self) -> str:
         return f"<ExecutionIdempotency(task_id='{self.task_id}', " f"attempt_id={self.attempt_id})>"
@@ -535,15 +576,21 @@ class ClusterLeader(Base):
 
     __tablename__ = "apflow_cluster_leader"
 
-    leader_id = Column(String(100), primary_key=True, default="singleton")
-    node_id = Column(
+    leader_id: Mapped[str] = mapped_column(
+        String(100), primary_key=True, default="singleton", nullable=False
+    )
+    node_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey("apflow_distributed_nodes.node_id"),
         nullable=False,
     )
-    lease_token = Column(String(100), unique=True, nullable=False)
-    acquired_at = Column(DateTime(timezone=True), server_default=func.now())
-    expires_at = Column(DateTime(timezone=True), index=True, nullable=False)
+    lease_token: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    acquired_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True, nullable=False
+    )
 
     def __repr__(self) -> str:
         return f"<ClusterLeader(leader_id='{self.leader_id}', node_id='{self.node_id}')>"
@@ -577,12 +624,10 @@ class TaskEvent(Base):
 
     __tablename__ = "apflow_task_events"
 
-    event_id = Column(
-        String(100),
-        primary_key=True,
-        default=lambda: str(uuid.uuid4()),
+    event_id: Mapped[str] = mapped_column(
+        String(100), primary_key=True, default=lambda: str(uuid.uuid4()), nullable=False
     )
-    task_id = Column(
+    task_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey(f"{TASK_TABLE_NAME}.id"),
         index=True,
@@ -590,12 +635,16 @@ class TaskEvent(Base):
     )
     # Closed whitelist enforced by emit_task_event's VALID_EVENT_TYPES:
     # task_assigned, task_started, task_completed, task_failed, task_reassigned.
-    event_type = Column(String(50), nullable=False)
-    node_id = Column(
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    node_id: Mapped[str | None] = mapped_column(
         String(100), nullable=True
     )  # Distributed worker node; null for non-distributed
-    details = Column(JSON, default=dict)  # Event-specific payload (e.g. {"error": ...} on failure)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    details: Mapped[Any] = mapped_column(
+        JSON, default=dict, nullable=True
+    )  # Event-specific payload (e.g. {"error": ...} on failure)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True, nullable=True
+    )
 
     def __repr__(self) -> str:
         return (
@@ -609,16 +658,20 @@ class TaskCheckpointModel(Base):
 
     __tablename__ = "task_checkpoints"
 
-    id = Column(String(255), primary_key=True, default=lambda: str(uuid.uuid4()))
-    task_id = Column(
+    id: Mapped[str] = mapped_column(
+        String(255), primary_key=True, default=lambda: str(uuid.uuid4()), nullable=False
+    )
+    task_id: Mapped[str] = mapped_column(
         String(255),
         ForeignKey(f"{TASK_TABLE_NAME}.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-    checkpoint_data = Column(Text, nullable=False)
-    step_name = Column(String(255), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    checkpoint_data: Mapped[str] = mapped_column(Text, nullable=False)
+    step_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
 
     def __repr__(self) -> str:
         return f"<TaskCheckpoint(id='{self.id}', task_id='{self.task_id}')>"

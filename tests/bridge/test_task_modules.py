@@ -1,6 +1,7 @@
 """Tests for task management modules"""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from apcore.errors import ModuleError
@@ -49,7 +50,9 @@ class TestTaskCreateModule:
     @pytest.mark.asyncio
     async def test_create_valid(self):
         creator = MagicMock()
-        creator.create_task_trees_from_array = AsyncMock(return_value=[_mock_task()])
+        creator.create_task_trees_from_array = AsyncMock(
+            return_value=[SimpleNamespace(task=_mock_task())]
+        )
         repo = _mock_repo()
 
         module = TaskCreateModule(creator, repo)
@@ -79,7 +82,9 @@ class TestTaskCreateModule:
         (Review CRITICAL #14)
         """
         creator = MagicMock()
-        creator.create_task_trees_from_array = AsyncMock(return_value=[_mock_task()])
+        creator.create_task_trees_from_array = AsyncMock(
+            return_value=[SimpleNamespace(task=_mock_task())]
+        )
         repo = _mock_repo()
 
         module = TaskCreateModule(creator, repo)

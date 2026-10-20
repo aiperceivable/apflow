@@ -38,6 +38,7 @@ class TestTaskReexecution:
 
         # Verify task completed successfully
         task_after_first = await task_repository.get_task_by_id(task.id)
+        assert task_after_first is not None
         assert task_after_first.status == "completed"
 
         # Manually set task to failed status to simulate failure
@@ -57,6 +58,7 @@ class TestTaskReexecution:
 
         # Verify task was re-executed and completed
         task_after_reexecution = await task_repository.get_task_by_id(task.id)
+        assert task_after_reexecution is not None
         assert task_after_reexecution.status == "completed"
         assert task_after_reexecution.error is None
         assert task_after_reexecution.result is not None
@@ -106,7 +108,9 @@ class TestTaskReexecution:
 
         # Verify both tasks completed successfully
         parent_after_first = await task_repository.get_task_by_id(parent_task.id)
+        assert parent_after_first is not None
         child_after_first = await task_repository.get_task_by_id(child_task.id)
+        assert child_after_first is not None
         assert parent_after_first.status == "completed"
         assert child_after_first.status == "completed"
 
@@ -132,6 +136,7 @@ class TestTaskReexecution:
 
         # Verify parent task was re-executed and completed
         parent_after_reexecution = await task_repository.get_task_by_id(parent_task.id)
+        assert parent_after_reexecution is not None
         # Note: Parent task might still be in_progress if child task is being re-executed
         # Check that it's not failed anymore
         assert (
@@ -140,6 +145,7 @@ class TestTaskReexecution:
 
         # Verify child task was also re-executed (dependency re-execution)
         child_after_reexecution = await task_repository.get_task_by_id(child_task.id)
+        assert child_after_reexecution is not None
         assert child_after_reexecution.status == "completed"
 
         # Wait a bit more for parent task to complete after child task completes
@@ -147,6 +153,7 @@ class TestTaskReexecution:
 
         # Re-check parent task status
         parent_final = await task_repository.get_task_by_id(parent_task.id)
+        assert parent_final is not None
         assert (
             parent_final.status == "completed"
         ), f"Parent task should be completed, got status: {parent_final.status}, error: {parent_final.error}"
@@ -177,6 +184,7 @@ class TestTaskReexecution:
 
         # Verify task completed successfully
         task_after = await task_repository.get_task_by_id(task.id)
+        assert task_after is not None
         assert task_after.status == "completed"
         assert task_after.result is not None
 
@@ -205,6 +213,7 @@ class TestTaskReexecution:
 
         # Verify task completed
         task_after_first = await task_repository.get_task_by_id(task.id)
+        assert task_after_first is not None
         assert task_after_first.status == "completed"
 
         # Try to execute again - should be skipped (task already completed)
@@ -214,6 +223,7 @@ class TestTaskReexecution:
 
         # Verify task is still completed and result hasn't changed
         task_after_second = await task_repository.get_task_by_id(task.id)
+        assert task_after_second is not None
         assert task_after_second.status == "completed"
         # Note: The result might be the same or different depending on execution,
         # but the task should remain completed

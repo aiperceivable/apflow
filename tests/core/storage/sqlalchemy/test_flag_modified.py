@@ -39,6 +39,7 @@ class TestFlagModifiedJsonFields:
 
         # Retrieve task in a fresh query to verify persistence
         updated_task = await repo.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.result == result_data
         assert updated_task.result["output"] == "test_value"
         assert updated_task.result["nested"]["key"] == "value"
@@ -65,6 +66,7 @@ class TestFlagModifiedJsonFields:
 
         # Retrieve task in a fresh query
         updated_task = await repo.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.inputs == new_inputs
         assert updated_task.inputs["url"] == "https://example.com"
 
@@ -93,6 +95,7 @@ class TestFlagModifiedJsonFields:
 
         # Retrieve task in a fresh query
         updated_task = await repo.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.dependencies == new_deps
         assert updated_task.dependencies[0]["id"] == dep_task.id
 
@@ -117,6 +120,7 @@ class TestFlagModifiedJsonFields:
 
         # Retrieve task in a fresh query
         updated_task = await repo.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.params == new_params
         assert updated_task.params["config"]["timeout"] == 60
 
@@ -144,6 +148,7 @@ class TestFlagModifiedJsonFields:
 
         # Retrieve task in a fresh query
         updated_task = await repo.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.schemas == new_schemas
         assert updated_task.schemas["method"] == "custom_executor"
 
@@ -178,6 +183,7 @@ class TestFlagModifiedJsonFields:
 
         # Verify all fields persisted
         final_task = await repo.get_task_by_id(task.id)
+        assert final_task is not None
         assert final_task.inputs == {"input_key": "input_value"}
         assert final_task.params == {"param_key": "param_value"}
         assert final_task.schemas == {"method": "test_method"}
@@ -207,6 +213,7 @@ class TestFlagModifiedJsonFields:
 
         # Get task and verify
         task_v1 = await repo.get_task_by_id(original_id)
+        assert task_v1 is not None
         assert task_v1.status == "in_progress"
         assert float(task_v1.progress) == 0.5
 
@@ -220,6 +227,7 @@ class TestFlagModifiedJsonFields:
 
         # Get task again and verify latest state
         task_v2 = await repo.get_task_by_id(original_id)
+        assert task_v2 is not None
         assert task_v2.status == "completed"
         assert float(task_v2.progress) == 1.0
         assert task_v2.result == {"final": "result"}
@@ -258,6 +266,7 @@ class TestFlagModifiedJsonFields:
 
         # Retrieve and verify deep nested structure
         updated_task = await repo.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.result == complex_result
         assert updated_task.result["level1"]["level2"]["level3"]["data"] == [1, 2, 3]
         assert updated_task.result["mixed"]["null"] is None

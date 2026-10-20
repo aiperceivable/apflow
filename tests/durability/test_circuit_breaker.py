@@ -161,3 +161,36 @@ class TestCircuitBreakerRegistry:
         assert cb.state == CircuitState.OPEN
         registry.reset_all()
         assert cb.state == CircuitState.CLOSED
+
+
+def test_open_breaker_ignores_success_from_older_inflight_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("apflow.durability.circuit_breaker.time.monotonic", lambda: 100.0)
+    breaker = CircuitBreaker("shared", CircuitBreakerConfig(failure_threshold=1))
+    assert breaker.can_execute()
+    assert breaker.can_execute()
+    breaker.record_failure()
+    breaker.record_success()
+    assert breaker.state == CircuitState.OPEN
+    assert not breaker.can_execute()
+
+
+def test_half_open_probe_ignores_success_from_previous_admission_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextvars import copy_context
+
+    now = [100.0]
+    monkeypatch.setattr("apflow.durability.circuit_breaker.time.monotonic", lambda: now[0])
+    breaker = CircuitBreaker("shared", CircuitBreakerConfig(failure_threshold=1))
+    old_context = copy_context()
+    assert old_context.run(breaker.can_execute)
+    breaker.record_failure()
+    now[0] += 60.0
+    assert breaker.can_execute()
+    old_context.run(breaker.record_success)
+    assert breaker.state == CircuitState.HALF_OPEN
+    assert not breaker.can_execute()
+    breaker.record_success()
+    assert breaker.state == CircuitState.CLOSED

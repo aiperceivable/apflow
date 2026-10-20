@@ -1,22 +1,31 @@
 """Tests for @function_executor decorator."""
 
+import threading
+from typing import Any
+
 import pytest
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from apflow.adapters.function_executor import (
     _resolve_schema,
     function_executor,
     get_function_executor_classes,
 )
+from apflow.core.base import BaseTask
+from apflow.core.execution.task_creator import TaskCreator
+from apflow.core.execution.task_manager import TaskManager
 
 
 class TestFunctionExecutorDecorator:
-    def test_returns_original_function(self):
-        @function_executor(id="test_returns_fn", description="test")
-        async def my_func(inputs: dict) -> dict:
+    def test_returns_original_function(self) -> None:
+        async def my_func(inputs: dict[str, Any]) -> dict[str, Any]:
             return {"ok": True}
 
-        assert callable(my_func)
-        assert not isinstance(my_func, type)
+        decorated = function_executor(id="test_returns_fn", description="test")(my_func)
+        assert decorated is my_func
+        generated = get_function_executor_classes()["test_returns_fn"]
+        assert issubclass(generated, BaseTask)
 
     def test_registers_in_extension_registry(self):
         @function_executor(id="test_ext_registry", description="test")
@@ -45,18 +54,68 @@ class TestFunctionExecutorDecorator:
         cls = get_function_executor_classes()["test_async_exec"]
         instance = cls()
         result = await instance.execute({"x": 5})
-        assert result == {"value": 6}
+        assert result == {"result": {"value": 6}}
 
     @pytest.mark.asyncio
-    async def test_sync_function_wrapped_in_thread(self):
+    async def test_sync_function_wrapped_in_thread(self) -> None:
+        event_loop_thread = threading.get_ident()
+        called_threads: list[int] = []
+
         @function_executor(id="test_sync_exec", description="test")
-        def my_sync_func(inputs: dict) -> dict:
+        def my_sync_func(inputs: dict[str, Any]) -> dict[str, Any]:
+            called_threads.append(threading.get_ident())
             return {"sync": True}
 
         cls = get_function_executor_classes()["test_sync_exec"]
         instance = cls()
         result = await instance.execute({})
-        assert result == {"sync": True}
+        assert result == {"result": {"sync": True}}
+        assert len(called_threads) == 1
+        assert called_threads[0] != event_loop_thread
+
+    def test_output_schema_and_model_conflict_rejected(self) -> None:
+        class Output(BaseModel):
+            value: int
+
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            function_executor(
+                id="conflicting_output",
+                description="Conflicting output schema and model",
+                output_schema={"type": "object"},
+                output_model=Output,
+            )
+
+    @pytest.mark.asyncio
+    async def test_registered_function_runs_through_task_manager_tree(
+        self, sync_db_session: Session
+    ) -> None:
+        calls: list[dict[str, Any]] = []
+
+        @function_executor(
+            id="function_tree_acceptance", description="Execute a function in a tree"
+        )
+        async def calculate(inputs: dict[str, Any]) -> dict[str, Any]:
+            calls.append(inputs)
+            return {"answer": inputs["value"] + 1}
+
+        tree = await TaskCreator(sync_db_session).create_task_tree_from_array(
+            [
+                {
+                    "name": "Function task",
+                    "params": {"executor_id": "function_tree_acceptance"},
+                    "inputs": {"value": 41},
+                }
+            ]
+        )
+        manager = TaskManager(sync_db_session, pre_hooks=[], post_hooks=[])
+        completed = await manager.distribute_task_tree(tree, use_callback=False)
+        sync_db_session.expire_all()
+        stored = await manager.task_repository.get_task_by_id(str(tree.task.id))
+        assert completed is tree
+        assert calls == [{"value": 41}]
+        assert stored is not None
+        assert stored.status == "completed"
+        assert stored.result == {"answer": 42}
 
     def test_explicit_json_schema(self):
         in_schema = {"type": "object", "properties": {"url": {"type": "string"}}}
@@ -73,7 +132,7 @@ class TestFunctionExecutorDecorator:
 
         cls = get_function_executor_classes()["test_json_schema"]
         assert cls.inputs_schema == in_schema
-        assert cls.outputs_schema == out_schema
+        assert cls().get_output_schema()["$defs"]["business_result"]["anyOf"][0] == out_schema
 
     def test_pydantic_model_schema(self):
         from pydantic import BaseModel
@@ -95,7 +154,10 @@ class TestFunctionExecutorDecorator:
 
         cls = get_function_executor_classes()["test_pydantic_schema"]
         assert cls.inputs_schema is In
-        assert cls.outputs_schema is Out
+        assert (
+            cls().get_output_schema()["$defs"]["business_result"]["anyOf"][0]
+            == Out.model_json_schema()
+        )
 
     def test_mutual_exclusivity_raises(self):
         from pydantic import BaseModel

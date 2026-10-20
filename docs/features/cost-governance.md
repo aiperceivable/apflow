@@ -17,6 +17,49 @@ Provide token budget management and cost policy enforcement for AI agent tasks. 
 
 ---
 
+## Current Behavior and Cost Data Sources
+
+Budget checks run before each task execution. They use usage already reported by
+previous executions; they do not interrupt a running executor or reserve tokens
+for its next request. A single execution can therefore exceed the remaining
+budget. `NOTIFY` and `CONTINUE` policies permit execution after their threshold,
+including after exhaustion; `DOWNGRADE` passes the selected model in
+`inputs["model"]`, which the executor must honor.
+
+Budget enforcement is per task. `BudgetScope.USER` is reserved for representing a
+user scope; user-wide budget enforcement is not implemented. `UsageReporter`
+already provides per-user usage aggregation.
+
+New executors report counters outside their business result in the explicit
+`{result, error?, token_usage?}` execution envelope. The function decorator wraps
+raw business returns automatically; functions reporting execution usage declare
+`result_format="envelope"`. Usage is stored separately from business output, even
+without budget enforcement. Legacy executor classes retain their old top-level
+usage convention. See the [result protocol](../architecture/task-orchestration.md#executor-result-protocol).
+
+The application supplies `estimated_cost_usd` and `actual_cost_usd`, for example
+using the real repository attached to its execution session:
+
+```python
+from decimal import Decimal
+
+await repository.update_task(
+    task_id,
+    estimated_cost_usd=Decimal("0.020000"),
+    actual_cost_usd=Decimal("0.012345"),
+)
+```
+
+These fields are stored amounts, not values inferred from token counts. Returning
+an `actual_cost_usd` business field from an executor alone does not populate the
+model column. Provider pricing and predictive estimates remain future work
+([PRD F-009](../prd.md#f-009-advanced-cost-strategies)). Usage reports sum stored
+actual costs; an unset cost contributes zero to the aggregate, which does not
+establish that the execution was free. An explicit zero amount remains `0.0`
+when the task is serialized, while an unset amount remains `null`.
+
+---
+
 ## File Changes
 
 ### New Files
@@ -64,51 +107,15 @@ Update `to_dict()` to include: `token_usage`, `token_budget`, `estimated_cost_us
 **`src/apflow/core/execution/task_manager.py`**
 
 1. Add `__init__()` parameters: `budget_manager: Optional[BudgetManager] = None`, `policy_engine: Optional[PolicyEngine] = None`.
-2. In the single-task execution path (before executor creation):
-   ```python
-   # Pre-execution budget check
-   if self._budget_manager:
-       budget_check = await self._budget_manager.check_budget(task_id)
-       if not budget_check.allowed:
-           if self._policy_engine and task.cost_policy:
-               evaluation = self._policy_engine.evaluate(
-                   task.cost_policy,
-                   budget_check.utilization,
-               )
-               if evaluation.action == PolicyAction.BLOCK:
-                   # Fail task with budget exhausted error
-                   await self.task_repository.update_task(
-                       task_id=task_id, status="failed",
-                       error=f"Budget exhausted: {evaluation.message}",
-                       completed_at=datetime.now(timezone.utc),
-                   )
-                   if self.stream:
-                       self.streaming_callbacks.task_failed(task_id, evaluation.message)
-                   return
-               elif evaluation.action == PolicyAction.DOWNGRADE and evaluation.model_override:
-                   # Inject model override into inputs
-                   final_inputs = final_inputs or {}
-                   final_inputs["model"] = evaluation.model_override
-               elif evaluation.action == PolicyAction.NOTIFY:
-                   logger.warning(f"Budget warning for task {task_id}: {evaluation.message}")
-           else:
-               await self.task_repository.update_task(
-                   task_id=task_id, status="failed",
-                   error="Token budget exhausted and no cost policy configured.",
-                   completed_at=datetime.now(timezone.utc),
-               )
-               if self.stream:
-                   self.streaming_callbacks.task_failed(task_id, "Budget exhausted")
-               return
-   ```
-
-3. In `_handle_task_execution_result()` (after status update to completed):
-   ```python
-   # Post-execution budget update
-   token_usage = task_result.get("token_usage")
-   if token_usage and self._budget_manager:
-       await self._budget_manager.update_usage(task_id, token_usage)
-   ```
+2. Before executor creation, `_apply_budget_policy(task, inputs)` checks
+   the task budget and evaluates a configured policy at its utilization threshold.
+   A threshold of `0.8` takes effect at 80% utilization, even with tokens remaining.
+   An unknown policy name fails the task as a configuration error. Tasks without a
+   budget skip utilization-based policies; exhausted tasks without a policy fail.
+3. `_handle_task_execution_result()` accumulates any reported `token_usage` before
+   classifying the returned result as successful or failed. A failed result can
+   still represent billable work. Exceptions without usage metadata cannot be
+   accounted for automatically.
 
 ### Test Files
 
@@ -130,9 +137,9 @@ tests/governance/test_integration.py
 ```python
 @dataclass
 class TokenBudget:
-    scope: BudgetScope       # TASK or USER
+    scope: BudgetScope       # BudgetManager enforces TASK only; USER is reserved
     scope_id: str            # Non-empty string
-    limit: int               # >= 1
+    limit: int               # >= 0; zero means immediately exhausted
     used: int = 0            # >= 0
 
     @property
@@ -277,7 +284,7 @@ class UsageReporter:
 | Field | SQLAlchemy Type | Python Type | Default | Validation |
 |---|---|---|---|---|
 | `token_usage` | `JSON` | `Optional[dict]` | `None` | `{input: int>=0, output: int>=0, total: int>=0}` |
-| `token_budget` | `Integer` | `Optional[int]` | `None` | `>= 1` when set |
+| `token_budget` | `Integer` | `Optional[int]` | `None` | `>= 0`; zero means exhausted |
 | `estimated_cost_usd` | `Numeric(12,6)` | `Optional[float]` | `None` | `>= 0` when set |
 | `actual_cost_usd` | `Numeric(12,6)` | `Optional[float]` | `None` | `>= 0` when set |
 | `cost_policy` | `String(100)` | `Optional[str]` | `None` | Must be a registered policy name |
@@ -307,8 +314,8 @@ def test_token_budget_utilization_over():
 def test_token_budget_is_exhausted():
     """limit=100, used=100: is_exhausted=True. used=99: False."""
 
-def test_token_budget_limit_zero_raises():
-    """limit=0 raises ValueError."""
+def test_token_budget_limit_zero_is_exhausted():
+    """limit=0 is immediately exhausted with utilization=1.0."""
 
 def test_token_budget_negative_used_raises():
     """used=-1 raises ValueError."""
@@ -600,11 +607,15 @@ when governance is enabled.
 ## Acceptance Criteria
 
 1. A task with `token_budget=1000` is blocked when cumulative usage reaches the limit.
-2. A task with `token_budget=1000` and cost policy action=DOWNGRADE switches to the next model in the chain when utilization exceeds the threshold.
+2. A task with `token_budget=1000` and action=DOWNGRADE passes the next model to its executor when utilization reaches the configured threshold (e.g. 800 tokens at 80%).
 3. A task with `token_budget=1000` and cost policy action=NOTIFY logs a warning and continues execution.
-4. Token usage reported by the executor's `execute()` return dict is accumulated in the task's `token_usage` field.
+4. Token usage reported by the executor's `execute()` return dict is accumulated once in the task's `token_usage` field for both successful and failed results.
 5. Cost policies can be registered by name and evaluated against current utilization.
 6. Model downgrade chains work with any string model identifier (provider-agnostic).
 7. Usage reports aggregate token counts and costs across tasks for a given user and time period.
 8. Usage reports can be exported as JSON.
 9. All cost data persists in the database (token_usage, token_budget, estimated_cost_usd, actual_cost_usd, cost_policy columns).
+
+Execution-level regression coverage: `tests/governance/test_execution_enforcement.py`
+checks threshold boundaries, unknown policies, failed-result usage, and stored
+application-supplied costs including zero amounts.

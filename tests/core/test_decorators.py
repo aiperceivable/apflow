@@ -9,6 +9,9 @@ Tests for the unified decorators system (Flask-style API):
 """
 
 import pytest
+from importlib import import_module
+from typing import TYPE_CHECKING
+from typing import Any
 from apflow import (
     register_pre_hook,
     register_post_hook,
@@ -184,7 +187,9 @@ class TestConfigDecorators:
     async def test_hooks_with_agent_executor(self):
         """Test that hooks registered via decorators work with AgentExecutor"""
         try:
-            from apflow.api.a2a.agent_executor import AIPartnerUpFlowAgentExecutor
+            AIPartnerUpFlowAgentExecutor = import_module(
+                "apflow.api.a2a.agent_executor"
+            ).AIPartnerUpFlowAgentExecutor
         except ImportError:
             pytest.skip("a2a module not available, skipping AgentExecutor test")
             return
@@ -213,7 +218,7 @@ class TestConfigDecorators:
     async def test_hooks_with_a2a_server(self):
         """Test that hooks registered via decorators work with create_a2a_server"""
         try:
-            from apflow.api.a2a.server import create_a2a_server
+            create_a2a_server = import_module("apflow.api.a2a.server").create_a2a_server
         except ImportError:
             pytest.skip("a2a module not available, skipping create_a2a_server test")
             return
@@ -248,6 +253,45 @@ class TestExtensionDecorator:
         # Note: _extensions is a dict keyed by extension.id, not a list
         # We'll let tests register their own extensions
 
+    @pytest.mark.parametrize("use_template", [False, True])
+    def test_manual_override_preserves_inputs_only_executor_constructor(
+        self, use_template: bool
+    ) -> None:
+        from apflow.core.base import BaseTask
+        from apflow.core.extensions import get_registry
+
+        @executor_register()
+        class NarrowConstructorExecutor(BaseTask):
+            id = "narrow_constructor_executor"
+            name = "Narrow constructor executor"
+            description = "Accept only business inputs during initialization"
+
+            def __init__(self, inputs: dict[str, Any] | None = None) -> None:
+                super().__init__(inputs=inputs)
+
+            async def execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
+                return inputs
+
+        registry = get_registry()
+        assert NarrowConstructorExecutor.id in registry._factory_functions
+        registry.register(
+            NarrowConstructorExecutor(), executor_class=NarrowConstructorExecutor, override=True
+        )
+        assert NarrowConstructorExecutor.id not in registry._factory_functions
+        if use_template:
+            registry._executor_classes.pop(NarrowConstructorExecutor.id)
+
+        inputs = {"test": "value"}
+        instance = registry.create_executor_instance(
+            NarrowConstructorExecutor.id, inputs=inputs, task=object(), user_id="test-user"
+        )
+
+        assert instance is not None
+        assert isinstance(instance, NarrowConstructorExecutor)
+        assert instance.inputs == {"test": "value"}
+        assert inputs == {"test": "value"}
+        assert NarrowConstructorExecutor.id not in registry._factory_functions
+
     def test_executor_register_decorator(self):
         """Test @executor_register decorator"""
         from apflow.core.base import BaseTask
@@ -257,7 +301,8 @@ class TestExtensionDecorator:
             id = "test_executor"
             name = "Test Executor"
             description = "Test executor for decorator testing"
-            category = ExtensionCategory.EXECUTOR
+            if not TYPE_CHECKING:
+                category = ExtensionCategory.EXECUTOR
 
             def __init__(self, inputs=None):
                 super().__init__(inputs=inputs or {})
@@ -293,7 +338,8 @@ class TestExtensionDecorator:
             id = "test_executor_factory"
             name = "Test Executor Factory"
             description = "Test executor with custom factory"
-            category = ExtensionCategory.EXECUTOR
+            if not TYPE_CHECKING:
+                category = ExtensionCategory.EXECUTOR
             custom_initialized = False
 
             def __init__(self, inputs=None):
@@ -333,7 +379,8 @@ class TestExtensionDecorator:
 
         @executor_register()
         class PropertyBasedExecutor(BaseTask):
-            category = ExtensionCategory.EXECUTOR
+            if not TYPE_CHECKING:
+                category = ExtensionCategory.EXECUTOR
 
             def __init__(self, required_arg, inputs=None):
                 # Requires a positional arg, so cls(inputs={}) always fails
@@ -341,17 +388,23 @@ class TestExtensionDecorator:
                 super().__init__(inputs=inputs or {})
                 self.required_arg = required_arg
 
-            @property
-            def id(self):
-                return "property_based_executor"
+            if not TYPE_CHECKING:
 
-            @property
-            def name(self):
-                return "Property Based Executor"
+                @property
+                def id(self):
+                    return "property_based_executor"
 
-            @property
-            def description(self):
-                return "Uses computed properties for identity"
+            if not TYPE_CHECKING:
+
+                @property
+                def name(self):
+                    return "Property Based Executor"
+
+            if not TYPE_CHECKING:
+
+                @property
+                def description(self):
+                    return "Uses computed properties for identity"
 
             async def execute(self, inputs):
                 return {"result": "test"}
@@ -364,7 +417,7 @@ class TestExtensionDecorator:
         assert extension is not None
         assert isinstance(extension.id, str)
         assert isinstance(extension.name, str)
-        assert isinstance(extension.description, str)
+        assert isinstance(getattr(extension, "description"), str)
 
     def test_reregistration_returns_registry_recognized_class_for_hook_attachment(self):
         """Regression: idempotent re-registration (override=False) looked up
@@ -387,7 +440,8 @@ class TestExtensionDecorator:
             id = "reregistered_executor"
             name = "Reregistered Executor"
             description = "test"
-            category = ExtensionCategory.EXECUTOR
+            if not TYPE_CHECKING:
+                category = ExtensionCategory.EXECUTOR
 
             def __init__(self, inputs=None):
                 super().__init__(inputs=inputs or {})
@@ -409,7 +463,8 @@ class TestExtensionDecorator:
             id = "reregistered_executor"
             name = "Reregistered Executor"
             description = "test"
-            category = ExtensionCategory.EXECUTOR
+            if not TYPE_CHECKING:
+                category = ExtensionCategory.EXECUTOR
 
             def __init__(self, inputs=None):
                 super().__init__(inputs=inputs or {})
@@ -440,7 +495,9 @@ class TestDecoratorIntegration:
 
         clear_config()
         try:
-            from apflow.api.a2a.agent_executor import AIPartnerUpFlowAgentExecutor
+            AIPartnerUpFlowAgentExecutor = import_module(
+                "apflow.api.a2a.agent_executor"
+            ).AIPartnerUpFlowAgentExecutor
         except ImportError:
             pytest.skip("a2a module not available, skipping full workflow test")
             return

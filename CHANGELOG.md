@@ -1,5 +1,80 @@
 # Changelog
 
+## [0.23.0] - 2026-10-20
+
+### Changed
+
+- Upgrade the SDK baseline to apcore 0.32.2, apcore-toolkit 0.14.0,
+  apcore-mcp 0.23.1, apcore-a2a 0.8.4, and apcore-cli 0.12.5.
+- Keep Python executor package requirements in `metadata.executor_dependencies`
+  so apcore does not interpret them as module dependency declarations.
+- Define explicit executor result formats: new built-in and generated function
+  executors return `{result, error?, token_usage?}` envelopes. Task storage and
+  root API results contain the business payload, with errors and usage separate.
+  Raw bridge outputs are wrapped for apcore object responses; task execution and
+  result-update schemas accept scalar and null business output.
+  Existing executor classes retain explicit `legacy` behavior; `raw` treats all
+  returned fields as business data. Overrides of built-in executors inherit the
+  envelope contract and must adapt or declare a compatibility format. Historical
+  rows are not guessed or rewritten.
+- Inject stored business outputs under `inputs[dependency_id]` for every dependency.
+  Schema names no longer imply automatic field bindings; consumers select needed
+  fields explicitly. Direct built-in/generated executor calls read the outer
+  `result`; function decorators wrap raw function outputs automatically.
+
+### Fixed
+
+- Use the corrected SDK Registry paths for standalone and combined A2A servers.
+- Remove the MCP null-placeholder middleware and restore the original task-status
+  enums. MCP discovery preserves runtime schemas, invalid nulls remain rejected,
+  and nullable business payloads retain their values. OpenAI strict schema
+  conversion is handled by apcore.
+- Read the task model from TaskCreator's returned tree when creating a task.
+- Include root and intermediate tasks in tree status and progress calculations,
+  keeping execution summaries and streaming completion events consistent.
+- Preserve empty and false-valued dependency results, copy payloads without
+  mutating their source, and retain complete results for aggregation.
+- Keep explicit request configuration separate from upstream response fields,
+  refresh dependency outputs on re-execution, and remove old injected dependency
+  keys when cloning workflows.
+- Preserve successful null outputs and cancellation partial results, and persist
+  reported usage even when budget enforcement is not enabled.
+- Align generated result schemas with error-only failures, enforce declared
+  business types on success, and preserve local references with empty schema IDs.
+  Keep provider-specific legacy function counters in business output while
+  promoting only supported execution counters into envelope metadata.
+- Evaluate cost policies at their configured utilization threshold before each
+  execution, and fail explicitly for unknown policy names.
+- Accumulate reported token usage from both successful and failed executor
+  results, so failed work remains visible to budget checks and usage reports.
+- Serialize explicit zero estimated and actual costs as `0.0`, preserving the
+  distinction from unset costs.
+
+### Documentation
+
+- Specify one-layer result extraction, raw and legacy adapters, bridge output
+  schemas, hook/demo/cancellation semantics, and explicit historical migration.
+
+- Clarify application-supplied cost amounts, per-task budget enforcement, and
+  execution-boundary checks. Automatic pricing remains planned future work.
+- Correct the inventory to 6 scheduling modules and 22 built-in task/schedule
+  modules, including `schedule.history`.
+- Archive [legacy FAQ #10](https://github.com/aiperceivable/apflow/issues/10) as
+  completed, preserving its original content alongside current-version guidance.
+
+### Tests
+
+- Exercise real MCP structured-output CRUD, A2A JSON-RPC execution in the
+  combined server, standalone CLI server wiring, generated CLI task CRUD,
+  native MCP input validation,
+  and the strict optional-enum conversion fix.
+- Cover task-tree completion, dependency payload preservation, executor selection,
+  schema-independent dependency inputs, and explicit result protocol boundaries.
+- Cover result normalization and schema helpers with full statement and branch
+  coverage, plus real SDK regressions for failure envelopes and business schemas.
+- Cover policy threshold boundaries, unknown policies, failed-result token
+  accounting, and persistence and reporting of application-supplied costs.
+
 
 ## [0.22.1] - 2026-07-10
 

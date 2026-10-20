@@ -31,6 +31,7 @@ class TestAggregateResultsExecutor:
         }
 
         result = await executor.execute(inputs)
+        result = result["result"]
 
         # Verify result structure
         assert result is not None
@@ -66,6 +67,7 @@ class TestAggregateResultsExecutor:
         }
 
         result = await executor.execute(inputs)
+        result = result["result"]
 
         assert result["result_count"] == 2
         assert "service.worker-1" in result["results"]
@@ -77,6 +79,7 @@ class TestAggregateResultsExecutor:
         inputs = {}
 
         result = await executor.execute(inputs)
+        result = result["result"]
 
         assert result is not None
         assert result["result_count"] == 0
@@ -97,6 +100,7 @@ class TestAggregateResultsExecutor:
         }
 
         result = await executor.execute(inputs)
+        result = result["result"]
 
         assert result is not None
         # Pre-hook markers are filtered, but other keys are included
@@ -121,6 +125,7 @@ class TestAggregateResultsExecutor:
         }
 
         result = await executor.execute(inputs)
+        result = result["result"]
 
         assert result is not None
         assert result["result_count"] == 4  # Only 4 task results (pre-hook marker filtered)
@@ -146,6 +151,7 @@ class TestAggregateResultsExecutor:
         }
 
         result = await executor.execute(inputs)
+        result = result["result"]
 
         assert result is not None
         assert result["result_count"] == 2
@@ -222,6 +228,7 @@ class TestAggregateResultsExecutor:
         }
 
         aggregated = await executor.execute(inputs)
+        aggregated = aggregated["result"]
 
         assert aggregated["result_count"] == 3
         assert aggregated["results"]["cpu-info"] == cpu_result

@@ -16,6 +16,29 @@ The current executor registration pattern requires writing a full `BaseTask` sub
 
 The `@function_executor` decorator eliminates this boilerplate by wrapping any async (or sync) callable as a fully registered executor. The generated executor is discoverable by the bridge, exposable via MCP/A2A/CLI, and referenceable by `id` in task trees -- identical in behavior to a hand-written `BaseTask` subclass.
 
+## Current Result Contract
+
+Functions return raw business output by default. The generated executor wraps it
+in `{result: business_output}`, declares `result_format="envelope"`, and advertises
+an envelope output schema. The decorator's `output_schema` / `output_model`
+describes the function's business output; the original decorated callable is
+unchanged. Direct calls to the registered executor or its bridge module read the
+outer `result`; task-tree storage and root responses contain the business output.
+
+Use `@function_executor(..., result_format="envelope")` for functions that report
+`{result, error?, token_usage?}` themselves. Their output schema then describes
+the complete envelope. Explicit `result_format="legacy"` preserves old top-level
+error/usage interpretation while adapting it to the new executor boundary.
+Legacy provider-specific usage counters stay in the complete business payload;
+only `input`, `output`, and `total` are promoted into envelope metadata.
+Without a custom envelope schema, the generated schema accepts error-only
+failures. Declared business schemas constrain successful output, including
+whether `null` is allowed; failures may omit the result or return `null`.
+See the [result protocol](../architecture/task-orchestration.md#executor-result-protocol).
+
+The implementation sketches below describe the original feature introduction;
+the current result contract above takes precedence for return formats.
+
 ## File Changes
 
 ### New Files

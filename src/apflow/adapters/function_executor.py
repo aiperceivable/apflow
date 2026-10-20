@@ -17,6 +17,11 @@ from typing import Any, Callable, Dict, Optional, Type, Union
 from pydantic import BaseModel
 
 from apflow.core.base import BaseTask
+from apflow.core.execution.result_protocol import (
+    ResultFormat,
+    executor_result_schema,
+    normalize_executor_result,
+)
 from apflow.core.extensions.decorators import executor_register
 from apflow.logger import get_logger
 
@@ -36,6 +41,7 @@ def function_executor(
     output_model: Optional[Type[BaseModel]] = None,
     tags: Optional[list[str]] = None,
     override: bool = False,
+    result_format: ResultFormat = "raw",
 ) -> Callable:
     """Decorator that registers an async/sync function as an apflow executor.
 
@@ -52,6 +58,9 @@ def function_executor(
         output_model: Pydantic model for outputs (mutually exclusive with output_schema).
         tags: Tags for categorization.
         override: Force re-registration if id already exists.
+        result_format: Format returned by the function (raw by default). The
+            generated executor always returns an envelope. Output schema/model
+            describes the function return value in the declared format.
 
     Returns:
         The original function, unchanged.
@@ -63,6 +72,9 @@ def function_executor(
         raise ValueError("id must be non-empty")
     if not description:
         raise ValueError("description must be non-empty")
+
+    if result_format not in ("legacy", "raw", "envelope"):
+        raise ValueError(f"Unknown function result format: {result_format}")
 
     resolved_input = _resolve_schema(input_schema, input_model)
     resolved_output = _resolve_schema(output_schema, output_model)
@@ -78,6 +90,7 @@ def function_executor(
             inputs_schema=resolved_input,
             outputs_schema=resolved_output,
             tags=tags or [],
+            result_format=result_format,
         )
 
         # Register in extension registry. When override=False and `id` is
@@ -121,19 +134,22 @@ def _build_executor_class(
     inputs_schema: Optional[Union[Type[BaseModel], Dict[str, Any]]],
     outputs_schema: Optional[Union[Type[BaseModel], Dict[str, Any]]],
     tags: list[str],
+    result_format: ResultFormat,
 ) -> type:
     """Create a BaseTask subclass dynamically from a function."""
     is_async = inspect.iscoroutinefunction(fn)
 
-    if is_async:
-
-        async def execute(self: Any, inputs: Dict[str, Any]) -> Dict[str, Any]:
-            return await fn(inputs)
-
-    else:
-
-        async def execute(self: Any, inputs: Dict[str, Any]) -> Dict[str, Any]:
-            return await asyncio.to_thread(fn, inputs)
+    async def execute(self: Any, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        value = await fn(inputs) if is_async else await asyncio.to_thread(fn, inputs)
+        normalized = normalize_executor_result(value, result_format)
+        usage = normalized.get("token_usage")
+        if result_format == "legacy" and isinstance(usage, dict):
+            # Provider-specific counters remain in the complete legacy business output.
+            normalized["token_usage"] = {
+                key: count for key, count in usage.items() if key in ("input", "output", "total")
+            }
+        # Declared envelope schemas describe the function's actual wire shape.
+        return value if result_format == "envelope" else dict(normalized)
 
     # Build class name: "analyze_pr" → "AnalyzePrFunctionExecutor"
     class_name = "".join(part.capitalize() for part in executor_id.split("_")) + "FunctionExecutor"
@@ -144,12 +160,19 @@ def _build_executor_class(
         "description": executor_description,
         "tags": tags,
         "execute": execute,
+        "result_format": "envelope",
     }
 
     if inputs_schema is not None:
         attrs["inputs_schema"] = inputs_schema
-    if outputs_schema is not None:
-        attrs["outputs_schema"] = outputs_schema
+    schema = (
+        outputs_schema.model_json_schema()
+        if isinstance(outputs_schema, type) and issubclass(outputs_schema, BaseModel)
+        else outputs_schema or {}
+    )
+    attrs["outputs_schema"] = (
+        schema if result_format == "envelope" and schema else executor_result_schema(schema)
+    )
 
     cls = type(class_name, (BaseTask,), attrs)
     return cls

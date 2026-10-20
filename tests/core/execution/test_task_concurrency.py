@@ -131,7 +131,9 @@ class TestExecuteAfterTaskRetry:
             "execute_after_task",
             side_effect=flaky_execute_after_task,
         ):
-            await task_manager._handle_task_execution_result(task, task.id, {"output": "data"})
+            await task_manager._handle_task_execution_result(
+                task, task.id, {"result": {"output": "data"}}
+            )
 
         assert call_count == 3  # Called 3 times: 2 failures + 1 success
 
@@ -153,7 +155,9 @@ class TestExecuteAfterTaskRetry:
             side_effect=ConnectionError("persistent DB error"),
         ):
             # Should not raise — error is caught and logged
-            await task_manager._handle_task_execution_result(task, task.id, {"output": "data"})
+            await task_manager._handle_task_execution_result(
+                task, task.id, {"result": {"output": "data"}}
+            )
 
     @pytest.mark.asyncio
     async def test_no_retry_on_success(self, sync_db_session):
@@ -178,7 +182,9 @@ class TestExecuteAfterTaskRetry:
             "execute_after_task",
             side_effect=successful_execute_after_task,
         ):
-            await task_manager._handle_task_execution_result(task, task.id, {"output": "data"})
+            await task_manager._handle_task_execution_result(
+                task, task.id, {"result": {"output": "data"}}
+            )
 
         assert call_count == 1
 
@@ -203,6 +209,7 @@ class TestAtomicClaimInExecution:
 
         # Task should still be in_progress (not double-executed)
         refreshed = await task_manager.task_repository.get_task_by_id(task.id)
+        assert refreshed is not None
         assert refreshed.status == "in_progress"
 
     @pytest.mark.asyncio

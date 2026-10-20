@@ -9,7 +9,6 @@ from typing import Dict, Any
 from apflow.core.extensions.storage import StorageBackend
 from apflow.core.extensions.decorators import storage_register
 
-
 # Lazy registration - only register if PostgreSQL is available
 try:
     # Check if PostgreSQL dependencies are available

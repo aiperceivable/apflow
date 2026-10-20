@@ -7,16 +7,26 @@ including circular dependency detection and dependency reference validation.
 All dependency validation logic is centralized here for maintainability.
 """
 
-from typing import Dict, Any, List, Set, Optional, Union
-from apflow.core.storage.sqlalchemy.models import TaskModelType
+from typing import Dict, Any, List, Set, Optional, Union, Protocol
+from apflow.core.storage.sqlalchemy.models import TaskModel
 from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
 
 
+class _DependencyRepository(Protocol):
+    """Queries needed to validate references and inspect active dependents."""
+
+    async def get_task_by_id(self, task_id: str, /) -> Optional[TaskModel]: ...
+
+    async def get_root_task(self, task: TaskModel, /) -> TaskModel: ...
+
+    async def get_all_tasks_in_tree(self, root_task: TaskModel, /) -> List[TaskModel]: ...
+
+
 def detect_circular_dependencies(
-    tasks: Union[List[Dict[str, Any]], List[TaskModelType]],
+    tasks: Union[List[Dict[str, Any]], List[TaskModel]],
     task_id: Optional[str] = None,
     new_dependencies: Optional[List[Any]] = None,
     detail: bool = False,
@@ -44,7 +54,7 @@ def detect_circular_dependencies(
 
 
 def _build_dependency_graph(
-    tasks: Union[List[Dict[str, Any]], List[TaskModelType]],
+    tasks: Union[List[Dict[str, Any]], List[TaskModel]],
     task_id: Optional[str] = None,
     new_dependencies: Optional[List[Any]] = None,
 ) -> Dict[str, Set[str]]:
@@ -274,7 +284,7 @@ def _find_transitive_dependents(
 async def validate_dependency_references(
     task_id: str,
     new_dependencies: List[Any],
-    task_repository: TaskRepository,
+    task_repository: _DependencyRepository,
     user_id: Optional[str] = None,
     only_within_tree: Optional[bool] = False,
 ) -> None:
@@ -337,7 +347,7 @@ async def validate_dependency_references(
 
 
 async def check_dependent_tasks_executing(
-    task_id: str, task_repository: TaskRepository
+    task_id: str, task_repository: _DependencyRepository
 ) -> List[str]:
     """
     Check if any tasks that depend on this task are currently executing.
@@ -364,7 +374,7 @@ async def check_dependent_tasks_executing(
 
 
 async def are_dependencies_satisfied(
-    task: TaskModelType, task_repository: TaskRepository, tasks_to_reexecute: set[str]
+    task: TaskModel, task_repository: TaskRepository, tasks_to_reexecute: set[str]
 ) -> bool:
     """
     Check if all dependencies for a task are satisfied

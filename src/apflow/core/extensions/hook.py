@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 from apflow.core.extensions.base import Extension
 from apflow.core.extensions.types import ExtensionCategory
-from apflow.core.storage.sqlalchemy.models import TaskModelType
+from apflow.core.storage.sqlalchemy.models import TaskModel
 
 
 class HookExtension(Extension, ABC):
@@ -26,7 +26,7 @@ class HookExtension(Extension, ABC):
             name = "Pre-Execution Hook"
             type = "pre_execution"
 
-            async def execute(self, task: TaskModelType) -> None:
+            async def execute(self, task: TaskModel) -> None:
                 ...
     """
 
@@ -38,7 +38,7 @@ class HookExtension(Extension, ABC):
     @abstractmethod
     async def execute(
         self,
-        task: TaskModelType,
+        task: TaskModel,
         inputs: Optional[Dict[str, Any]] = None,
         result: Optional[Any] = None,
     ) -> None:

@@ -1,5 +1,7 @@
 """Tests for distributed SQLAlchemy models."""
 
+from sqlalchemy import inspect
+
 
 class TestDistributedNodeModel:
     """Test DistributedNode model."""
@@ -23,7 +25,7 @@ class TestDistributedNodeModel:
         """DistributedNode has node_id as primary key."""
         from apflow.core.storage.sqlalchemy.models import DistributedNode
 
-        pk_cols = [c.name for c in DistributedNode.__table__.primary_key.columns]
+        pk_cols = [c.name for c in inspect(DistributedNode).primary_key]
         assert pk_cols == ["node_id"]
 
     def test_distributed_node_tablename(self) -> None:
@@ -55,7 +57,7 @@ class TestTaskLeaseModel:
         """TaskLease has task_id as primary key."""
         from apflow.core.storage.sqlalchemy.models import TaskLease
 
-        pk_cols = [c.name for c in TaskLease.__table__.primary_key.columns]
+        pk_cols = [c.name for c in inspect(TaskLease).primary_key]
         assert pk_cols == ["task_id"]
 
 
@@ -81,7 +83,7 @@ class TestExecutionIdempotencyModel:
         """ExecutionIdempotency has composite PK (task_id, attempt_id)."""
         from apflow.core.storage.sqlalchemy.models import ExecutionIdempotency
 
-        pk_cols = [c.name for c in ExecutionIdempotency.__table__.primary_key.columns]
+        pk_cols = [c.name for c in inspect(ExecutionIdempotency).primary_key]
         assert set(pk_cols) == {"task_id", "attempt_id"}
 
 
@@ -106,7 +108,7 @@ class TestClusterLeaderModel:
         """ClusterLeader has leader_id as primary key."""
         from apflow.core.storage.sqlalchemy.models import ClusterLeader
 
-        pk_cols = [c.name for c in ClusterLeader.__table__.primary_key.columns]
+        pk_cols = [c.name for c in inspect(ClusterLeader).primary_key]
         assert pk_cols == ["leader_id"]
 
 
@@ -132,7 +134,7 @@ class TestTaskEventModel:
         """TaskEvent has event_id as primary key."""
         from apflow.core.storage.sqlalchemy.models import TaskEvent
 
-        pk_cols = [c.name for c in TaskEvent.__table__.primary_key.columns]
+        pk_cols = [c.name for c in inspect(TaskEvent).primary_key]
         assert pk_cols == ["event_id"]
 
     def test_task_event_tablename(self) -> None:

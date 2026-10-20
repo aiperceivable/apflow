@@ -7,10 +7,9 @@ using globally unique IDs and category-based discovery.
 Uses Protocol-based design to avoid circular dependencies with ExecutableTask.
 """
 
-from typing import Dict, List, Optional, Type, Callable, Any
+from typing import Dict, List, Optional, Type, Callable, Any, cast
 from apflow.core.extensions.base import Extension
 from apflow.core.extensions.types import ExtensionCategory
-from apflow.core.extensions.protocol import ExecutorFactory
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
@@ -45,7 +44,7 @@ class ExtensionRegistry:
     _instance: Optional["ExtensionRegistry"] = None
     _by_id: Dict[str, Extension] = {}
     _by_category: Dict[ExtensionCategory, Dict[str, List[Extension]]] = {}
-    _factory_functions: Dict[str, ExecutorFactory] = {}
+    _factory_functions: Dict[str, Callable[[Dict[str, Any]], Any]] = {}
     _executor_classes: Dict[str, Type[Any]] = {}
 
     def __new__(cls):
@@ -116,6 +115,9 @@ class ExtensionRegistry:
             # Skip registration; the `-> None` contract means callers must not depend
             # on a returned value here.
             return
+
+        if extension.id in self._by_id:
+            self.unregister(extension.id)
 
         # Register to primary index
         self._by_id[extension.id] = extension
@@ -261,7 +263,10 @@ class ExtensionRegistry:
                 try:
                     executor_init_params = (inputs or {}).copy()
                     executor_init_params.update(kwargs)
-                    return executor_class(**executor_init_params)
+                    try:
+                        return executor_class(**executor_init_params)
+                    except TypeError:
+                        return executor_class(inputs=inputs or {})
                 except Exception as e:
                     logger.error(f"Failed to instantiate executor '{executor_class.__name__}': {e}")
                     raise
@@ -273,10 +278,10 @@ class ExtensionRegistry:
         # Check if it has the required methods (structural typing via Protocol)
         if hasattr(extension, "execute") and hasattr(extension, "get_input_schema"):
             # Handle CategoryOverride wrapper: get the wrapped class
-            executor_class = extension.__class__
+            executor_class = cast(Type[Any], extension.__class__)
             if hasattr(extension, "_wrapped"):
                 # This is a CategoryOverride wrapper, get the wrapped executor class
-                executor_class = extension._wrapped.__class__
+                executor_class = cast(Type[Any], getattr(extension, "_wrapped").__class__)
 
             # Try inputs=inputs, **kwargs first (preferred for BaseTask)
             try:
@@ -286,7 +291,10 @@ class ExtensionRegistry:
                 try:
                     executor_init_params = (inputs or {}).copy()
                     executor_init_params.update(kwargs)
-                    return executor_class(**executor_init_params)
+                    try:
+                        return executor_class(**executor_init_params)
+                    except TypeError:
+                        return executor_class(inputs=inputs or {})
                 except Exception as e:
                     logger.error(f"Failed to instantiate executor from template: {e}")
                     raise
@@ -539,9 +547,9 @@ class ExtensionRegistry:
             # never be invoked. Unwrap it the same way
             # create_executor_instance() already does.
             if hasattr(extension, "_wrapped"):
-                executor_class = extension._wrapped.__class__
+                executor_class = cast(Type[Any], getattr(extension, "_wrapped").__class__)
             elif hasattr(extension, "__class__"):
-                executor_class = extension.__class__
+                executor_class = cast(Type[Any], extension.__class__)
             else:
                 raise ValueError(
                     f"Cannot find executor class for '{executor_id}'. "
@@ -552,9 +560,10 @@ class ExtensionRegistry:
 
         # Store hooks in executor class metadata
         if not hasattr(executor_class, "_executor_hooks"):
-            executor_class._executor_hooks = {}
+            setattr(executor_class, "_executor_hooks", {})
 
-        executor_class._executor_hooks[hook_type] = hook_func
+        executor_hooks: Dict[str, Callable] = getattr(executor_class, "_executor_hooks")
+        executor_hooks[hook_type] = hook_func
         logger.info(f"Added {hook_type} to executor '{executor_id}'")
 
 

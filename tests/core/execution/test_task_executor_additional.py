@@ -251,6 +251,7 @@ class TestTaskExecutorAdditional:
         # Update to failed status
         await repo.update_task(task.id, status="failed")
         task = await repo.get_task_by_id(task.id)
+        assert task is not None
 
         task_tree = TaskTreeNode(task)
         executor = TaskExecutor()

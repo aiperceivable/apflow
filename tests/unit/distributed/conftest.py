@@ -1,6 +1,7 @@
 """Shared fixtures for distributed service tests."""
 
 import os
+from collections.abc import Iterator
 
 import pytest
 from datetime import datetime, timezone
@@ -62,7 +63,7 @@ def session_factory(engine) -> sessionmaker:
 
 
 @pytest.fixture
-def session(session_factory) -> Session:
+def session(session_factory) -> Iterator[Session]:
     """Provide a single session for tests."""
     sess = session_factory()
     yield sess

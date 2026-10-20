@@ -133,7 +133,9 @@ async def test_validation_error_marks_task_failed(sync_db_session):
 
     # Verify task is marked as failed
     task = await task_repository.get_task_by_id(task.id)
+    assert task is not None
     assert task.status == "failed"
+    assert task.error is not None
     assert "Invalid input provided" in task.error
     assert task.completed_at is not None
 
@@ -153,7 +155,9 @@ async def test_configuration_error_marks_task_failed(sync_db_session):
     await task_manager._execute_single_task(task, use_callback=False)
 
     task = await task_repository.get_task_by_id(task.id)
+    assert task is not None
     assert task.status == "failed"
+    assert task.error is not None
     assert "Missing configuration" in task.error
     assert task.completed_at is not None
 
@@ -173,7 +177,9 @@ async def test_business_error_marks_task_failed(sync_db_session):
     await task_manager._execute_single_task(task, use_callback=False)
 
     task = await task_repository.get_task_by_id(task.id)
+    assert task is not None
     assert task.status == "failed"
+    assert task.error is not None
     assert "Business logic error" in task.error
     assert task.completed_at is not None
 
@@ -193,7 +199,9 @@ async def test_runtime_error_marks_task_failed(sync_db_session):
     await task_manager._execute_single_task(task, use_callback=False)
 
     task = await task_repository.get_task_by_id(task.id)
+    assert task is not None
     assert task.status == "failed"
+    assert task.error is not None
     assert "Unexpected runtime error" in task.error
     assert task.completed_at is not None
 
@@ -213,7 +221,9 @@ async def test_timeout_error_marks_task_failed(sync_db_session):
     await task_manager._execute_single_task(task, use_callback=False)
 
     task = await task_repository.get_task_by_id(task.id)
+    assert task is not None
     assert task.status == "failed"
+    assert task.error is not None
     assert "Operation timed out" in task.error
     assert task.completed_at is not None
 
@@ -233,7 +243,9 @@ async def test_connection_error_marks_task_failed(sync_db_session):
     await task_manager._execute_single_task(task, use_callback=False)
 
     task = await task_repository.get_task_by_id(task.id)
+    assert task is not None
     assert task.status == "failed"
+    assert task.error is not None
     assert "Failed to connect to service" in task.error
     assert task.completed_at is not None
 
@@ -254,6 +266,7 @@ async def test_failed_task_can_be_reexecuted(sync_db_session):
     await task_manager._execute_single_task(task, use_callback=False)
 
     task = await task_repository.get_task_by_id(task.id)
+    assert task is not None
     assert task.status == "failed"
 
     # Mark for re-execution by resetting status
@@ -268,5 +281,7 @@ async def test_failed_task_can_be_reexecuted(sync_db_session):
     await task_manager._execute_single_task(task, use_callback=False)
 
     task = await task_repository.get_task_by_id(task.id)
+    assert task is not None
     assert task.status == "failed"
+    assert task.error is not None
     assert "Missing configuration" in task.error

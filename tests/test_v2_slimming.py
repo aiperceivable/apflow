@@ -1,6 +1,9 @@
 """Post-slimming verification tests for apflow v2"""
 
 import pytest
+from importlib import import_module
+import tomllib
+from pathlib import Path
 
 
 class TestPreservedImports:
@@ -46,10 +49,11 @@ class TestPreservedImports:
 
         assert ExtensionScanner is not None
 
-    def test_version(self):
+    def test_version(self) -> None:
         from apflow import __version__
 
-        assert __version__.startswith("0.22")
+        project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+        assert __version__ == project["project"]["version"]
 
 
 class TestDeletedImportsFail:
@@ -57,31 +61,31 @@ class TestDeletedImportsFail:
 
     def test_api_a2a_deleted(self):
         with pytest.raises(ImportError):
-            from apflow.api.a2a import agent_executor  # noqa: F401
+            import_module("apflow.api.a2a.agent_executor")
 
     def test_cli_deleted(self):
         with pytest.raises(ImportError):
-            from apflow.cli.main import main  # noqa: F401
+            import_module("apflow.cli.main")
 
     def test_crewai_deleted(self):
         with pytest.raises(ImportError):
-            from apflow.extensions.crewai import crewai_executor  # noqa: F401
+            import_module("apflow.extensions.crewai.crewai_executor")
 
     def test_generate_deleted(self):
         with pytest.raises(ImportError):
-            from apflow.extensions.generate import generate_executor  # noqa: F401
+            import_module("apflow.extensions.generate.generate_executor")
 
     def test_grpc_deleted(self):
         with pytest.raises(ImportError):
-            from apflow.extensions.grpc import grpc_executor  # noqa: F401
+            import_module("apflow.extensions.grpc.grpc_executor")
 
     def test_llm_deleted(self):
         with pytest.raises(ImportError):
-            from apflow.extensions.llm import llm_executor  # noqa: F401
+            import_module("apflow.extensions.llm.llm_executor")
 
     def test_tools_deleted(self):
         with pytest.raises(ImportError):
-            from apflow.extensions.tools import limited_scrape_tools  # noqa: F401
+            import_module("apflow.extensions.tools.limited_scrape_tools")
 
 
 class TestNoDuckDBReferences:

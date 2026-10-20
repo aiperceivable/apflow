@@ -6,11 +6,12 @@ import asyncio
 import random
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Optional, TypeVar
 
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
+ResultT = TypeVar("ResultT")
 
 
 class BackoffStrategy(Enum):
@@ -96,9 +97,9 @@ class RetryManager:
         self,
         task_id: str,
         policy: RetryPolicy,
-        execute_fn: Callable[..., Awaitable[Dict[str, Any]]],
+        execute_fn: Callable[..., Awaitable[ResultT]],
         on_retry: Optional[Callable[[str, int, Exception], Awaitable[None]]] = None,
-    ) -> Dict[str, Any]:
+    ) -> ResultT:
         """Execute a function with retry logic.
 
         Args:

@@ -80,11 +80,15 @@ scheduler loop.
 
 ## Schedule Modules
 
-Five modules are registered under `apflow.schedule.*` and are accessible over REST,
+Six modules are registered under `apflow.schedule.*` and are accessible over REST,
 MCP, A2A, and the CLI. Together they form the scheduling lifecycle:
 
 ```
-schedule.set → schedule.due → schedule.trigger → schedule.complete → schedule.export_ical
+schedule.set → schedule.due → schedule.trigger → schedule.complete
+                                  ↓
+                           schedule.history
+
+schedule.export_ical → calendar feed
 ```
 
 ### `schedule.set`

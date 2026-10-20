@@ -5,7 +5,7 @@ Task executor for AIPartnerUpFlow that manages task tree execution
 import uuid
 import copy
 import threading
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional, Union, Sequence
 from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -13,7 +13,7 @@ from apflow.core.execution.task_manager import TaskManager
 from apflow.core.execution.task_tracker import TaskTracker
 from apflow.core.types import TaskTreeNode
 from apflow.core.storage import create_pooled_session
-from apflow.core.storage.sqlalchemy.models import TaskModelType
+from apflow.core.storage.sqlalchemy.models import TaskModel
 from apflow.core.config import (
     get_task_model_class,
     get_pre_hooks,
@@ -223,6 +223,8 @@ class TaskExecutor:
         streaming_callbacks_context: Optional[Any] = None,
         use_demo: bool = False,
         db_session: Optional[Union[Session, AsyncSession]] = None,
+        executable_task_ids: Optional[set[str]] = None,
+        execution_task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute a task tree
@@ -249,6 +251,8 @@ class TaskExecutor:
                     streaming_callbacks_context=streaming_callbacks_context,
                     use_demo=use_demo,
                     db_session=session,
+                    executable_task_ids=executable_task_ids,
+                    execution_task_id=execution_task_id,
                 )
 
         # In distributed mode, only the leader node may execute tasks
@@ -295,7 +299,7 @@ class TaskExecutor:
             # Pass shared executor_instances so TaskManager can store executors for cancellation
             task_manager = TaskManager(
                 db_session,
-                root_task_id=root_task_id,
+                root_task_id=execution_task_id or root_task_id,
                 pre_hooks=self.pre_hooks,
                 post_hooks=self.post_hooks,
                 executor_instances=self._executor_instances,  # Pass shared executor instances
@@ -307,6 +311,7 @@ class TaskExecutor:
 
             # Set tasks to re-execute in TaskManager
             task_manager._tasks_to_reexecute = tasks_to_reexecute
+            task_manager._executable_task_ids = executable_task_ids
 
             if use_streaming and streaming_callbacks_context:
                 task_manager.stream = True
@@ -326,29 +331,14 @@ class TaskExecutor:
             from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
 
             task_repository = TaskRepository(db_session, task_model_class=self.task_model_class)
-            updated_root_task = await task_repository.get_task_by_id(task_tree.task.id)
+            execution_tree = task_manager._get_execution_tree(task_tree)
+            updated_root_task = await task_repository.get_task_by_id(execution_tree.task.id)
 
             if updated_root_task:
-                final_status = updated_root_task.status
-                # Safely convert progress to float
-                try:
-                    if updated_root_task.progress is not None:
-                        if isinstance(updated_root_task.progress, (int, float)):
-                            final_progress = float(updated_root_task.progress)
-                        elif isinstance(updated_root_task.progress, str):
-                            final_progress = float(updated_root_task.progress)
-                        else:
-                            final_progress = task_tree.calculate_progress()
-                    else:
-                        final_progress = 0.0
-                except (ValueError, TypeError):
-                    final_progress = task_tree.calculate_progress()
-                # Include root task result if available
-                root_result = updated_root_task.result
-            else:
-                final_status = task_tree.calculate_status()
-                final_progress = task_tree.calculate_progress()
-                root_result = None
+                execution_tree.task = updated_root_task
+            final_status = execution_tree.calculate_status()
+            final_progress = execution_tree.calculate_progress()
+            root_result = updated_root_task.result if updated_root_task else None
 
             result = {
                 "status": final_status,
@@ -357,7 +347,7 @@ class TaskExecutor:
             }
 
             # Include root task result if available
-            if root_result is not None:
+            if updated_root_task is not None:
                 result["result"] = root_result
 
             return result
@@ -565,8 +555,6 @@ class TaskExecutor:
             task_tree: Root task tree node
             db_session: Database session
         """
-        is_async = isinstance(db_session, AsyncSession)
-
         # Get all column names from the model class (supports custom TaskModel)
         # This avoids hardcoding field names and makes the code maintainable
         model_columns = set(self.task_model_class.__table__.columns.keys())
@@ -649,14 +637,14 @@ class TaskExecutor:
             merged.update(copy.deepcopy(new))
             return merged
 
-        async def save_node_async(node: TaskTreeNode):
+        async def save_node_async(node: TaskTreeNode, session: AsyncSession) -> None:
             """Recursively save tasks (async)"""
             # Check if task already exists
-            existing = await db_session.get(self.task_model_class, node.task.id)
+            existing = await session.get(self.task_model_class, node.task.id)
 
             if not existing:
                 # New task: add directly
-                db_session.add(node.task)
+                session.add(node.task)
             else:
                 # Existing task: update fields intelligently
                 for key, value in node.task.__dict__.items():
@@ -679,19 +667,19 @@ class TaskExecutor:
 
             # Recursively save children
             for child in node.children:
-                await save_node_async(child)
+                await save_node_async(child, session)
 
-        def save_node_sync(node: TaskTreeNode):
+        def save_node_sync(node: TaskTreeNode, session: Session) -> None:
             """Recursively save tasks (sync)"""
             # Check if task already exists
-            result = db_session.execute(
+            result = session.execute(
                 select(self.task_model_class).filter(self.task_model_class.id == node.task.id)
             )
             existing = result.scalar_one_or_none()
 
             if not existing:
                 # New task: add directly
-                db_session.add(node.task)
+                session.add(node.task)
             else:
                 # Existing task: update fields intelligently
                 for key, value in node.task.__dict__.items():
@@ -714,14 +702,14 @@ class TaskExecutor:
 
             # Recursively save children
             for child in node.children:
-                save_node_sync(child)
+                save_node_sync(child, session)
 
         # Save all tasks
-        if is_async:
-            await save_node_async(task_tree)
+        if isinstance(db_session, AsyncSession):
+            await save_node_async(task_tree, db_session)
             await db_session.commit()
         else:
-            save_node_sync(task_tree)
+            save_node_sync(task_tree, db_session)
             db_session.commit()
 
         logger.info(f"Saved task tree to database: root {task_tree.task.id}")
@@ -818,7 +806,7 @@ class TaskExecutor:
 
         # Use root task ID if not provided
         if root_task_id is None:
-            root_task_id = task_tree.task.id
+            root_task_id = str(task_tree.task.id)
 
         # Execute task tree
         execution_result = await self.execute_task_tree(
@@ -833,7 +821,7 @@ class TaskExecutor:
         return execution_result
 
     async def _load_existing_task_tree(
-        self, tasks: List[Union[str, Dict[str, Any]]], db_session: Union[Session, AsyncSession]
+        self, tasks: Sequence[Union[str, Dict[str, Any]]], db_session: Union[Session, AsyncSession]
     ) -> TaskTreeNode:
         """
         Load existing task tree from database
@@ -885,7 +873,7 @@ class TaskExecutor:
             raise ValueError("No root task found (task without parent_id)")
 
         # Build task tree recursively
-        def build_node(task: TaskModelType) -> TaskTreeNode:
+        def build_node(task: TaskModel) -> TaskTreeNode:
             """Recursively build tree node"""
             node = TaskTreeNode(task)
             # Find children
@@ -1103,6 +1091,7 @@ class TaskExecutor:
         full_task_tree = await task_repository.build_task_tree(root_task)
 
         # Determine which tasks to execute
+        required_task_ids: Optional[set[str]] = None
         if is_root_task:
             # If it's a root task, execute the entire tree
             task_tree = full_task_tree
@@ -1140,6 +1129,8 @@ class TaskExecutor:
             streaming_callbacks_context=streaming_callbacks_context,
             use_demo=use_demo,
             db_session=db_session,
+            executable_task_ids=required_task_ids,
+            execution_task_id=task_id,
         )
 
         return execution_result

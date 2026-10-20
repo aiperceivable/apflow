@@ -116,6 +116,7 @@ async def test_hook_can_update_database(sync_db_session):
 
         # Verify update
         updated_task = await repo.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.status == "in_progress"
     finally:
         clear_hook_context()
@@ -210,21 +211,26 @@ async def test_hooks_share_transaction_context(sync_db_session):
 
         # Simulate first hook (pre_hook) updating task
         repo1 = get_hook_repository()
+        assert repo1 is not None
         await repo1.update_task(task_id, status="in_progress")
 
         # Simulate second hook (post_hook) reading updated task
         repo2 = get_hook_repository()
+        assert repo2 is not None
         updated_task = await repo2.get_task_by_id(task_id)
+        assert updated_task is not None
 
         # Should see the update made by first hook (same transaction)
         assert updated_task.status == "in_progress"
 
         # Simulate third hook (task_tree_hook) making another update
         repo3 = get_hook_repository()
+        assert repo3 is not None
         await repo3.update_task(task_id, status="completed")
 
         # All hooks should see the latest state
         final_task = await repo1.get_task_by_id(task_id)
+        assert final_task is not None
         assert final_task.status == "completed"
     finally:
         clear_hook_context()
@@ -252,17 +258,23 @@ async def test_hooks_can_cooperate_via_shared_session(sync_db_session):
 
         # Simulate pre_hook checking parent task status
         repo_pre = get_hook_repository()
+        assert repo_pre is not None
         parent_task = await repo_pre.get_task_by_id(task1.id)
+        assert parent_task is not None
         assert parent_task.status == "pending"
 
         # Simulate post_hook updating parent task
         repo_post = get_hook_repository()
+        assert repo_post is not None
         await repo_post.update_task(task1.id, status="completed")
 
         # Simulate task_tree_hook verifying dependencies
         repo_tree = get_hook_repository()
+        assert repo_tree is not None
         updated_parent = await repo_tree.get_task_by_id(task1.id)
+        assert updated_parent is not None
         child_task = await repo_tree.get_task_by_id(task2.id)
+        assert child_task is not None
 
         # Verify both hooks see consistent data
         assert updated_parent.status == "completed"
@@ -318,20 +330,25 @@ async def test_hooks_see_uncommitted_changes(sync_db_session):
 
         # First hook modifies task name (simulating pre_hook)
         repo1 = get_hook_repository()
+        assert repo1 is not None
         await repo1.update_task(task.id, name="Modified by Hook 1")
 
         # Second hook should see the change (simulating post_hook)
         repo2 = get_hook_repository()
+        assert repo2 is not None
         updated_task = await repo2.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.name == "Modified by Hook 1"
         assert updated_task.name != original_name
 
         # Third hook modifies again (simulating task_tree_hook)
         repo3 = get_hook_repository()
+        assert repo3 is not None
         await repo3.update_task(task.id, name="Modified by Hook 3")
 
         # All hooks should see the latest change
         final_task = await repo1.get_task_by_id(task.id)
+        assert final_task is not None
         assert final_task.name == "Modified by Hook 3"
     finally:
         clear_hook_context()

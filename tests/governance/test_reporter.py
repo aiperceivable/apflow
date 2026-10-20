@@ -1,11 +1,15 @@
 """Tests for reporter module"""
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
+from apflow.core.storage.sqlalchemy.models import Base
+from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
 from apflow.governance.reporter import UsageReporter, UsageSummary
 
 
@@ -61,6 +65,48 @@ class TestGetTaskUsage:
 
 
 class TestGetUserUsage:
+    @pytest.mark.asyncio
+    async def test_sqlite_time_window_is_inclusive_and_isolated_by_user(self) -> None:
+        start = datetime(2026, 1, 10, tzinfo=timezone.utc)
+        end = datetime(2026, 1, 12, tzinfo=timezone.utc)
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            Base.metadata.create_all(engine)
+            with Session(engine) as session:
+                repository = TaskRepository(session)
+                for timestamp, user_id, input_tokens, output_tokens, cost in [
+                    (start, "target", 1, 4, 0.01),
+                    (start + timedelta(days=1), "target", 2, 5, 0.02),
+                    (end, "target", 3, 6, 0.03),
+                    (start - timedelta(microseconds=1), "target", 100, 200, 1.0),
+                    (end + timedelta(microseconds=1), "target", 300, 400, 2.0),
+                    (start, "other-user", 500, 600, 3.0),
+                ]:
+                    await repository.create_task(
+                        "Measured task",
+                        user_id=user_id,
+                        created_at=timestamp,
+                        token_usage={
+                            "input": input_tokens,
+                            "output": output_tokens,
+                            "total": input_tokens + output_tokens,
+                        },
+                        actual_cost_usd=cost,
+                    )
+
+                result = await UsageReporter(repository).get_user_usage("target", start, end)
+
+                assert result.scope_id == "target"
+                assert result.task_count == 3
+                assert result.total_input_tokens == 6
+                assert result.total_output_tokens == 15
+                assert result.total_tokens == 21
+                assert result.total_cost_usd == pytest.approx(0.06)
+                assert result.period_start == start
+                assert result.period_end == end
+        finally:
+            engine.dispose()
+
     @pytest.mark.asyncio
     async def test_aggregation(self):
         """Regression: get_user_usage called the nonexistent

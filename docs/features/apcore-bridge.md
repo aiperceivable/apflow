@@ -53,12 +53,13 @@ there must be re-exported here. Current set (16 modules):
 
 **`src/apflow/bridge/schedule_modules.py`**
 
-Contains the 5 scheduling lifecycle modules (total registered = 21):
+Contains 6 scheduling modules (22 built-in task/schedule modules, plus discovered executors):
 
 - `ScheduleSetModule` → `schedule.set` — configure a task's schedule and compute its next run
 - `ScheduleDueModule` → `schedule.due` — list scheduled tasks whose next run has arrived
 - `ScheduleTriggerModule` → `schedule.trigger` — trigger a scheduled task immediately
 - `ScheduleCompleteModule` → `schedule.complete` — record a run as complete and advance the schedule
+- `ScheduleHistoryModule` → `schedule.history` — list a scheduled definition's run instances
 - `ScheduleExportICalModule` → `schedule.export_ical` — export scheduled tasks as an iCalendar feed
 
 **`src/apflow/bridge/registry_setup.py`**
@@ -348,9 +349,9 @@ def test_adapter_annotations():
         dependencies=["httpx"],
         always_available=False,
     )
-    assert adapter.annotations.executor_id == "mock"
-    assert adapter.annotations.tags == ["http", "api"]
-    assert adapter.annotations.dependencies == ["httpx"]
+    assert adapter.metadata["executor_id"] == "mock"
+    assert adapter.tags == ["http", "api"]
+    assert adapter.metadata["executor_dependencies"] == ["httpx"]
 ```
 
 ### Unit Tests: `tests/bridge/test_scanner_bridge.py`
@@ -459,9 +460,9 @@ async def test_registry_custom_namespace():
 
 ## Acceptance Criteria
 
-1. `apcore-mcp` can start and expose all registered modules as MCP tools (verified by calling `serve_mcp(registry)` and listing tools).
-2. `apcore-a2a` can start and expose registered modules as A2A skills (verified by calling `serve_a2a(registry)` and checking agent card).
-3. `apcore-cli` can generate CLI commands for registered modules (verified by calling `create_cli(registry)` and running `--help`).
+1. `apcore-mcp` exposes registered modules through `serve(registry)`; real MCP requests verify native input schema semantics, structured outputs, and sensitive-data redaction.
+2. `apcore-a2a` exposes registered modules through `serve(registry)`; real A2A requests verify skill discovery and execution.
+3. `apcore-cli` generates commands for registered modules; real task create/get/list commands verify omitted defaults and JSON payload nulls.
 4. Each module has valid JSON Schema for inputs and outputs (input_schema and output_schema are non-empty dicts with "type" key).
 5. Module registration is automatic: adding a new `@executor_register` decorated class causes it to appear in the registry without any code changes to the bridge.
 6. All built-in executor modules are registered: rest, send_email, aggregate_results, apflow_api (4 executors).

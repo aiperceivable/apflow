@@ -19,6 +19,49 @@ AI-perceivable via apcore ecosystem:
 - apcore-cli: Humans operate orchestration via CLI
 """
 
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from apflow.adapters.function_executor import (
+        function_executor,
+    )
+    from apflow.core import (
+        BaseTask,
+        ExecutableTask,
+        StreamingCallbacks,
+        TaskManager,
+        create_session,
+        get_default_session,
+        get_hook_repository,
+        get_hook_session,
+    )
+    from apflow.core.decorators import (
+        clear_config,
+        executor_register,
+        get_require_existing_tasks,
+        get_task_model_class,
+        get_task_tree_hooks,
+        get_use_task_creator,
+        get_webhook_verify_hook,
+        hook_register,
+        register_post_hook,
+        register_pre_hook,
+        register_task_tree_hook,
+        register_webhook_verify_hook,
+        set_require_existing_tasks,
+        set_task_model_class,
+        set_use_task_creator,
+        storage_register,
+        task_model_register,
+    )
+    from apflow.core.extensions import (
+        add_executor_hook,
+    )
+    from apflow.core.types import (
+        WebhookVerifyContext,
+        WebhookVerifyResult,
+    )
+
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _get_version
 
@@ -66,7 +109,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> Any:
     """Lazy import to avoid loading heavy apflow.core at package import time"""
 
     # Core interfaces

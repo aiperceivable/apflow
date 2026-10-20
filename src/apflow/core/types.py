@@ -9,10 +9,24 @@ tied to any specific implementation layer.
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Dict, Any, Union, Callable, Awaitable, Optional
+from typing import (
+    TYPE_CHECKING,
+    List,
+    Dict,
+    Any,
+    Union,
+    Callable,
+    Awaitable,
+    Optional,
+    Generic,
+    Iterator,
+    TypeVar,
+)
 
 if TYPE_CHECKING:
-    from apflow.core.storage.sqlalchemy.models import TaskModelType
+    from apflow.core.storage.sqlalchemy.models import TaskModel
+
+TaskModelType = TypeVar("TaskModelType", bound="TaskModel")
 
 
 # ============================================================================
@@ -141,7 +155,7 @@ class TaskStatus:
 # - If priority is None or missing, default to 999 (lowest priority, executes last)
 
 
-class TaskTreeNode:
+class TaskTreeNode(Generic[TaskModelType]):
     """
     Task tree node for hierarchical task management
 
@@ -159,7 +173,7 @@ class TaskTreeNode:
         calculate_status: Calculate the overall status of the task tree
     """
 
-    def __init__(self, task: "TaskModelType"):
+    def __init__(self, task: "TaskModelType") -> None:
         """
         Initialize a task tree node
 
@@ -167,9 +181,9 @@ class TaskTreeNode:
             task: The TaskModelType instance to associate with this node
         """
         self.task = task
-        self.children: List["TaskTreeNode"] = []
+        self.children: List["TaskTreeNode[TaskModelType]"] = []
 
-    def add_child(self, child: "TaskTreeNode"):
+    def add_child(self, child: "TaskTreeNode[TaskModelType]") -> None:
         """
         Add a child node to this node
 
@@ -188,21 +202,9 @@ class TaskTreeNode:
         return len(self.children) > 0
 
     def calculate_progress(self) -> float:
-        """
-        Calculate progress of the task tree
-
-        Returns:
-            Average progress of all child tasks (0.0 to 1.0)
-            If no children, returns the task's own progress
-        """
-        if not self.children:
-            return float(self.task.progress) if self.task.progress else 0.0
-
-        total_progress = 0.0
-        for child in self.children:
-            total_progress += child.calculate_progress()
-
-        return total_progress / len(self.children)
+        """Return mean progress across every task, including internal nodes."""
+        progresses = [float(node.task.progress or 0.0) for node in self]
+        return sum(progresses) / len(progresses)
 
     def calculate_status(self) -> str:
         """
@@ -210,16 +212,16 @@ class TaskTreeNode:
 
         Returns:
             Status string: "completed", "failed", "in_progress", "cancelled", or "pending"
-            - "completed": All children are completed
-            - "failed": At least one child has failed
-            - "in_progress": At least one child is in progress
-            - "cancelled": At least one child was cancelled (and none failed/in progress)
+            - "completed": Every task, including this node, is completed
+            - "failed": At least one task has failed
+            - "in_progress": At least one task is in progress
+            - "cancelled": At least one task was cancelled (and none failed/in progress)
             - "pending": Otherwise
         """
         if not self.children:
-            return self.task.status
+            return str(self.task.status)
 
-        statuses = [child.calculate_status() for child in self.children]
+        statuses = [self.task.status, *(child.calculate_status() for child in self.children)]
 
         if all(s == "completed" for s in statuses):
             return "completed"
@@ -232,7 +234,7 @@ class TaskTreeNode:
         else:
             return "pending"
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator["TaskTreeNode[TaskModelType]"]:
         """
         Generator to iterate over all nodes in the tree
 
@@ -267,7 +269,7 @@ class TaskTreeNode:
             mapping.update(child.to_mapping())
         return mapping
 
-    def copy(self, data: Optional[Dict[str, Any]] = None) -> "TaskTreeNode":
+    def copy(self, data: Optional[Dict[str, Any]] = None) -> "TaskTreeNode[TaskModelType]":
         """
         Create a deep copy of the task tree node and its children
 
@@ -280,7 +282,7 @@ class TaskTreeNode:
             new_node.children.append(child.copy(data))
         return new_node
 
-    def update(self, data: Dict[str, Any]) -> "TaskTreeNode":
+    def update(self, data: Dict[str, Any]) -> "TaskTreeNode[TaskModelType]":
         """
         Update the task model associated with this node
 

@@ -265,6 +265,7 @@ class SessionPoolManager:
             logger.warning(f"Failed to dispose previous engine on reinit: {exc}")
         finally:
             self._engine = None
+            self._sessionmaker = None
 
     def initialize(
         self,
@@ -366,6 +367,8 @@ class SessionPoolManager:
                     connection_string = dialect_config.get_connection_string(path=path)
                 else:
                     raise ValueError("Connection string is required for PostgreSQL")
+            if connection_string is None:
+                raise ValueError("Database connection string could not be resolved")
 
             # Get engine kwargs from dialect config and merge with user-provided kwargs
             engine_kwargs = dialect_config.get_engine_kwargs()
@@ -374,16 +377,15 @@ class SessionPoolManager:
 
             # Create engine and sessionmaker
             if async_mode:
-                self._engine = create_async_engine(connection_string, **engine_kwargs)
+                engine = create_async_engine(connection_string, **engine_kwargs)
                 self._sessionmaker = async_sessionmaker(
-                    self._engine, class_=AsyncSession, expire_on_commit=False
+                    engine, class_=AsyncSession, expire_on_commit=False
                 )
             else:
-                self._engine = create_engine(connection_string, **engine_kwargs)
-                _apply_sqlite_pragmas(self._engine)
-                self._sessionmaker = sessionmaker(
-                    self._engine, class_=Session, expire_on_commit=False
-                )
+                engine = create_engine(connection_string, **engine_kwargs)
+                _apply_sqlite_pragmas(engine)
+                self._sessionmaker = sessionmaker(engine, class_=Session, expire_on_commit=False)
+            self._engine = engine
 
             logger.info(f"SessionPoolManager initialized: {dialect} engine with pool")
 
@@ -391,9 +393,9 @@ class SessionPoolManager:
             if self._engine:
                 # Table creation is idempotent and best-effort (first use retries),
                 # so a failure here is not fatal.
-                if not async_mode:
+                if isinstance(engine, Engine):
                     try:
-                        Base.metadata.create_all(self._engine)
+                        Base.metadata.create_all(engine)
                     except Exception as e:
                         logger.warning(
                             f"Could not pre-create tables (will retry on first use): {e}"
@@ -406,14 +408,15 @@ class SessionPoolManager:
                 # opaque query errors. Log at error and let it propagate so startup
                 # fails loudly instead of running on a stale schema.
                 try:
-                    if async_mode:
-                        _migrate_schema_for_async_engine(connection_string, dialect)
+                    if isinstance(engine, Engine):
+                        _migrate_schema_if_needed(engine)
                     else:
-                        _migrate_schema_if_needed(self._engine)
+                        _migrate_schema_for_async_engine(connection_string, dialect)
                 except Exception as e:
                     logger.error(
                         f"Schema migration failed during initialization: {e}", exc_info=True
                     )
+                    self._dispose_current_engine()
                     raise
 
     def create_session(self) -> Union[Session, AsyncSession]:
@@ -822,6 +825,8 @@ def create_session(
             connection_string = dialect_config.get_connection_string(path=path)
         else:
             raise ValueError("Connection string is required for PostgreSQL")
+    if connection_string is None:
+        raise ValueError("Database connection string could not be resolved")
 
     # Get engine kwargs from dialect config and merge with user-provided kwargs
     engine_kwargs = dialect_config.get_engine_kwargs()
@@ -831,23 +836,19 @@ def create_session(
     if async_mode:
         engine = create_async_engine(connection_string, **engine_kwargs)
         session_maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-        session = session_maker()
     else:
         engine = create_engine(connection_string, **engine_kwargs)
         _apply_sqlite_pragmas(engine)
         session_maker = sessionmaker(engine, class_=Session, expire_on_commit=False)
-        session = session_maker()
 
     logger.info(f"Created {dialect} session")
 
     # Ensure tables exist
     if engine:
         try:
-            if async_mode:
+            if not isinstance(engine, Engine):
                 # For async, create tables using async context
                 # We need to use asyncio.run() since this is a sync function
-                import asyncio
-
                 async def create_tables_async():
                     async with engine.begin() as conn:
                         await conn.run_sync(Base.metadata.create_all)
@@ -876,9 +877,19 @@ def create_session(
                 Base.metadata.create_all(engine)
                 _migrate_schema_if_needed(engine)
         except Exception as e:
-            logger.warning(f"Could not create tables automatically: {str(e)}")
+            logger.error(f"Database initialization failed: {e}", exc_info=True)
+            if isinstance(engine, AsyncEngine):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    asyncio.run(engine.dispose())
+                else:
+                    loop.create_task(engine.dispose())
+            else:
+                engine.dispose()
+            raise
 
-    return session
+    return session_maker()
 
 
 def get_default_session(
@@ -1111,7 +1122,22 @@ class PooledSessionContext:
     async def __aenter__(self) -> Union[Session, AsyncSession]:
         """Enter context manager and create session from pool"""
         # Get or create pool manager
-        self._pool_manager = get_session_pool_manager()
+        if self._connection_string is not None:
+            # Explicit configuration must take precedence over the process default,
+            # including before a default engine has ever been initialized.
+            with SessionRegistry.get_session_pool_lock():
+                self._pool_manager = SessionRegistry.get_session_pool_manager()
+                if self._pool_manager is None:
+                    self._pool_manager = SessionPoolManager()
+                    SessionRegistry.set_session_pool_manager(self._pool_manager)
+                self._pool_manager.initialize(
+                    connection_string=self._connection_string,
+                    path=self._path,
+                    async_mode=self._async_mode,
+                    **self._kwargs,
+                )
+        else:
+            self._pool_manager = get_session_pool_manager()
 
         # Initialize pool manager if needed
         if self._pool_manager._engine is None:

@@ -54,8 +54,8 @@ async def test_config_manager_env_and_hooks_integration(tmp_path: Path, sync_db_
             name = "ConfigManager Executor"
             description = "Executor for ConfigManager integration testing"
 
-            def __init__(self, inputs: Optional[Dict[str, Any]] = None):
-                super().__init__(inputs=inputs or {})
+            def __init__(self, inputs: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
+                super().__init__(inputs=inputs or {}, **kwargs)
 
             async def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
                 return {"result": "ok", "inputs": inputs}
@@ -82,6 +82,8 @@ async def test_config_manager_env_and_hooks_integration(tmp_path: Path, sync_db_
         updated_task = await task_repository.get_task_by_id(task.id)
 
         assert hook_calls == [str(task.id)]
+        assert updated_task is not None
+        assert updated_task.inputs is not None
         assert updated_task.result["result"] == "ok"
         assert updated_task.result["inputs"]["integration_flag"] == "from_env"
         assert updated_task.inputs["integration_flag"] == "from_env"

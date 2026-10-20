@@ -4,6 +4,25 @@ Execution module for task management and distribution
 Uses lazy imports to avoid loading heavy TaskExecutor at package import time.
 """
 
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from apflow.core.execution.streaming_callbacks import (
+        StreamingCallbacks,
+    )
+    from apflow.core.execution.task_creator import (
+        TaskCreator,
+    )
+    from apflow.core.execution.task_executor import (
+        TaskExecutor,
+    )
+    from apflow.core.execution.task_manager import (
+        TaskManager,
+    )
+    from apflow.core.execution.task_tracker import (
+        TaskTracker,
+    )
+
 __all__ = [
     "TaskManager",
     "TaskCreator",
@@ -13,7 +32,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> Any:
     """Lazy import to avoid loading TaskExecutor (which triggers extensions) at package import"""
     if name == "TaskManager":
         from apflow.core.execution.task_manager import TaskManager

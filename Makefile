@@ -1,5 +1,8 @@
 .PHONY: help check-imports check-circular check-performance check-heavy test clean docs-prep docs-serve docs-build
 
+PYTHON ?= python
+APDEV ?= apdev
+
 help:
 	@echo "Available commands:"
 	@echo "  make check-imports     - Run all import checks"
@@ -18,17 +21,17 @@ check-imports: check-circular check-performance check-heavy
 # Detect circular imports
 check-circular:
 	@echo "Checking for circular imports..."
-	@python scripts/detect_circular_imports.py
+	@$(APDEV) check-imports
 
 # Check import performance
 check-performance:
 	@echo "Checking import performance..."
-	@bash scripts/check_import_performance.sh
+	@$(PYTHON) -m pytest tests/test_import_checks.py::test_cli_import_finishes_within_startup_budget -q
 
 # Check for heavy imports at module level
 check-heavy:
 	@echo "Checking for heavy module-level imports..."
-	@find src -name "*.py" | xargs python scripts/check_heavy_imports.py
+	@$(PYTHON) -m pytest tests/test_import_checks.py::test_cli_import_keeps_optional_frameworks_unloaded -q
 
 # Run tests
 test:

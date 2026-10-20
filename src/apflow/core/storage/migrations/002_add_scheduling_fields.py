@@ -134,6 +134,13 @@ class AddSchedulingFields(Migration):
             "run_count",
         ]
 
+        # SQLite refuses to drop a column while an index still references it.
+        with engine.begin() as conn:
+            for index in inspector.get_indexes(table_name):
+                if index["name"] is not None and set(index["column_names"]) & set(columns_to_drop):
+                    index_name = engine.dialect.identifier_preparer.quote(index["name"])
+                    conn.execute(text(f"DROP INDEX {index_name}"))
+
         for col_name in columns_to_drop:
             if col_name in existing_columns:
                 try:

@@ -14,7 +14,7 @@ ID: 001_add_task_tree_fields (auto-extracted from filename)
 from sqlalchemy import Engine, inspect as sa_inspect, text
 from sqlalchemy.orm import Session
 from apflow.core.storage.migrations import Migration
-from apflow.core.storage.sqlalchemy.models import TASK_TABLE_NAME, TaskModel
+from apflow.core.storage.sqlalchemy.models import TASK_TABLE_NAME
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
@@ -104,7 +104,7 @@ class AddTaskTreeFields(Migration):
         # Step 3: Backfill origin_type for copies
         self._update_origin_types(engine)
 
-        # Step 4: Auto-assign task_tree_id for existing tasks (ORM-based, DB-agnostic)
+        # Step 4: Auto-assign task_tree_id using only migration-era columns
         self._update_task_trees(engine)
 
         # Step 5: Create indexes
@@ -126,116 +126,70 @@ class AddTaskTreeFields(Migration):
             # Non-critical, continue
 
     def _update_origin_types(self, engine: Engine) -> None:
-        # After assigning task_tree_id, backfill origin_type for copies globally
-        try:
-            # Create a session from the engine
-            from sqlalchemy.orm import sessionmaker
-
-            SessionLocal = sessionmaker(bind=engine)
-            session = SessionLocal()
-            updated = (
-                session.query(TaskModel)
-                .filter(
-                    TaskModel.origin_type.is_(None),
-                    TaskModel.original_task_id.isnot(None),
-                    TaskModel.original_task_id != "",
+        """Backfill copies without depending on columns added by later migrations."""
+        with engine.begin() as connection:
+            result = connection.execute(
+                text(
+                    f"UPDATE {TASK_TABLE_NAME} SET origin_type = 'copy' "
+                    "WHERE origin_type IS NULL AND original_task_id IS NOT NULL "
+                    "AND original_task_id != ''"
                 )
-                .update({TaskModel.origin_type: "copy"}, synchronize_session=False)
             )
-            session.commit()
-            if updated:
-                logger.info(
-                    f"✓ {self.id}: Backfilled origin_type='copy' for {updated} task(s) with original_task_id"
-                )
-        except Exception as backfill_err:
-            session.rollback()
-            logger.warning(
-                f"⚠ {self.id}: Could not backfill origin_type for copies: {str(backfill_err)}"
-            )
-
-        finally:
-            session.close()
+        if result.rowcount:
+            logger.info(f"{self.id}: Backfilled origin_type='copy' for {result.rowcount} task(s)")
 
     def _update_task_trees(self, engine: Engine) -> None:
+        """Assign each legacy root and its descendants to the same task tree."""
         batch_size = 100
         total_processed = 0
-
-        try:
-            # Create a session from the engine
-            from sqlalchemy.orm import sessionmaker
-
-            SessionLocal = sessionmaker(bind=engine)
-            session = SessionLocal()
-
+        with Session(engine) as session:
             while True:
-                try:
-                    # Get next batch of root tasks using ORM. No OFFSET: each
-                    # committed batch clears its rows from this filter (their
-                    # task_tree_id is now set), so the next iteration naturally
-                    # starts at the next unprocessed rows. An OFFSET here would
-                    # skip rows as the matching set shrinks between iterations.
-                    root_tasks = (
-                        session.query(TaskModel)
-                        .filter(TaskModel.task_tree_id.is_(None), TaskModel.parent_id.is_(None))
-                        .order_by(TaskModel.created_at.asc())
-                        .limit(batch_size)
-                        .all()
+                # Committed roots leave this filter, so OFFSET would skip rows.
+                root_ids = (
+                    session.execute(
+                        text(
+                            f"SELECT id FROM {TASK_TABLE_NAME} "
+                            "WHERE task_tree_id IS NULL AND parent_id IS NULL "
+                            "ORDER BY created_at ASC LIMIT :batch_size"
+                        ),
+                        {"batch_size": batch_size},
                     )
-
-                    if not root_tasks:
-                        break  # No more root tasks
-
-                    # Process each root task and its descendants
-                    for root_task in root_tasks:
-                        self._assign_task_tree_id_recursive(session, root_task.id, root_task.id)
-
-                    # Commit batch
-                    session.commit()
-
-                    total_processed += len(root_tasks)
-                    logger.info(
-                        f"✓ {self.id}: Auto-assigned task_tree_id for {len(root_tasks)} root task(s) "
-                        f"(total: {total_processed})"
-                    )
-
-                except Exception as batch_err:
-                    session.rollback()
-                    logger.warning(
-                        f"⚠ {self.id}: Error in batch (processed so far: {total_processed}): "
-                        f"{str(batch_err)}"
-                    )
-                    raise
-
-        except Exception as e:
-            logger.warning(f"⚠ {self.id}: Could not auto-assign task_tree_id: {str(e)}")
-            # Non-critical, continue
-        finally:
-            session.close()
+                    .scalars()
+                    .all()
+                )
+                if not root_ids:
+                    break
+                for root_id in root_ids:
+                    self._assign_task_tree_id_recursive(session, root_id, root_id)
+                session.commit()
+                total_processed += len(root_ids)
+                logger.info(
+                    f"{self.id}: Auto-assigned task_tree_id for {len(root_ids)} root task(s) "
+                    f"(total: {total_processed})"
+                )
 
     def _assign_task_tree_id_recursive(self, session: Session, task_id: str, tree_id: str) -> None:
-        """
-        Recursively assign task_tree_id to a task and all its descendants
-
-        Args:
-            session: SQLAlchemy session
-            task_id: ID of current task to update
-            tree_id: ID of root task (tree identifier)
-        """
-        # Update current task
-        task = session.query(TaskModel).filter(TaskModel.id == task_id).first()
-        if task and task.task_tree_id is None:
-            task.task_tree_id = tree_id
-            session.flush()  # Flush but don't commit yet
-
-        # Recursively update all children
-        children = (
-            session.query(TaskModel)
-            .filter(TaskModel.parent_id == task_id, TaskModel.task_tree_id.is_(None))
+        """Assign a tree ID using only columns present at this migration."""
+        session.execute(
+            text(
+                f"UPDATE {TASK_TABLE_NAME} SET task_tree_id = :tree_id "
+                "WHERE id = :task_id AND task_tree_id IS NULL"
+            ),
+            {"tree_id": tree_id, "task_id": task_id},
+        )
+        child_ids = (
+            session.execute(
+                text(
+                    f"SELECT id FROM {TASK_TABLE_NAME} "
+                    "WHERE parent_id = :task_id AND task_tree_id IS NULL"
+                ),
+                {"task_id": task_id},
+            )
+            .scalars()
             .all()
         )
-
-        for child in children:
-            self._assign_task_tree_id_recursive(session, child.id, tree_id)
+        for child_id in child_ids:
+            self._assign_task_tree_id_recursive(session, child_id, tree_id)
 
     def _add_has_references_with_copy(self, engine: Engine, table_name: str) -> None:
         """Fallback for databases that block column rename when dependencies exist.

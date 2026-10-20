@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sqlalchemy.orm import Session
+
 import asyncio
 from typing import Any, Awaitable, Callable
 from unittest.mock import AsyncMock, MagicMock
@@ -63,7 +65,7 @@ def _make_worker(
     lease_manager: MagicMock | None = None,
     idempotency_manager: MagicMock | None = None,
     task_executor: Callable[..., Awaitable[dict[str, Any]]] | None = None,
-    session_factory: MagicMock | None = None,
+    session_factory: Callable[[], Session] | None = None,
 ) -> WorkerRuntime:
     """Create a WorkerRuntime with mock dependencies."""
     cfg = config or _make_config()
@@ -132,9 +134,9 @@ class TestPolling:
 
         task_model = _make_task_model()
         session = MagicMock()
-        # Mock the chain: query().filter().limit().all()
+        # Mock the chain: query().filter().yield_per()
         query_mock = session.query.return_value.filter.return_value
-        query_mock.limit.return_value.all.return_value = [task_model]
+        query_mock.yield_per.return_value = [task_model]
         # get_bind() for dialect check
         session.get_bind.return_value.dialect.name = "sqlite"
         session.__enter__ = MagicMock(return_value=session)
@@ -162,7 +164,7 @@ class TestPolling:
 
         session = MagicMock()
         query_mock = session.query.return_value.filter.return_value
-        query_mock.limit.return_value.all.return_value = []
+        query_mock.yield_per.return_value = []
         session.get_bind.return_value.dialect.name = "sqlite"
         session.__enter__ = MagicMock(return_value=session)
         session.__exit__ = MagicMock(return_value=False)
@@ -195,7 +197,7 @@ class TestPolling:
 
         session = MagicMock()
         query_mock = session.query.return_value.filter.return_value
-        query_mock.limit.return_value.all.return_value = [ineligible_task]
+        query_mock.yield_per.return_value = [ineligible_task]
         session.get_bind.return_value.dialect.name = "sqlite"
         session.__enter__ = MagicMock(return_value=session)
         session.__exit__ = MagicMock(return_value=False)
@@ -223,7 +225,7 @@ class TestPolling:
 
         session = MagicMock()
         query_mock = session.query.return_value.filter.return_value
-        query_mock.limit.return_value.all.return_value = [eligible_task]
+        query_mock.yield_per.return_value = [eligible_task]
         session.get_bind.return_value.dialect.name = "sqlite"
         session.__enter__ = MagicMock(return_value=session)
         session.__exit__ = MagicMock(return_value=False)
@@ -621,9 +623,7 @@ class TestPollSkipsInFlight:
         lease_mgr.acquire_lease.return_value = _make_lease()
         task_model = _make_task_model()
         session = MagicMock()
-        session.query.return_value.filter.return_value.limit.return_value.all.return_value = [
-            task_model
-        ]
+        session.query.return_value.filter.return_value.yield_per.return_value = [task_model]
         session.get_bind.return_value.dialect.name = "sqlite"
         session.__enter__ = MagicMock(return_value=session)
         session.__exit__ = MagicMock(return_value=False)

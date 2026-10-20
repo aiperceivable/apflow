@@ -7,7 +7,10 @@ app enables governance — so every execution path (module/REST/MCP/A2A/schedule
 is consistently governed.
 """
 
+from decimal import Decimal
+
 import pytest
+from sqlalchemy.orm import Session
 
 from apflow.core.config import (
     clear_config,
@@ -18,7 +21,6 @@ from apflow.core.execution.task_executor import TaskExecutor
 from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
 from apflow.governance.budget import BudgetManager
 from apflow.governance.policy import CostPolicy, PolicyAction, PolicyEngine
-
 
 # --- Wiring: TaskExecutor builds governance components only when enabled ---
 
@@ -83,6 +85,34 @@ async def test_update_usage_accumulates_and_persists(sync_db_session):
     refreshed = await repo.get_task_by_id(task.id)
     assert refreshed is not None
     assert refreshed.token_usage["total"] == 400
+
+
+@pytest.mark.asyncio
+async def test_all_governance_fields_persist_after_identity_map_reload(
+    sync_db_session: Session,
+) -> None:
+    repository = TaskRepository(sync_db_session)
+    task = await repository.create_task(
+        "Governed task",
+        token_usage={"input": 30, "output": 20, "total": 50},
+        token_budget=1000,
+        estimated_cost_usd=Decimal("0.150000"),
+        actual_cost_usd=Decimal("0.025000"),
+        cost_policy="notify-at-eighty",
+    )
+    task_id = task.id
+    sync_db_session.expire_all()
+    sync_db_session.expunge_all()
+
+    restored = await repository.get_task_by_id(task_id)
+
+    assert restored is not None
+    assert restored is not task
+    assert restored.token_usage == {"input": 30, "output": 20, "total": 50}
+    assert restored.token_budget == 1000
+    assert restored.estimated_cost_usd == Decimal("0.150000")
+    assert restored.actual_cost_usd == Decimal("0.025000")
+    assert restored.cost_policy == "notify-at-eighty"
 
 
 # --- Policy evaluation drives the block/downgrade decision on exhaustion ---

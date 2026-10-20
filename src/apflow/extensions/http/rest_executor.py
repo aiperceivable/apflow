@@ -6,9 +6,10 @@ It supports authentication, custom headers, query parameters, and request bodies
 """
 
 import httpx
-from typing import Any, ClassVar, Dict, Literal, Optional
+from typing import Any, Dict, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 from apflow.core.base import BaseTask
+from apflow.core.execution.result_protocol import executor_result_schema
 from apflow.core.extensions.decorators import executor_register
 from apflow.core.execution.errors import NetworkError, ValidationError
 from apflow.core.utils.network_security import validate_url_not_private
@@ -99,8 +100,11 @@ class RestExecutor(BaseTask):
         "Send webhook notification",
         "Fetch data from HTTP service",
     ]
-    inputs_schema: ClassVar[type[BaseModel]] = RestInputSchema
-    outputs_schema: ClassVar[type[BaseModel]] = RestOutputSchema
+    inputs_schema: type[BaseModel] | Dict[str, Any] | None = RestInputSchema
+    result_format = "envelope"
+    outputs_schema: type[BaseModel] | Dict[str, Any] | None = executor_result_schema(
+        RestOutputSchema.model_json_schema()
+    )
 
     # Cancellation support: Can be cancelled by closing the HTTP client
     cancelable: bool = True
@@ -160,6 +164,14 @@ class RestExecutor(BaseTask):
         return response
 
     async def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """Separate provider business output from execution failure metadata."""
+        response = await self._execute_request(inputs)
+        outcome: Dict[str, Any] = {"result": response}
+        if response.get("success") is False:
+            outcome["error"] = str(response.get("error") or "HTTP request failed")
+        return outcome
+
+    async def _execute_request(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute an HTTP request
 
@@ -183,7 +195,7 @@ class RestExecutor(BaseTask):
         await self._validate_url_not_private(url)
 
         method = inputs.get("method", "GET").upper()
-        headers = {**self.default_headers, **inputs.get("headers", {})}
+        headers = {**self.default_headers, **(inputs.get("headers") or {})}
         params = inputs.get("params")
         json_data = inputs.get("json")
         data = inputs.get("data")

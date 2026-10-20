@@ -1,7 +1,9 @@
 {
   "include": ["src", "tests"],
   "pythonVersion": "3.11",
+  "venvPath": ".",
+  "venv": ".venv",
+  "exclude": ["site", "build", "dist", ".venv", ".git", "**/__pycache__"],
   "typeCheckingMode": "standard",
-  "reportUnusedVariable": "none",
-  "reportUnusedParameter": "none"
+  "reportUnusedVariable": "none"
 }

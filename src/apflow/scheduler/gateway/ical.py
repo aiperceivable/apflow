@@ -56,7 +56,7 @@ def fold_line(line: str) -> str:
     return "\r\n".join(result)
 
 
-def escape_text(text: str) -> str:
+def escape_text(text: Optional[str]) -> str:
     """
     Escape special characters in iCalendar text values.
     """
@@ -351,6 +351,8 @@ class ICalExporter:
 
         if schedule_type == "interval":
             # Interval in seconds - convert to appropriate frequency
+            if schedule_expression is None:
+                return None
             try:
                 seconds = int(schedule_expression)
                 if seconds >= 86400 and seconds % 86400 == 0:

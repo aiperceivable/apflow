@@ -26,7 +26,7 @@ from apflow.core.types import TaskPostHook, TaskPreHook
 from apflow.logger import get_logger
 
 if TYPE_CHECKING:
-    from apflow.core.storage.sqlalchemy.models import TaskModelType
+    from apflow.core.storage.sqlalchemy.models import TaskModel
 
 logger = get_logger(__name__)
 
@@ -242,10 +242,10 @@ class ConfigManager:
 
     # --- Registry delegation (hooks, task model, flags) ---
 
-    def set_task_model_class(self, cls: Optional["TaskModelType"]) -> None:
+    def set_task_model_class(self, cls: Optional["type[TaskModel]"]) -> None:
         self._registry.set_task_model_class(cls)
 
-    def get_task_model_class(self) -> "TaskModelType":
+    def get_task_model_class(self) -> "type[TaskModel]":
         return self._registry.get_task_model_class()
 
     def register_pre_hook(self, hook: TaskPreHook) -> None:

@@ -44,21 +44,13 @@ def _is_package_installed(package_name: str) -> bool:
     except Exception:
         pass
 
-    try:
-        # Python 3.8+ has importlib.metadata in stdlib
-        from importlib.metadata import distributions
-    except ImportError:
-        # Python 3.7 fallback (shouldn't be needed as we require 3.10+)
-        try:
-            from importlib_metadata import distributions
-        except ImportError:
-            return False
+    from importlib.metadata import distributions
 
     # Check all installed distributions WITHOUT importing
     package_normalized = package_name.lower().replace("-", "_")
     for dist in distributions():
         # Normalize package name (handle case differences, hyphens vs underscores)
-        dist_name = dist.metadata.get("Name", "").lower().replace("-", "_")
+        dist_name = (dist.metadata["Name"] or "").lower().replace("-", "_")
 
         if dist_name == package_normalized:
             return True

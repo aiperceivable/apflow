@@ -65,7 +65,8 @@ class TestWithDbSessionContext:
         from apflow.core.storage.factory import create_session
 
         test_session = create_session(connection_string=connection_string)
-        Base.metadata.create_all(test_session.bind)
+        assert isinstance(test_session, Session)
+        Base.metadata.create_all(test_session.get_bind())
         test_session.close()
 
         # Verify that create_pooled_session is called when use_pool=True
@@ -140,7 +141,8 @@ class TestWithDbSessionContext:
         from apflow.core.storage.factory import create_session
 
         test_session = create_session(connection_string=connection_string)
-        Base.metadata.create_all(test_session.bind)
+        assert isinstance(test_session, Session)
+        Base.metadata.create_all(test_session.get_bind())
         test_session.close()
 
         # Use pooled session to ensure proper isolation
@@ -149,23 +151,24 @@ class TestWithDbSessionContext:
         try:
             async with with_db_session_context(use_pool=True, auto_commit=True) as session:
                 # Patch rollback to track if it's called
-                original_rollback = session.rollback
                 if isinstance(session, AsyncSession):
+                    original_async_rollback = session.rollback
 
-                    async def tracked_rollback():
+                    async def tracked_async_rollback() -> None:
                         nonlocal rollback_called
                         rollback_called = True
-                        await original_rollback()
+                        await original_async_rollback()
 
-                    session.rollback = tracked_rollback
+                    session.rollback = tracked_async_rollback
                 else:
+                    original_sync_rollback = session.rollback
 
-                    def tracked_rollback():
+                    def tracked_sync_rollback() -> None:
                         nonlocal rollback_called
                         rollback_called = True
-                        original_rollback()
+                        original_sync_rollback()
 
-                    session.rollback = tracked_rollback
+                    session.rollback = tracked_sync_rollback
 
                 # Add a task object but don't commit
                 task = TaskModel(
@@ -193,7 +196,8 @@ class TestWithDbSessionContext:
         from apflow.core.storage.factory import create_session
 
         test_session = create_session(connection_string=connection_string)
-        Base.metadata.create_all(test_session.bind)
+        assert isinstance(test_session, Session)
+        Base.metadata.create_all(test_session.get_bind())
         test_session.close()
 
         # Set an old session in context
@@ -238,7 +242,8 @@ class TestWithDbSessionContext:
         from apflow.core.storage.factory import create_session
 
         test_session = create_session(connection_string=connection_string)
-        Base.metadata.create_all(test_session.bind)
+        assert isinstance(test_session, Session)
+        Base.metadata.create_all(test_session.get_bind())
         test_session.close()
 
         # Test that pooled session is created in the current event loop
@@ -275,7 +280,8 @@ class TestWithDbSessionContext:
         from apflow.core.storage.factory import create_session
 
         test_session = create_session(connection_string=connection_string)
-        Base.metadata.create_all(test_session.bind)
+        assert isinstance(test_session, Session)
+        Base.metadata.create_all(test_session.get_bind())
         test_session.close()
 
         async def create_task_in_context(task_id: str):

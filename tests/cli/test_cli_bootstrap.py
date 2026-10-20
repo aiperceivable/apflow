@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import click
 from click.testing import CliRunner
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -152,6 +153,7 @@ def test_task_group_registered_at_top_level() -> None:
     cli = _build_cli()
     assert "task" in cli.commands, "task group missing from top-level CLI"
     task_grp = cli.commands["task"]
+    assert isinstance(task_grp, click.Group)
     assert "create" in task_grp.commands
     assert "list" in task_grp.commands
     assert "get" in task_grp.commands
@@ -164,6 +166,7 @@ def test_schedule_group_registered_at_top_level() -> None:
     cli = _build_cli()
     assert "schedule" in cli.commands, "schedule group missing from top-level CLI"
     sched_grp = cli.commands["schedule"]
+    assert isinstance(sched_grp, click.Group)
     assert "set" in sched_grp.commands
     assert "due" in sched_grp.commands
     assert "trigger" in sched_grp.commands
@@ -181,5 +184,5 @@ def test_apflow_module_group_hidden_from_top_level_help() -> None:
         "Groups:" not in result.output
     ), "Groups section should be hidden after task/schedule promotion"
     # But the group must still be reachable for backward compat
-    apflow_grp = cli.get_command(None, "apflow")
+    apflow_grp = cli.get_command(click.Context(cli), "apflow")
     assert apflow_grp is not None, "apflow module group must remain accessible via get_command"

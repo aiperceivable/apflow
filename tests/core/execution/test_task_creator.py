@@ -994,6 +994,7 @@ class TestTaskCreator:
 
         # Refresh parent task from database to get updated has_children flag
         parent_task = await creator.task_repository.get_task_by_id(task_tree.task.id)
+        assert parent_task is not None
         assert parent_task.has_children is True
 
     @pytest.mark.asyncio

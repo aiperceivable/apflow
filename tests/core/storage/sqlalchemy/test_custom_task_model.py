@@ -9,7 +9,10 @@ Run these tests explicitly with: pytest -m no_auto_run
 """
 
 import pytest
-from sqlalchemy import Column, String, Integer
+from typing import Any, cast
+
+from sqlalchemy import String, Integer
+from sqlalchemy.orm import Mapped, mapped_column
 from apflow import (
     set_task_model_class,
     get_task_model_class,
@@ -33,8 +36,8 @@ class TestTaskModelCustomization:
         class CustomTaskModel(TaskModel):
             __tablename__ = "apflow_tasks"
             __table_args__ = {"extend_existing": True}
-            project_id = Column(String(255), nullable=True)  # Removed index=True to avoid conflicts
-            department = Column(String(100), nullable=True)
+            project_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+            department: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
         # Verify class was registered
         retrieved_class = get_task_model_class()
@@ -45,9 +48,10 @@ class TestTaskModelCustomization:
         """Test that task_model_register validates inheritance"""
         with pytest.raises(TypeError, match="must be a subclass of TaskModel"):
 
-            @task_model_register()
             class NotTaskModel:
                 pass
+
+            task_model_register()(cast(type[TaskModel], NotTaskModel))
 
     def test_set_task_model_class_validation(self):
         """Test that set_task_model_class validates inheritance"""
@@ -56,7 +60,7 @@ class TestTaskModelCustomization:
             pass
 
         with pytest.raises(TypeError, match="must be a subclass of TaskModel"):
-            set_task_model_class(NotTaskModel)
+            set_task_model_class(cast(type[TaskModel], NotTaskModel))
 
     def test_set_task_model_class_improved_error_message(self):
         """Test that set_task_model_class provides helpful error message"""
@@ -65,7 +69,7 @@ class TestTaskModelCustomization:
             pass
 
         try:
-            set_task_model_class(NotTaskModel)
+            set_task_model_class(cast(type[TaskModel], NotTaskModel))
             assert False, "Should have raised TypeError"
         except TypeError as e:
             error_msg = str(e)
@@ -77,9 +81,10 @@ class TestTaskModelCustomization:
         """Test that task_model_register provides helpful error message"""
         try:
 
-            @task_model_register()
             class NotTaskModel:
                 pass
+
+            task_model_register()(cast(type[TaskModel], NotTaskModel))
 
             assert False, "Should have raised TypeError"
         except TypeError as e:
@@ -94,9 +99,9 @@ class TestTaskModelCustomization:
         class ProjectTaskModel(TaskModel):
             __tablename__ = "apflow_tasks"
             __table_args__ = {"extend_existing": True}
-            project_id = Column(String(255), nullable=True)  # Removed index=True to avoid conflicts
-            department = Column(String(100), nullable=True)
-            priority_level = Column(Integer, default=2)
+            project_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+            department: Mapped[str | None] = mapped_column(String(100), nullable=True)
+            priority_level: Mapped[int] = mapped_column(Integer, default=2, nullable=True)
 
         # Verify model class
         model_class = get_task_model_class()
@@ -153,7 +158,7 @@ class TestCustomTaskModelWithRepository:
         """
         from apflow.core.storage.sqlalchemy.models import TASK_TABLE_NAME
         from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
-        from sqlalchemy import Column, String
+        from sqlalchemy import String
         from sqlalchemy import text
 
         # Drop existing table using raw SQL first
@@ -167,7 +172,7 @@ class TestCustomTaskModelWithRepository:
         class CustomTaskModel(TaskModel):
             __tablename__ = TASK_TABLE_NAME
             __table_args__ = {"extend_existing": True}
-            project_id = Column(String(255), nullable=True)
+            project_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
         # Create table with custom model
         CustomTaskModel.metadata.create_all(sync_db_session.bind)
@@ -196,11 +201,11 @@ class TestCustomTaskModelWithAgentExecutor:
         event_queue.enqueue_event = AsyncMock()
         return event_queue
 
-    def _create_request_context(self, tasks: list, metadata: dict = None):
+    def _create_request_context(self, tasks: list, metadata: dict[str, Any] | None = None):
         """Helper to create RequestContext with tasks array"""
         from unittest.mock import Mock
         from a2a.server.agent_execution import RequestContext
-        from a2a.types import Message, DataPart
+        from a2a.types import Message
         import uuid
 
         if metadata is None:
@@ -213,13 +218,13 @@ class TestCustomTaskModelWithAgentExecutor:
         # Option 1: Wrapped format (tasks array in first part)
         if len(tasks) == 1:
             data_part = Mock()
-            data_part.root = DataPart(data={"tasks": tasks})
+            data_part.root = Mock(data={"tasks": tasks})
             message.parts.append(data_part)
         else:
             # Option 2: Direct format (each part is a task)
             for task in tasks:
                 data_part = Mock()
-                data_part.root = DataPart(data=task)
+                data_part.root = Mock(data=task)
                 message.parts.append(data_part)
 
         context = Mock(spec=RequestContext)

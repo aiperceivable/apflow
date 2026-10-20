@@ -239,17 +239,119 @@ Execution ordering:    Controlled by DAG (dependencies), not by the tree
  "dependencies": [{"id": "B"}]},  # C is in Tree 1, depends on Tree 2's B
 ```
 
+### Executor Result Protocol
+
+New executors declare `result_format = "envelope"` and return an execution envelope:
+
+```python
+{
+    "result": {"answer": 42, "evidence": ["document-1"]},
+    "token_usage": {"input": 100, "output": 20, "total": 120},
+}
+```
+
+`result` contains the complete business output. `error` is an optional non-empty
+failure message (or `null`); a failure may include partial business output.
+`token_usage` is an optional object with non-negative integer `input`, `output`,
+and `total` counters; omitted `total` is calculated from input and output.
+Other outer keys are rejected: put business evidence and other outputs inside
+`result`. A successful envelope must include `result`, including when it is `null`.
+A failure may omit `result`; both runtime normalization and generated schemas
+accept that form. When a business output schema is declared, successful results
+must satisfy it, so successful `null` requires an explicitly nullable schema.
+Failures may use `null` instead of a business value or provide partial output
+that satisfies the business schema.
+
+TaskManager interprets the declared outer envelope once, stores its business
+payload in `TaskModel.result`, records the error separately, and accumulates usage
+in `TaskModel.token_usage`, even without budget enforcement. Failed executions
+and explicit cancellation responses can also report usage. Exceptions without
+usage metadata are not assigned estimated consumption. Returned failure envelopes
+are not automatically retried; the existing exception retry policy is unchanged.
+
+`get_output_schema()` describes the actual return from `execute()`. Envelope
+schemas contain the business schema inside `properties.result`. Built-in
+executors and generated function executors return envelopes; direct bridge calls
+also return and validate those envelopes. Explicit raw executor classes are
+wrapped by the bridge too, with a matching generated schema, because apcore
+module outputs must be objects even when business output is a scalar or null.
+Legacy bridge calls retain their original public return shape. The root execution API retains its
+`status`, `progress`, and `root_task_id` summary, with only the root business
+payload in its `result`, including `null`. Task retrieval returns the stored
+business payload and execution metadata in separate fields.
+
+Formats are explicit, never inferred from the presence of a business key:
+
+| `result_format` | Actual `execute()` return | Framework interpretation |
+|---|---|---|
+| `envelope` | `{result, error?, token_usage?}` | Extract one outer business result and process metadata |
+| `raw` | Any JSON business value | Preserve everything; business `error`, `result`, and `token_usage` have no special meaning |
+| `legacy` (default for existing executor classes) | Existing return value | Preserve the entire value while retaining historical top-level error/usage recognition |
+
+`@function_executor` treats the function's return as `raw` business output by
+default and wraps it once. Its `result_format` argument declares the underlying
+function's format; the generated executor always declares `envelope`. For raw
+functions, `output_schema` / `output_model` describes their business output and
+the adapter generates the outer schema. With `result_format="envelope"`, those
+parameters describe the complete function envelope instead.
+For legacy functions, the complete return value is preserved inside `result`;
+only `input`, `output`, and `total` are promoted from legacy `token_usage` into
+the generated envelope's execution metadata. Provider-specific counters remain
+available in the business payload.
+
+Executor-specific pre-hook shortcuts follow that executor's declared format;
+executor post-hooks see the original executor return. Task post-hooks see stored
+business output. `get_demo_result()` supplies a business example independently of
+`result_format`; `_demo_sleep` is consumed before wrapping, and dictionary demos
+receive a business `demo_mode` marker. Cancellation uses its separate control
+response (`status`, `result` or `partial_result`, `token_usage`), preserves empty
+partial results, and stores usage separately. A late normal return cannot
+replace an already cancelled task or count the cancellation usage again.
+Cancellation counters use the same total derivation as normal envelopes; invalid
+usage is logged and does not prevent cancellation. Custom envelope bridge calls
+are validated without adding omitted fields that their declared schema forbids.
+
 ### Dependency Result Injection
 
-When task D depends on B and C, their results are automatically merged into D's inputs before execution:
+Results flow through `dependencies`, which may connect parents, siblings, or
+other consumers. `parent_id` alone does not inject results.
 
 ```
-B completes → result: {"price": 9.99}
-C completes → result: {"price": 19.99}
+B completes → stored result: {"price": 9.99}
+C completes → stored result: {"price": 19.99}
 D starts    → inputs: {"B_id": {"price": 9.99}, "C_id": {"price": 19.99}}
 ```
 
-The injection is schema-aware — if input/output schemas are defined, fields are mapped by name. Without schemas, results are merged as-is.
+Each dependency supplies its stored business output under `inputs[dependency_id]`.
+Schema field names do not establish data bindings: request configuration such as
+`url` remains separate from an upstream response containing another `url`.
+Consumers explicitly select business fields from their dependencies. Aggregation
+collects these business outputs, without adding execution envelopes or usage.
+A business field named `result` inside stored output is never unwrapped again.
+
+Dependency ID keys are reserved for injected data and refreshed on every
+resolution. Values are deep-copied. Empty objects, lists, strings, zero, `false`,
+and `null` are valid completed outputs. A required dependency must be completed;
+business input requirements belong to the consumer's validation. An optional
+unavailable dependency removes a stale injected value. Copy, Mixed, and scheduled
+cloning clear keys for the original dependency IDs before new IDs are injected.
+Consumers must use their current dependency IDs rather than hard-code IDs from
+an earlier copy.
+
+**Migration:** Existing executor classes remain in explicit `legacy` mode until
+they declare another format. Custom subclasses overriding a built-in executor
+inherit its new `envelope` contract: update the override or explicitly declare
+`legacy` / `raw`. Declare `envelope` when returning the standard wrapper; declare `raw` when every returned key belongs to business data. Update
+direct calls to built-in/generated executors to read their outer `result`.
+Consumers previously using automatic flat schema mapping must read the dependency
+ID namespace and select the fields they need.
+
+Existing database rows are not guessed or rewritten. Their stored result remains
+opaque, even if it has a field named `result`. Re-execute with the declared new
+format, or explicitly convert a known historical envelope with
+`repository.update_task(task_id, result=known_envelope["result"])`, preserving its
+usage/error metadata separately. Only convert rows whose origin and format are
+known; do not apply this operation to arbitrary stored business dictionaries.
 
 ### Cascade Triggering
 

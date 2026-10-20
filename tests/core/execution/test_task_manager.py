@@ -151,6 +151,7 @@ class TestTaskManager:
 
         # Verify task completed successfully
         updated_task = await task_manager.task_repository.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.status == "completed"
 
     @pytest.mark.asyncio
@@ -221,7 +222,7 @@ class TestTaskManager:
 
         # Calculate progress
         progress = parent_node.calculate_progress()
-        assert progress == 1.0  # Average of 1.0 and 1.0
+        assert progress == pytest.approx(2 / 3)  # Root is still pending.
 
     @pytest.mark.asyncio
     async def test_task_tree_node_calculate_status(self, sync_db_session):
@@ -437,9 +438,11 @@ class TestTaskManager:
 
         resolved_data = await task_manager.resolve_task_dependencies(task)
 
-        # Should have resolved fields from dependency
-        assert resolved_data["url"] == "https://resolved.com"
-        assert resolved_data["data"] == "resolved"
+        # Without executor schemas, preserve dependency results under their IDs.
+        assert resolved_data[str(dep_task.id)] == {
+            "url": "https://resolved.com",
+            "data": "resolved",
+        }
         assert resolved_data["existing"] == "value"  # Existing data preserved
 
     @pytest.mark.asyncio
@@ -589,9 +592,12 @@ class TestResultErrorClassification:
         sync_db_session.refresh(task)
 
         manager = TaskManager(sync_db_session)
-        await manager._handle_task_execution_result(task, task.id, {"error": None, "value": 42})
+        await manager._handle_task_execution_result(
+            task, task.id, {"result": {"value": 42}, "error": None}
+        )
 
         refreshed = await repo.get_task_by_id(task.id)
+        assert refreshed is not None
         assert refreshed.status == "completed"
 
     @pytest.mark.asyncio
@@ -604,9 +610,12 @@ class TestResultErrorClassification:
         sync_db_session.refresh(task)
 
         manager = TaskManager(sync_db_session)
-        await manager._handle_task_execution_result(task, task.id, {"error": "boom"})
+        await manager._handle_task_execution_result(
+            task, task.id, {"result": None, "error": "boom"}
+        )
 
         refreshed = await repo.get_task_by_id(task.id)
+        assert refreshed is not None
         assert refreshed.status == "failed"
 
 
@@ -744,7 +753,7 @@ class TestCheckpointAndRetryDurability:
 
         result = await manager._execute_task_with_schemas(task, {"_checkpoint": checkpoint_data})
 
-        assert result == {"result": "ok"}
+        assert result == {"result": {"result": "ok"}}
         assert restored["data"] == checkpoint_data
 
     @pytest.mark.asyncio

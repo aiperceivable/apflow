@@ -180,6 +180,7 @@ class TestSessionPoolManager:
         assert manager.get_active_session_count() == 1
 
         # Replace close with a mock that raises
+        assert isinstance(session, Session)
         original_close = session.close
         session.close = MagicMock(side_effect=RuntimeError("close failed"))
 
@@ -296,7 +297,8 @@ class TestTaskTreeSession:
 
         async with create_task_tree_session(connection_string=connection_string) as session:
             # Create tables
-            Base.metadata.create_all(session.bind)
+            assert isinstance(session, Session)
+            Base.metadata.create_all(session.get_bind())
 
             # Perform a simple query
             result = session.execute(text("SELECT 1"))
@@ -331,7 +333,8 @@ class TestSessionPoolWithTaskExecutor:
         from apflow.core.storage.sqlalchemy.models import TaskModel as CleanTaskModel
 
         async with create_task_tree_session(connection_string=connection_string) as session:
-            Base.metadata.create_all(session.bind)
+            assert isinstance(session, Session)
+            Base.metadata.create_all(session.get_bind())
             repo = TaskRepository(session, task_model_class=CleanTaskModel)
             root_task = await repo.create_task(
                 id=root_task_id,
@@ -347,6 +350,7 @@ class TestSessionPoolWithTaskExecutor:
         async with create_task_tree_session(connection_string=connection_string) as session:
             repo = TaskRepository(session, task_model_class=TaskModel)
             root_task = await repo.get_task_by_id(root_task_id)
+            assert root_task is not None
             task_tree = TaskTreeNode(task=root_task)
 
             executor = TaskExecutor()
@@ -376,7 +380,8 @@ class TestSessionPoolWithTaskExecutor:
 
         # Create tables and tasks in the database
         async with create_task_tree_session(connection_string=connection_string) as session:
-            Base.metadata.create_all(session.bind)
+            assert isinstance(session, Session)
+            Base.metadata.create_all(session.get_bind())
             repo = TaskRepository(session, task_model_class=TaskModel)
             for i, task_id in enumerate(task_ids):
                 await repo.create_task(
@@ -395,6 +400,7 @@ class TestSessionPoolWithTaskExecutor:
             repo = TaskRepository(session, task_model_class=TaskModel)
             for task_id in task_ids:
                 root_task = await repo.get_task_by_id(task_id)
+                assert root_task is not None
                 task_tree = TaskTreeNode(task=root_task)
                 task_trees.append((task_tree, task_id))
 
@@ -433,7 +439,8 @@ class TestSessionPoolWithTaskExecutor:
 
         # Create tables
         async with create_task_tree_session(connection_string=connection_string) as session:
-            Base.metadata.create_all(session.bind)
+            assert isinstance(session, Session)
+            Base.metadata.create_all(session.get_bind())
 
         # Create two tasks in different sessions
         async with create_task_tree_session(connection_string=connection_string) as session1:
@@ -478,7 +485,8 @@ class TestSessionPoolWithTaskExecutor:
 
         # Create tables and tasks in the database
         async with create_task_tree_session(connection_string=connection_string) as session:
-            Base.metadata.create_all(session.bind)
+            assert isinstance(session, Session)
+            Base.metadata.create_all(session.get_bind())
             repo = TaskRepository(session, task_model_class=TaskModel)
             for i, task_id in enumerate(task_ids):
                 await repo.create_task(
@@ -497,6 +505,7 @@ class TestSessionPoolWithTaskExecutor:
                 async with create_task_tree_session(connection_string=connection_string) as session:
                     repo = TaskRepository(session, task_model_class=TaskModel)
                     root_task = await repo.get_task_by_id(task_id)
+                    assert root_task is not None
                     if root_task is None:
                         return None
                     task_tree = TaskTreeNode(task=root_task)
@@ -537,7 +546,6 @@ class TestSessionPoolWithTaskExecutor:
         # Use default TaskModel - setup_method already ensures clean metadata
         from apflow.core.storage.sqlalchemy.models import (
             TaskModel as CleanTaskModel,
-            Base as CleanBase,
         )
 
         db_path = tmp_path / "test.db"
@@ -548,7 +556,8 @@ class TestSessionPoolWithTaskExecutor:
 
         # Create tables and tasks in the database
         async with create_task_tree_session(connection_string=connection_string) as session:
-            CleanBase.metadata.create_all(session.bind)
+            assert isinstance(session, Session)
+            Base.metadata.create_all(session.get_bind())
             repo = TaskRepository(session, task_model_class=CleanTaskModel)
             for i, task_id in enumerate(task_ids):
                 await repo.create_task(
@@ -566,6 +575,7 @@ class TestSessionPoolWithTaskExecutor:
             async with create_task_tree_session(connection_string=connection_string) as session:
                 repo = TaskRepository(session, task_model_class=CleanTaskModel)
                 root_task = await repo.get_task_by_id(task_id)
+                assert root_task is not None
                 task_tree = TaskTreeNode(task=root_task)
                 executor = TaskExecutor()
                 result = await executor.execute_task_tree(
@@ -611,7 +621,8 @@ class TestSessionPoolWithTaskExecutor:
         from apflow.core.storage.sqlalchemy.models import TaskModel as CleanTaskModel
 
         async with create_task_tree_session(connection_string=connection_string) as session:
-            Base.metadata.create_all(session.bind)
+            assert isinstance(session, Session)
+            Base.metadata.create_all(session.get_bind())
             repo = TaskRepository(session, task_model_class=CleanTaskModel)
             await repo.create_task(
                 id=root_task_id,
@@ -627,6 +638,7 @@ class TestSessionPoolWithTaskExecutor:
         async with create_task_tree_session(connection_string=connection_string) as session:
             repo = TaskRepository(session, task_model_class=TaskModel)
             root_task = await repo.get_task_by_id(root_task_id)
+            assert root_task is not None
             task_tree = TaskTreeNode(task=root_task)
 
         async with create_task_tree_session(connection_string=connection_string) as session:

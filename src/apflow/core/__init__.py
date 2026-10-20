@@ -19,6 +19,61 @@ which is the standard protocol for agent communication. See api/ module for A2A 
 Performance: Uses lazy imports to avoid loading heavy modules at package import time.
 """
 
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from apflow.core.base import (
+        BaseTask,
+    )
+    from apflow.core.builders import (
+        TaskBuilder,
+    )
+    from apflow.core.config import (
+        get_post_hooks,
+        get_pre_hooks,
+    )
+    from apflow.core.decorators import (
+        clear_config,
+        get_require_existing_tasks,
+        get_task_model_class,
+        get_use_task_creator,
+        register_post_hook,
+        register_pre_hook,
+        set_require_existing_tasks,
+        set_task_model_class,
+        set_use_task_creator,
+    )
+    from apflow.core.execution import (
+        StreamingCallbacks,
+        TaskCreator,
+        TaskManager,
+    )
+    from apflow.core.extensions import (
+        Extension,
+        ExtensionCategory,
+        ExtensionRegistry,
+        executor_register,
+        get_registry,
+        hook_register,
+        register_extension,
+        storage_register,
+    )
+    from apflow.core.interfaces import (
+        ExecutableTask,
+    )
+    from apflow.core.storage import (
+        create_session,
+        get_default_session,
+        get_hook_repository,
+        get_hook_session,
+    )
+    from apflow.core.types import (
+        TaskPostHook,
+        TaskPreHook,
+        TaskStatus,
+        TaskTreeNode,
+    )
+
 __all__ = [
     # Base interfaces
     "ExecutableTask",
@@ -63,7 +118,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> Any:
     """Lazy import to avoid loading heavy modules at package import time"""
     # Base interfaces
     if name == "ExecutableTask":

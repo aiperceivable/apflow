@@ -2,10 +2,11 @@
 
 import base64
 from unittest.mock import patch
+from typing import cast
 
 import pytest
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
 
 from apflow.core.storage.sqlalchemy.models import Base
 from apflow.durability.checkpoint import CheckpointManager
@@ -119,7 +120,7 @@ class TestDeleteCheckpoints:
 class TestCheckpointManagerInit:
     def test_none_db_raises(self):
         with pytest.raises(TypeError, match="must not be None"):
-            CheckpointManager(None)
+            CheckpointManager(cast(Session, None))
 
 
 class TestCommitRollsBackOnFailure:

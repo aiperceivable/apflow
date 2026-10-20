@@ -113,6 +113,7 @@ class TestTaskRepository:
 
         # Retrieve and verify
         updated_task = await repo.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.status == "completed"
         assert updated_task.result == {"output": "result"}
         assert float(updated_task.progress) == 1.0
@@ -133,6 +134,7 @@ class TestTaskRepository:
 
         # Retrieve and verify
         updated_task = await repo.get_task_by_id(task.id)
+        assert updated_task is not None
         assert updated_task.inputs == new_input
 
     @pytest.mark.asyncio

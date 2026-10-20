@@ -2,8 +2,43 @@
 
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
+from typing import Any
+from jsonschema.validators import validator_for
 from apflow.bridge.registry_setup import create_apflow_registry
 from apflow.bridge.module_adapter import ExecutableTaskModuleAdapter
+from apflow.core.base import BaseTask
+from apflow.core.extensions.decorators import executor_register
+
+TASK_AND_SCHEDULE_MODULES = {
+    "task.create",
+    "task.create_tree",
+    "task.execute",
+    "task.cancel",
+    "task.get",
+    "task.update",
+    "task.list",
+    "task.delete",
+    "task.tree",
+    "task.children",
+    "task.link",
+    "task.copy",
+    "task.archive",
+    "task.clone_mixed",
+    "task.running",
+    "task.scheduled",
+    "schedule.set",
+    "schedule.due",
+    "schedule.trigger",
+    "schedule.complete",
+    "schedule.history",
+    "schedule.export_ical",
+}
+BUILTIN_EXECUTORS = {
+    "rest_executor",
+    "send_email_executor",
+    "aggregate_results_executor",
+    "apflow_api_executor",
+}
 
 
 def _mock_dependencies():
@@ -37,23 +72,47 @@ class TestCreateApflowRegistry:
         modules = list(registry.list())
         assert len(modules) > 5  # At least 5 task modules
 
-    def test_task_modules_registered(self):
+    def test_task_modules_registered(self) -> None:
         manager, creator, repo = _mock_dependencies()
         registry = create_apflow_registry(manager, creator, repo)
         modules = list(registry.list())
-        assert "apflow.task.create" in modules
-        assert "apflow.task.execute" in modules
-        assert "apflow.task.list" in modules
-        assert "apflow.task.get" in modules
-        assert "apflow.task.delete" in modules
+        actual = {
+            module.removeprefix("apflow.")
+            for module in modules
+            if module.startswith(("apflow.task.", "apflow.schedule."))
+        }
+        assert actual == TASK_AND_SCHEDULE_MODULES
 
-    def test_executor_modules_registered(self):
+    def test_executor_modules_registered(self) -> None:
         manager, creator, repo = _mock_dependencies()
         registry = create_apflow_registry(manager, creator, repo)
         modules = list(registry.list())
-        # At least one executor (e.g., rest_executor) should be registered
-        executor_modules = [m for m in modules if not m.startswith("apflow.task.")]
-        assert len(executor_modules) > 0
+        assert {f"apflow.{executor}" for executor in BUILTIN_EXECUTORS}.issubset(modules)
+
+    def test_every_registered_module_has_valid_input_and_output_schemas(self) -> None:
+        manager, creator, repo = _mock_dependencies()
+        registry = create_apflow_registry(manager, creator, repo)
+        for module_id in registry.list():
+            definition = registry.get_definition(module_id)
+            assert definition is not None
+            for schema in (definition.input_schema, definition.output_schema):
+                assert isinstance(schema, dict) and schema, module_id
+                assert schema.get("type") == "object", module_id
+                validator_for(schema).check_schema(schema)
+
+    def test_decorated_executor_automatically_appears_in_apcore_registry(self) -> None:
+        @executor_register()
+        class AcceptanceExecutor(BaseTask):
+            id = "acceptance_decorated_executor"
+            name = "Acceptance executor"
+            description = "Verify automatic bridge registration"
+
+            async def execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
+                return {"received": inputs}
+
+        manager, creator, repository = _mock_dependencies()
+        registry = create_apflow_registry(manager, creator, repository)
+        assert registry.has("apflow.acceptance_decorated_executor")
 
     def test_custom_namespace(self):
         manager, creator, repo = _mock_dependencies()
