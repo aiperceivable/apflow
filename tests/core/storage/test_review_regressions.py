@@ -1,6 +1,7 @@
 """Regression coverage for storage and scheduling review findings."""
 
 import importlib
+import sys
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -84,17 +85,85 @@ async def test_complete_scheduled_run_checks_loaded_sqlite_end_boundary(
     ("schedule_type", "expression"),
     [("daily", "09:00"), ("weekly", "1 09:00"), ("monthly", "1 09:00")],
 )
+@pytest.mark.parametrize(("month", "utc_hour"), [(1, 14), (7, 13)])
 def test_calculate_schedule_converts_aware_reference_to_requested_timezone(
-    schedule_type: str, expression: str
+    schedule_type: str,
+    expression: str,
+    month: int,
+    utc_hour: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setitem(sys.modules, "pytz", None)
     result = ScheduleCalculator.calculate_next_run(
         schedule_type,
         expression,
-        datetime(2024, 1, 1, tzinfo=timezone.utc),
+        datetime(2024, month, 1, tzinfo=timezone.utc),
         "America/New_York",
     )
 
+    assert result == datetime(2024, month, 1, utc_hour, tzinfo=timezone.utc)
+
+
+def test_current_schedule_time_uses_requested_timezone_without_pytz(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "pytz", None)
+    before = datetime.now(timezone.utc)
+
+    result = ScheduleCalculator._get_current_time("America/New_York")
+
+    assert before <= result <= datetime.now(timezone.utc)
+    assert getattr(result.tzinfo, "key", None) == "America/New_York"
+
+
+def test_localize_schedule_time_interprets_naive_reference_without_pytz(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "pytz", None)
+
+    result = ScheduleCalculator._localize_time(datetime(2024, 1, 1, 9), "America/New_York")
+
     assert result == datetime(2024, 1, 1, 14, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("aware", [False, True])
+def test_localize_schedule_time_preserves_invalid_timezone_fallback(aware: bool) -> None:
+    reference = datetime(2024, 1, 1, tzinfo=timezone.utc if aware else None)
+
+    result = ScheduleCalculator._localize_time(reference, "Invalid/Timezone")
+
+    assert result == datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(("month", "day", "utc_hour"), [(3, 9, 13), (11, 2, 14)])
+def test_daily_schedule_updates_utc_offset_across_daylight_saving(
+    month: int, day: int, utc_hour: int
+) -> None:
+    result = ScheduleCalculator.calculate_next_run(
+        "daily",
+        "09:00",
+        datetime(2024, month, day, 15, tzinfo=timezone.utc),
+        "America/New_York",
+    )
+
+    assert result == datetime(2024, month, day + 1, utc_hour, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        datetime(2024, 3, 10, 5, 30, tzinfo=timezone.utc),
+        datetime(2024, 11, 3, 4, 30, tzinfo=timezone.utc),
+    ],
+)
+def test_interval_schedule_preserves_elapsed_seconds_across_daylight_saving(
+    reference: datetime,
+) -> None:
+    result = ScheduleCalculator.calculate_next_run(
+        "interval", "10800", reference, "America/New_York"
+    )
+
+    assert result == reference + timedelta(hours=3)
 
 
 @pytest.mark.parametrize(

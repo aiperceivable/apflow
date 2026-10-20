@@ -16,6 +16,7 @@ Expression Formats:
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 import re
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apflow.core.distributed.config import as_utc
 from apflow.core.storage.sqlalchemy.models import ScheduleType
@@ -84,45 +85,23 @@ class ScheduleCalculator:
     @staticmethod
     def _get_current_time(timezone_str: Optional[str] = None) -> datetime:
         """Get current time, optionally in a specific timezone."""
-        from datetime import timezone as tz
-
-        now = datetime.now(tz.utc)
-
+        now = datetime.now(timezone.utc)
         if timezone_str:
-            try:
-                import pytz
-
-                tz_obj = pytz.timezone(timezone_str)
-                now = now.astimezone(tz_obj)
-            except ImportError:
-                pass  # pytz not available, use UTC
-            except Exception:
-                pass  # Invalid timezone, use UTC
-
+            return ScheduleCalculator._localize_time(now, timezone_str)
         return now
 
     @staticmethod
     def _localize_time(dt: datetime, timezone_str: str) -> datetime:
-        """Localize a naive datetime to a timezone."""
+        """Interpret a naive time or convert an aware time to the requested timezone."""
         try:
-            import pytz
-
-            tz_obj = pytz.timezone(timezone_str)
+            tz_obj = ZoneInfo(timezone_str)
+        except (ZoneInfoNotFoundError, ValueError):
             if dt.tzinfo is None:
-                return tz_obj.localize(dt)
-            return dt.astimezone(tz_obj)
-        except ImportError:
-            from datetime import timezone as tz
-
-            if dt.tzinfo is None:
-                return dt.replace(tzinfo=tz.utc)
+                return dt.replace(tzinfo=timezone.utc)
             return dt
-        except Exception:
-            from datetime import timezone as tz
-
-            if dt.tzinfo is None:
-                return dt.replace(tzinfo=tz.utc)
-            return dt
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=tz_obj)
+        return dt.astimezone(tz_obj)
 
     @staticmethod
     def _calculate_once(
@@ -168,14 +147,18 @@ class ScheduleCalculator:
 
         Expression format: Seconds as integer string (e.g., "3600" for 1 hour)
 
-        Returns from_time + interval seconds.
+        Returns the time after the specified number of elapsed seconds.
         """
         try:
             seconds = int(expression)
             if seconds <= 0:
                 raise ValueError(f"Interval must be positive: {expression}")
 
-            return from_time + timedelta(seconds=seconds)
+            interval = timedelta(seconds=seconds)
+            if from_time.tzinfo is not None:
+                next_time = from_time.astimezone(timezone.utc) + interval
+                return next_time.astimezone(from_time.tzinfo)
+            return from_time + interval
         except (ValueError, TypeError) as e:
             if "Interval must be positive" in str(e):
                 raise
