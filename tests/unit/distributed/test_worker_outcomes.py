@@ -385,6 +385,178 @@ def test_recover_lease_rolls_back_ownership_when_reconciliation_fails(
         assert session.get(WorkflowRun, "root") is None
 
 
+async def _record_running_invocation(sessions: sessionmaker[Session], task_id: str) -> None:
+    from datetime import datetime, timezone
+    from apflow.core.execution.runs import RunService
+    from apflow.core.storage.sqlalchemy.models import (
+        BudgetAccount,
+        BudgetReservation,
+        ExecutionAttempt,
+    )
+
+    with sessions() as session:
+        await RunService(session).start_run(task_id)
+        stored = session.get(TaskModel, task_id)
+        assert stored is not None
+        stored.status = "in_progress"
+        stored.started_at = datetime.now(timezone.utc)
+        session.add_all(
+            [
+                ExecutionAttempt(
+                    id="invocation",
+                    task_id=task_id,
+                    run_id=task_id,
+                    attempt_id=0,
+                    attempt_number=1,
+                    status="running",
+                    started_at=stored.started_at,
+                ),
+                BudgetAccount(scope_id="scope", limit_tokens=10, reserved_tokens=5),
+                BudgetReservation(
+                    id="invocation",
+                    scope_id="scope",
+                    task_id=task_id,
+                    reserved_tokens=5,
+                    state="reserved",
+                ),
+            ]
+        )
+        session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome", ["in_progress", "cancelling", "execution_cancelled", "shutdown"]
+)
+async def test_worker_recovery_failure_preserves_lease_until_janitor_reconciles(
+    worker_sessions: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    from datetime import datetime, timedelta, timezone
+    from apflow.core.storage.sqlalchemy.models import (
+        BudgetAccount,
+        ExecutionAttempt,
+        TaskLease,
+        WorkflowRun,
+    )
+
+    started = asyncio.Event()
+
+    async def execute(task: TaskModel) -> dict[str, Any]:
+        await _record_running_invocation(worker_sessions, task.id)
+        started.set()
+        if outcome == "shutdown":
+            await asyncio.Event().wait()
+        if outcome == "execution_cancelled":
+            raise asyncio.CancelledError()
+        return {"status": outcome}
+
+    worker = _worker(worker_sessions, execute)
+    with worker_sessions() as session:
+        task = TaskModel(id="recovery-failure-root", name="Root")
+        session.add(task)
+        session.commit()
+        session.expunge(task)
+
+    def fail(*arguments: Any) -> bool:
+        raise RuntimeError("Recovery storage failure")
+
+    with monkeypatch.context() as injected:
+        injected.setattr(worker._lease_manager, "_reconcile_run", fail)
+        with pytest.raises(RuntimeError, match="Recovery storage failure"):
+            if outcome == "shutdown":
+                active = asyncio.create_task(worker._execute_task(task))
+                active.add_done_callback(worker._observe_task_failure)
+                worker._running_tasks[task.id] = active
+                await asyncio.wait_for(started.wait(), timeout=5)
+                await worker.shutdown()
+            else:
+                await worker._execute_task(task)
+    assert worker._active_leases == {} and worker._running_tasks == {}
+    with worker_sessions() as session:
+        stored = session.get(TaskModel, task.id)
+        run = session.get(WorkflowRun, task.id)
+        invocation = session.get(ExecutionAttempt, "invocation")
+        lease = session.get(TaskLease, task.id)
+        account = session.get(BudgetAccount, "scope")
+        assert stored is not None and stored.status == "in_progress"
+        assert run is not None and run.status == "running"
+        assert invocation is not None and invocation.status == "running"
+        assert account is not None and account.reserved_tokens == 5
+        assert session.query(ExecutionIdempotency).count() == 0
+        assert lease is not None
+        lease.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        session.commit()
+    assert worker._lease_manager.cleanup_expired_leases() == [task.id]
+    assert worker._find_executable_tasks() == []
+    with worker_sessions() as session:
+        run = session.get(WorkflowRun, task.id)
+        invocation = session.get(ExecutionAttempt, "invocation")
+        account = session.get(BudgetAccount, "scope")
+        assert session.get(TaskLease, task.id) is None
+        assert run is not None and run.status == "reconciliation_required"
+        assert invocation is not None and invocation.status == "unknown"
+        assert account is not None and account.reserved_tokens == 0
+        assert account.unknown_tokens == 5
+
+
+@pytest.mark.asyncio
+async def test_worker_observes_background_recovery_error_with_redacted_diagnostics(
+    worker_sessions: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import gc
+    from apflow.core.config_manager import get_config_manager
+    from apflow.core.storage.sqlalchemy.models import TaskLease
+
+    secret = "synthetic\\pass'word"
+    monkeypatch.setenv("APFLOW_TEST_BACKGROUND_SECRET", secret)
+    configuration = get_config_manager()
+    monkeypatch.setattr(configuration, "_data", dict(configuration._data))
+    configuration.set(
+        "security.credentials", [{"id": "test", "env_var": "APFLOW_TEST_BACKGROUND_SECRET"}]
+    )
+
+    async def execute(task: TaskModel) -> dict[str, Any]:
+        await _record_running_invocation(worker_sessions, task.id)
+        return {"status": "in_progress"}
+
+    worker = _worker(worker_sessions, execute)
+
+    def fail(*arguments: Any) -> bool:
+        worker._shutdown_event.set()
+        raise RuntimeError(f"Recovery storage failure: {{'credential': {secret!r}}}")
+
+    monkeypatch.setattr(worker._lease_manager, "_reconcile_run", fail)
+    with worker_sessions() as session:
+        session.add(TaskModel(id="background-root", name="Root"))
+        session.commit()
+    loop = asyncio.get_running_loop()
+    prior_handler = loop.get_exception_handler()
+    unobserved: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda current_loop, context: unobserved.append(context))
+    try:
+        await asyncio.wait_for(worker._poll_loop(), timeout=5)
+        for _ in range(4):
+            await asyncio.sleep(0)
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(prior_handler)
+    assert unobserved == []
+    errors = [record.getMessage() for record in caplog.records if record.levelname == "ERROR"]
+    assert any(
+        "Recovery storage failure" in message and "background-root" in message for message in errors
+    )
+    assert all(secret not in message and repr(secret)[1:-1] not in message for message in errors)
+    assert any("***REDACTED***" in message for message in errors)
+    with worker_sessions() as session:
+        assert session.get(TaskLease, "background-root") is not None
+        assert session.query(ExecutionIdempotency).count() == 0
+
+
 @pytest.mark.asyncio
 async def test_worker_failure_redacts_cached_error_and_events(
     worker_sessions: sessionmaker[Session],

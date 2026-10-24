@@ -26,7 +26,7 @@ from apflow.core.storage.sqlalchemy.models import (
     WorkflowRun,
 )
 from apflow.logger import get_logger
-from apflow.core.utils.credentials import redact_public_data
+from apflow.core.utils.credentials import log_public_exception, redact_public_data
 
 logger = get_logger(__name__)
 
@@ -93,13 +93,22 @@ class WorkerRuntime:
             task.cancel()
             logger.info("Cancelled running task: %s", task_id)
 
+        recovery_errors: list[Exception] = []
         if self._running_tasks:
-            await asyncio.gather(*self._running_tasks.values(), return_exceptions=True)
+            outcomes = await asyncio.gather(*self._running_tasks.values(), return_exceptions=True)
+            recovery_errors = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
 
         for task_id, token in list(self._active_leases.items()):
             self._lease_manager.recover_lease(task_id, token)
 
         self._node_registry.deregister_node(self._node_id)
+        if recovery_errors:
+            logger.error(
+                "Worker %s shut down with %s task recovery failures",
+                self._node_id,
+                len(recovery_errors),
+            )
+            raise recovery_errors[0]
         logger.info("Worker %s shut down gracefully", self._node_id)
 
     async def _poll_loop(self) -> None:
@@ -121,7 +130,8 @@ class WorkerRuntime:
                         # constraint; this is a pull model with no central
                         # dispatcher, so ineligible tasks are simply not leased.
                         continue
-                    exec_task = asyncio.create_task(self._execute_task(task))
+                    exec_task = asyncio.create_task(self._execute_task(task), name=task_id)
+                    exec_task.add_done_callback(self._observe_task_failure)
                     self._running_tasks[task_id] = exec_task
             except Exception:
                 logger.error("Error in poll loop for worker %s", self._node_id, exc_info=True)
@@ -133,6 +143,18 @@ class WorkerRuntime:
                 )
             except asyncio.TimeoutError:
                 pass
+
+    def _observe_task_failure(self, task: asyncio.Task[None]) -> None:
+        """Retrieve background errors without changing their durable recovery state."""
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            log_public_exception(
+                logger,
+                f"Worker {self._node_id} task {task.get_name()} lifecycle failed",
+                error,
+            )
 
     async def _heartbeat_loop(self) -> None:
         """Send heartbeat at config.heartbeat_interval_seconds."""
@@ -276,47 +298,12 @@ class WorkerRuntime:
             renewal_task = asyncio.create_task(self._renew_lease_loop(task_id, token))
 
             try:
-                is_cached, cached_result = self._idempotency.check_cached_result(key)
-
-                if is_cached and cached_result is not None:
-                    result = cached_result
-                else:
-                    emit_task_event(self._session_factory, task_id, "task_started", self._node_id)
-                    result = await self._execute_with_lease_context(task, token)
-
-                if result.get("status") in ("failed", "error"):
-                    self._report_failure(
-                        task_id,
-                        attempt_id,
-                        token,
-                        str(
-                            result.get("error") or result.get("message") or "Task execution failed"
-                        ),
-                        key,
-                    )
-                    return
-                outcome = result.get("status", "completed")
-                if outcome in {"cancelled", "cancelling"}:
-                    if outcome == "cancelled":
-                        self._finalize_task(task_id, token, "cancelled")
-                    else:
-                        self._lease_manager.recover_lease(task_id, token)
-                    return
-                if outcome != "completed":
-                    logger.warning(
-                        "Task %s returned nonterminal outcome %s; releasing lease", task_id, outcome
-                    )
-                    self._lease_manager.recover_lease(task_id, token)
-                    return
-                if self._report_completion(task_id, token, result) and not is_cached:
-                    self._idempotency.store_result(task_id, attempt_id, key, result, "completed")
+                await self._execute_and_report(task, token, key)
             except asyncio.CancelledError:
                 logger.warning("Task %s cancelled", task_id)
                 # Cancellation cannot prove whether external side effects completed.
                 self._lease_manager.recover_lease(task_id, token)
                 raise
-            except Exception as exc:
-                self._report_failure(task_id, attempt_id, token, str(exc), key)
             finally:
                 renewal_task.cancel()
                 try:
@@ -325,6 +312,41 @@ class WorkerRuntime:
                     pass
                 self._running_tasks.pop(task_id, None)
                 self._active_leases.pop(task_id, None)
+
+    async def _execute_and_report(self, task: TaskModel, token: str, key: str) -> None:
+        """Report executor failures without treating recovery failures as task outcomes."""
+        task_id = cast(str, task.id)
+        attempt_id = cast(int, task.attempt_id)
+        is_cached, cached_result = self._idempotency.check_cached_result(key)
+        if is_cached and cached_result is not None:
+            result = cached_result
+        else:
+            emit_task_event(self._session_factory, task_id, "task_started", self._node_id)
+            try:
+                result = await self._execute_with_lease_context(task, token)
+            except Exception as exc:
+                self._report_failure(task_id, attempt_id, token, str(exc), key)
+                return
+
+        outcome = result.get("status", "completed")
+        if outcome in {"failed", "error"}:
+            self._report_failure(
+                task_id,
+                attempt_id,
+                token,
+                str(result.get("error") or result.get("message") or "Task execution failed"),
+                key,
+            )
+        elif outcome == "cancelled":
+            self._finalize_task(task_id, token, "cancelled")
+        elif outcome != "completed":
+            logger.warning(
+                "Task %s returned nonterminal outcome %s; recovering lease", task_id, outcome
+            )
+            # Recovery errors must preserve the rolled-back lease for the janitor.
+            self._lease_manager.recover_lease(task_id, token)
+        elif self._report_completion(task_id, token, result) and not is_cached:
+            self._idempotency.store_result(task_id, attempt_id, key, result, "completed")
 
     async def _execute_with_lease_context(self, task: TaskModel, token: str) -> dict[str, Any]:
         """Fence every inner DAG transition with this root's live worker lease."""

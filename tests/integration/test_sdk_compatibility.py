@@ -53,6 +53,110 @@ async def _mcp_client(
 ModuleCall = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
+@pytest.fixture
+def strict_output_app(tmp_path: Path, reset_storage_singleton: None) -> Iterator[ApflowApp]:
+    from apflow.core.base import BaseTask
+    from apflow.core.extensions import get_registry
+
+    class StrictOutputExecutor(BaseTask):
+        id = "strict_output_probe"
+        name = "Strict output probe"
+        description = "Return valid sensitive values with constrained output types."
+        inputs_schema = {"type": "object", "properties": {"invalid": {"type": "boolean"}}}
+        outputs_schema = {
+            "type": "object",
+            "properties": {
+                "token": {
+                    "type": "object",
+                    "properties": {"expires_in": {"type": "integer"}},
+                    "required": ["expires_in"],
+                },
+                "private": {"type": "integer", "x-sensitive": True},
+                "receipt": {"enum": ["private-receipt"], "x-sensitive": True},
+                "token_usage": {"type": "object"},
+            },
+            "required": ["token", "private", "receipt", "token_usage"],
+        }
+
+        async def execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "token": {"expires_in": "invalid" if inputs.get("invalid") else 30},
+                "private": 123,
+                "receipt": "private-receipt",
+                "token_usage": {"total": 7},
+            }
+
+    registry = get_registry()
+    registry.register(StrictOutputExecutor(), executor_class=StrictOutputExecutor)
+    application = create_app(connection_string=f"sqlite:///{tmp_path / 'strict-output.db'}")
+    try:
+        yield application
+    finally:
+        application.session.close()
+        application.session.get_bind().engine.dispose()
+        registry.unregister(StrictOutputExecutor.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "protocol",
+    ["native", "native-stream", "public", "public-trace", "public-stream", "rest", "rest-stream"],
+)
+async def test_direct_executor_validates_before_public_redaction(
+    strict_output_app: ApflowApp, protocol: str
+) -> None:
+    from apflow.api.rest import build_rest_app
+    from starlette.testclient import TestClient
+
+    module_id = "apflow.strict_output_probe"
+    native = Executor.from_registry(strict_output_app.registry)
+    public = PublicExecutor(native)
+    if protocol.startswith("rest"):
+        with TestClient(build_rest_app(strict_output_app.registry)) as client:
+            response = client.post(
+                f"/modules/{module_id}",
+                json={},
+                headers={"Accept": "text/event-stream"} if protocol == "rest-stream" else {},
+            )
+        assert response.status_code == 200, response.text
+        assert "event: error" not in response.text
+        output = (
+            json.loads(response.text.split("data: ", 1)[1].splitlines()[0])
+            if protocol == "rest-stream"
+            else response.json()
+        )
+    elif protocol in {"native-stream", "public-stream"}:
+        executor = native if protocol == "native-stream" else public
+        output = [chunk async for chunk in executor.stream(module_id, {})][0]
+    elif protocol == "public-trace":
+        output, _trace = await public.call_async_with_trace(module_id, {})
+    else:
+        output = await (native if protocol == "native" else public).call_async(module_id, {})
+    assert output["token_usage"] == {"total": 7}
+    if protocol.startswith("native"):
+        assert output["token"] == {"expires_in": 30}
+        assert output["private"] == 123
+        assert output["receipt"] == "private-receipt"
+    else:
+        assert output["token"] == output["private"] == output["receipt"] == "***REDACTED***"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inputs", [{"invalid": True}, {"invalid": "wrong-type"}])
+async def test_direct_executor_rejects_invalid_input_and_output_before_redaction(
+    strict_output_app: ApflowApp, inputs: dict[str, Any]
+) -> None:
+    from apcore.errors import ModuleError
+
+    public = PublicExecutor(Executor.from_registry(strict_output_app.registry))
+    with pytest.raises(ModuleError) as failure:
+        await public.call_async("apflow.strict_output_probe", inputs)
+    assert failure.value.code == "SCHEMA_VALIDATION_ERROR"
+    assert failure.value.details["errors"][0]["path"] == (
+        "/token/expires_in" if inputs["invalid"] is True else "/invalid"
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("protocol", ["mcp", "mcp-trace", "mcp-stream", "a2a"])
 async def test_mcp_errors_redact_credentials_and_preserve_error_contract(

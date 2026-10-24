@@ -256,9 +256,12 @@ class TestLeaseAcquisition:
         lease_mgr.acquire_lease.return_value = lease
         lease_mgr.renew_lease.return_value = True
 
+        idempotency = MagicMock()
+        idempotency.check_cached_result.return_value = (False, None)
         executor = AsyncMock(return_value={"status": "completed"})
         worker = _make_worker(
             lease_manager=lease_mgr,
+            idempotency_manager=idempotency,
             task_executor=executor,
         )
 
@@ -266,6 +269,7 @@ class TestLeaseAcquisition:
         await worker._execute_task(task_model)
 
         lease_mgr.acquire_lease.assert_called_once_with("task-1", "test-worker")
+        executor.assert_awaited_once_with(task_model)
 
     @pytest.mark.asyncio
     async def test_lease_acquisition_fails_skips_execution(self) -> None:

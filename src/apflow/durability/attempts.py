@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from sqlalchemy_session_proxy import SqlalchemySessionProxy
 
-from apflow.core.execution.error_info import ErrorInfo, validate_error_info
+from apflow.core.execution.error_info import ErrorInfo
 from apflow.core.execution.result_protocol import normalize_executor_result
 from apflow.core.storage.sqlalchemy.models import (
     BudgetReservation,
@@ -20,7 +20,7 @@ from apflow.core.storage.sqlalchemy.models import (
     TaskModel,
     UsageEvent,
 )
-from apflow.core.utils.credentials import redact_public_data
+from apflow.core.utils.credentials import redact_error_info
 from apflow.governance.ledger import BudgetLedger
 from apflow.governance.usage import UsageRecorder, normalized_usage
 
@@ -75,11 +75,7 @@ class AttemptRecorder:
         """A completed attempt is immutable; late writers cannot replace its evidence."""
         if status not in {"completed", "failed", "cancelled", "unknown"}:
             raise ValueError("Invalid execution attempt terminal status")
-        info = (
-            dict(validate_error_info(redact_public_data(error_info)))
-            if error_info is not None
-            else None
-        )
+        info = dict(redact_error_info(error_info)) if error_info is not None else None
         usage = None
         if token_usage:
             usage = normalize_executor_result(

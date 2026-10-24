@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import traceback
 import os
@@ -13,6 +14,7 @@ from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from apflow.core.config_manager import get_config_manager
+from apflow.core.execution.error_info import ERROR_INFO_SCHEMA, ErrorInfo, validate_error_info
 from apflow.core.execution.errors import ValidationError
 
 _SENSITIVE_KEYS = frozenset(
@@ -53,7 +55,29 @@ def redact_public_data(value: Any, schema: dict[str, Any] | None = None) -> Any:
     secrets = [
         os.environ.get(entry.get("env_var", ""), "") for entry in entries if isinstance(entry, dict)
     ]
-    return _redact_value(value, [secret for secret in secrets if secret])
+    variants: set[str] = set()
+    for secret in secrets:
+        if secret:
+            variants.update(
+                (
+                    secret,
+                    repr(secret)[1:-1],
+                    ascii(secret)[1:-1],
+                    json.dumps(secret)[1:-1],
+                    json.dumps(secret, ensure_ascii=False)[1:-1],
+                )
+            )
+    return _redact_value(value, sorted(variants, key=len, reverse=True))
+
+
+def redact_error_info(value: Any) -> ErrorInfo:
+    """Preserve protocol enums and bounds while sanitizing free-text diagnostics."""
+    info: dict[str, Any] = dict(validate_error_info(value))
+    properties = ERROR_INFO_SCHEMA["properties"]
+    text = {name: field for name, field in info.items() if properties[name].get("type") == "string"}
+    for name, field in redact_public_data(text).items():
+        info[name] = field[: properties[name]["maxLength"]]
+    return validate_error_info(info)
 
 
 def _redact_value(value: Any, secrets: list[str]) -> Any:

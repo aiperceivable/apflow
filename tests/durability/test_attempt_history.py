@@ -242,3 +242,78 @@ async def test_start_preserves_latest_legacy_usage_from_another_session(
         await AttemptRecorder(worker).start("legacy", 0, 1)
         baseline = worker.scalars(select(UsageEvent).where(UsageEvent.kind == "legacy")).one()
         assert baseline.token_usage["total"] == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field", ["code", "origin", "phase", "observed_at", "task_id", "request_id", "upstream_code"]
+)
+async def test_attempt_redaction_preserves_bounded_metadata_and_settlement(
+    sync_db_session: Session, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    from apflow.core.config_manager import get_config_manager
+    from apflow.core.execution.error_info import validate_error_info
+    from apflow.core.storage.sqlalchemy.models import ExecutionAttempt
+    from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
+    from apflow.governance.ledger import BudgetLedger
+
+    secret = "test-key"
+    monkeypatch.setenv("APFLOW_TEST_ERROR_SECRET", secret)
+    configuration = get_config_manager()
+    monkeypatch.setattr(configuration, "_data", dict(configuration._data))
+    configuration.set(
+        "security.credentials", [{"id": "test", "env_var": "APFLOW_TEST_ERROR_SECRET"}]
+    )
+    repository = TaskRepository(sync_db_session)
+    task = await repository.create_task(name="Bounded diagnostic")
+    recorder = AttemptRecorder(sync_db_session)
+    invocation = await recorder.start(task.id, task.attempt_id, 1)
+    ledger = BudgetLedger(sync_db_session)
+    await ledger.configure_scope("scope", 100)
+    await ledger.reserve("scope", task.id, invocation, 20)
+    info = dict(http_error_info(503, "GET"))
+    info[field] = "x" * 247 + secret
+    typed_info = validate_error_info(info)
+    await recorder.finish(invocation, "failed", error_info=typed_info, token_usage={"total": 5})
+    await repository.update_task(task.id, error_info=typed_info)
+    sync_db_session.expire_all()
+    attempt = sync_db_session.get(ExecutionAttempt, invocation)
+    stored = await repository.get_task_by_id(task.id)
+    assert attempt is not None and attempt.status == "failed"
+    assert attempt.completed_at is not None and attempt.token_usage == {"total": 5}
+    assert stored is not None and stored.error_info == attempt.error_info
+    sanitized = validate_error_info(attempt.error_info)
+    assert secret not in str(sanitized)
+    assert sanitized["category"] == "transient" and sanitized["retryable"] is True
+    assert sanitized["delivery_state"] == "responded"
+    assert typed_info[field] == "x" * 247 + secret
+    balance = await ledger.get_scope("scope")
+    assert (
+        balance.spent_tokens == 5 and balance.reserved_tokens == 0 and balance.unknown_tokens == 0
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("secret", ["transient", "responded"])
+async def test_attempt_redaction_preserves_protocol_classification(
+    sync_db_session: Session, monkeypatch: pytest.MonkeyPatch, secret: str
+) -> None:
+    from apflow.core.config_manager import get_config_manager
+    from apflow.core.storage.sqlalchemy.models import ExecutionAttempt
+
+    monkeypatch.setenv("APFLOW_TEST_ERROR_SECRET", secret)
+    configuration = get_config_manager()
+    monkeypatch.setattr(configuration, "_data", dict(configuration._data))
+    configuration.set(
+        "security.credentials", [{"id": "test", "env_var": "APFLOW_TEST_ERROR_SECRET"}]
+    )
+    recorder = AttemptRecorder(sync_db_session)
+    invocation = await recorder.start("classification", 0, 1)
+    info = http_error_info(503, "GET", request_id=secret)
+    await recorder.finish(invocation, "failed", error_info=info)
+    attempt = sync_db_session.get(ExecutionAttempt, invocation)
+    assert attempt is not None and attempt.error_info is not None
+    assert attempt.error_info["category"] == "transient"
+    assert attempt.error_info["delivery_state"] == "responded"
+    assert attempt.error_info["request_id"] == "***REDACTED***"
+    assert attempt.error_info["retryable"] is True

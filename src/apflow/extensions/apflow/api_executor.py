@@ -65,6 +65,7 @@ from apflow.core.extensions.decorators import executor_register
 from apflow.core.utils.network_security import validate_url_not_private
 from apflow.core.utils.credentials import (
     get_connection_profile,
+    redact_error_info,
     redact_public_data,
     resolve_outbound_inputs,
 )
@@ -222,12 +223,14 @@ class ApFlowApiExecutor(BaseTask):
         resolved = resolve_outbound_inputs(inputs, url_field="base_url")
         response = await self._execute_remote(resolved)
         error_info = response.pop("error_info", None)
-        outcome: Dict[str, Any] = {"result": response}
+        outcome: Dict[str, Any] = {"result": redact_public_data(response)}
         if response.get("success") is False:
-            outcome["error"] = str(response.get("error") or "Remote apflow call failed")
+            outcome["error"] = str(
+                redact_public_data(response.get("error") or "Remote apflow call failed")
+            )
             if error_info is not None:
-                outcome["error_info"] = error_info
-        return redact_public_data(outcome)
+                outcome["error_info"] = redact_error_info(error_info)
+        return outcome
 
     async def _execute_remote(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """

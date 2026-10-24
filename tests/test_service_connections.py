@@ -133,6 +133,39 @@ def test_connection_accepts_null_headers_and_redacts_echoed_secret(connection_co
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("executor_kind", ["http", "apflow"])
+async def test_outbound_failure_redaction_preserves_execution_metadata(
+    connection_config: None, monkeypatch: pytest.MonkeyPatch, executor_kind: str
+) -> None:
+    from apflow.core.execution.error_info import http_error_info, validate_error_info
+    from apflow.core.execution.result_protocol import normalize_executor_result
+    from apflow.extensions.apflow.api_executor import ApFlowApiExecutor
+    from apflow.extensions.http.rest_executor import RestExecutor
+
+    secret = "test-key"
+    monkeypatch.setenv("TEST_WORLDTOKEN", secret)
+    request_id = "x" * (255 - len(secret)) + secret
+    response = {
+        "success": False,
+        "error": "Upstream rejected " + secret,
+        "error_info": http_error_info(503, "GET", request_id=request_id),
+    }
+    if executor_kind == "http":
+        executor = RestExecutor()
+        monkeypatch.setattr(executor, "_execute_request", AsyncMock(return_value=response))
+    else:
+        executor = ApFlowApiExecutor()
+        monkeypatch.setattr(executor, "_execute_remote", AsyncMock(return_value=response))
+    result = await executor.execute({})
+    envelope = normalize_executor_result(result, "envelope")
+    metadata = validate_error_info(envelope.get("error_info"))
+    assert metadata["retryable"] is True and metadata.get("http_status") == 503
+    request_id = metadata.get("request_id")
+    assert request_id is not None and len(request_id) <= 255
+    assert secret not in str(envelope)
+
+
+@pytest.mark.asyncio
 async def test_profile_cannot_bypass_policy_with_legacy_private_switch(
     connection_config: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -51,9 +51,7 @@ class SessionBoundModule:
         self._check_admission()
         async with session_scope(self._factory) as session:
             try:
-                return redact_public_data(
-                    await self._bind(session).execute(inputs, self._context(context))
-                )
+                return await self._bind(session).execute(inputs, self._context(context))
             except ValidationError as error:
                 raise invalid_input_error(str(redact_public_data(str(error)))) from error
 
@@ -100,8 +98,8 @@ class SessionBoundModule:
             try:
                 if hasattr(module, "stream"):
                     async for event in module.stream(inputs, context):
-                        yield redact_public_data(event)
+                        yield event
                 else:
-                    yield redact_public_data(await module.execute(inputs, context))
+                    yield await module.execute(inputs, context)
             except ValidationError as error:
                 raise invalid_input_error(str(redact_public_data(str(error)))) from error

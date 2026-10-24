@@ -27,7 +27,7 @@ from typing import (
 from apflow.core.storage.sqlalchemy.models import TaskModel, TaskOriginType, TaskModelType
 from apflow.core.distributed.config import as_utc, is_postgresql
 from apflow.core.execution.errors import ValidationError
-from apflow.core.utils.credentials import redact_public_data
+from apflow.core.utils.credentials import redact_error_info, redact_public_data
 from sqlalchemy_session_proxy import SqlalchemySessionProxy
 from apflow.logger import get_logger
 
@@ -39,10 +39,12 @@ logger = get_logger(__name__)
 
 def _redact_failure_fields(fields: dict[str, Any]) -> dict[str, Any]:
     """Sanitize failure facts before a supported repository write reaches storage."""
-    return {
-        key: redact_public_data(value) if key in {"error", "error_info"} else value
-        for key, value in fields.items()
-    }
+    sanitized = dict(fields)
+    if sanitized.get("error_info") is not None:
+        sanitized["error_info"] = redact_error_info(sanitized["error_info"])
+    if sanitized.get("error") is not None:
+        sanitized["error"] = redact_public_data(sanitized["error"])
+    return sanitized
 
 
 class TaskRepository(Generic[TaskModelType]):
