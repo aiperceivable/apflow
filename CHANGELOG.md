@@ -1,5 +1,94 @@
 # Changelog
 
+## [0.24.0] - 2026-10-24
+
+### Breaking
+
+- Execute accepted task trees once, starting at their structural root. Terminal
+  Runs and their task outcomes cannot be reset or executed in place; use
+  `run.retry` to create a new Run with new task IDs. Child-only execution is
+  rejected; assemble child definitions before executing their root.
+- Freeze accepted graph definitions and completed result snapshots. Updates that
+  change historical task content, node identity, or graph membership are rejected.
+- Restrict the legacy `BudgetManager.update_usage` projection API to unmanaged
+  tasks without Run, invocation, or usage-event history.
+
+### Added
+
+- Explicit `WorkflowRun` lifecycle, sanitized definition snapshots and hashes,
+  direct retry/source lineage, and the `run.get` and `run.retry` modules.
+  Retry scopes include affected downstream nodes, required dependencies and
+  structural ancestors; completed reusable results become frozen local snapshots
+  without inheriting historical consumption.
+- Durable background execution through `task.submit`, stored submission receipts,
+  `task.receipt`, and `apflow dispatcher`. Acceptance survives request completion;
+  dispatch recovery requeues only work that never started.
+- Invocation-level accounting with stable `ExecutionAttempt` identities and
+  immutable `UsageEvent` facts. The owner-scoped `usage.events` and `usage.ack`
+  modules provide at-least-once delivery with explicit acknowledgements.
+- Shared token-budget scopes, atomic pre-execution reservations, per-invocation
+  retry settlement, and evidenced reconciliation through `budget.scope` and
+  `budget.reconcile`. Missing usage retains an unknown liability.
+- Verified service identity, task ownership and executor capability checks;
+  server-owned connection profiles and credential references; required-module
+  readiness checks that also gate new task admission.
+- Versioned execution `error_info`, trace/request correlation, physical invocation
+  history, retry classification, bounded Retry-After handling and cancellable
+  retry delays.
+
+### Fixed
+
+- Route cancellation to the actual executor and persist reported consumption
+  before confirming stop. Preserve completed nodes and reject stale result writes;
+  isolate live handles and running-task tracking across storage engines.
+- Observe the whole remote Run outcome instead of treating a completed root as
+  success. Preserve custom namespaces when polling and surface failed, cancelled
+  and reconciliation-required remote outcomes without authorizing tree replay.
+- Serialize admission with repository updates and descendant ORM writes. Lock and
+  refresh participating nodes before snapshotting, including descendants added
+  while admission waits for locks.
+- Deduplicate repeated, partial and final usage reports; reject conflicting event
+  IDs; retain late usage against its original invocation and Run. Commit events,
+  task projections, reservation settlement and correction evidence atomically.
+- Preserve empty usage as unknown and explicitly reported zero as known. Prevent
+  old final receipts from undoing later operator corrections, and use consistent
+  task-before-invocation lock ordering during PostgreSQL lease recovery.
+- Redeliver unacknowledged events below the delivery cursor when sequence
+  allocation precedes commit. Keep delivery cursors monotonic.
+- Resolve Link results consistently for reads and dependency injection, preserving
+  nulls and independent payloads. Protect archived content and tree topology;
+  start ordinary copies without historical charges.
+- Bind request, worker and scheduler sessions to the selected application engine;
+  avoid default database initialization while parsing CLI metadata and options.
+- Reject inline credentials at authenticated write boundaries, inject credentials
+  only into execution copies, and redact public results and diagnostics. Translate
+  validation failures into typed client errors consistently for JSON and SSE.
+
+### Migration and Compatibility
+
+- Add migrations `006` (service execution contracts) and `007` (Runs, lineage and
+  usage events). Preserve existing task rows and legacy usage baselines; imported
+  legacy consumption remains reportable and is excluded from new billing delivery.
+- Unknown remote outcomes require explicit replay authorization and evidence.
+  New task IDs do not make external side effects safe to repeat; executor-specific
+  checkpoints remain opt-in and do not provide generic task-tree recovery.
+- Consumers must persist and deduplicate usage receipts with their business writes
+  before acknowledgement. Pricing, credits, refunds and wallets remain outside
+  apflow; no automatic billing service is introduced.
+
+### Tests
+
+- Cover retry history, cancellation, late receipts, duplicates, atomic rollback,
+  admission races, and lease recovery using SQLite and disposable native
+  PostgreSQL databases.
+- Exercise authenticated credential rejection and actual execution, raw persisted
+  rows, Run snapshots, REST/SSE responses, CLI reads, Copy and Archive round trips.
+- Verify 1,892 default tests, 19 native PostgreSQL acceptance cases and 33 isolated
+  migration/custom-model cases. Run/retry/usage module coverage reaches 91.75%.
+  Optional integrations and distributed-cluster scheduling remain separate checks;
+  no real provider side effects or customer billing were exercised.
+
+
 ## [0.23.0] - 2026-10-20
 
 ### Changed
