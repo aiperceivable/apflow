@@ -10,6 +10,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import click
+import pytest
 from click.testing import CliRunner
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -186,3 +187,28 @@ def test_apflow_module_group_hidden_from_top_level_help() -> None:
     # But the group must still be reachable for backward compat
     apflow_grp = cli.get_command(click.Context(cli), "apflow")
     assert apflow_grp is not None, "apflow module group must remain accessible via get_command"
+
+
+@pytest.mark.parametrize(
+    ("group", "subcommands"),
+    [
+        ("run", {"get": "--run-id", "retry": "--idempotency-key"}),
+        ("budget", {"scope": "--limit-tokens", "reconcile": "--evidence-ref"}),
+        ("usage", {"events": "--after-index", "ack": "--event-id"}),
+    ],
+)
+def test_management_groups_expose_commands_and_preserve_generic_entry(
+    group: str, subcommands: dict[str, str]
+) -> None:
+    from apflow.cli import _build_cli
+
+    cli = _build_cli()
+    runner = CliRunner()
+    root_help = runner.invoke(cli, ["--help"])
+    assert group in cli.commands, root_help.output
+    assert group in root_help.output
+    for subcommand, option in subcommands.items():
+        promoted = runner.invoke(cli, [group, subcommand, "--help"])
+        generic = runner.invoke(cli, ["apflow", f"{group}.{subcommand}", "--help"])
+        assert promoted.exit_code == generic.exit_code == 0
+        assert option in promoted.output and option in generic.output

@@ -41,9 +41,9 @@ Contains `discover_executor_modules()` function and `_create_adapter_from_metada
 
 **`src/apflow/bridge/task_modules.py`**
 
-Contains all task management module classes. The canonical list is maintained in
-`src/apflow/bridge/registry_setup.py` (the `task_modules` dict); any additions
-there must be re-exported here. Current set (16 modules):
+Exports the original 16 task management classes below. The complete built-in
+module list is maintained in `src/apflow/bridge/registry_setup.py` (the
+`task_modules` dict); execution and governance modules live in separate files.
 
 - Lifecycle: `TaskCreateModule`, `TaskCreateTreeModule`, `TaskExecuteModule`, `TaskCancelModule`
 - Read/write: `TaskGetModule`, `TaskUpdateModule`, `TaskListModule`, `TaskDeleteModule`
@@ -53,7 +53,7 @@ there must be re-exported here. Current set (16 modules):
 
 **`src/apflow/bridge/schedule_modules.py`**
 
-Contains 6 scheduling modules (22 built-in task/schedule modules, plus discovered executors):
+Contains 6 scheduling modules:
 
 - `ScheduleSetModule` → `schedule.set` — configure a task's schedule and compute its next run
 - `ScheduleDueModule` → `schedule.due` — list scheduled tasks whose next run has arrived
@@ -61,6 +61,41 @@ Contains 6 scheduling modules (22 built-in task/schedule modules, plus discovere
 - `ScheduleCompleteModule` → `schedule.complete` — record a run as complete and advance the schedule
 - `ScheduleHistoryModule` → `schedule.history` — list a scheduled definition's run instances
 - `ScheduleExportICalModule` → `schedule.export_ical` — export scheduled tasks as an iCalendar feed
+
+**`src/apflow/bridge/execution_modules.py`**
+
+- `task.submit` — durably accept a root for background execution.
+- `task.receipt` — retrieve a caller-scoped idempotent creation receipt.
+- `task.reconcile` — compatibility entry that rejects historical in-place recovery;
+  use `run.retry` instead.
+- `run.get` — inspect an accepted definition, lifecycle, and retry lineage.
+- `run.retry` — derive a new Run with new task IDs and frozen completed results.
+
+**`src/apflow/bridge/governance_modules.py`**
+
+- `budget.scope` — configure or inspect a shared token budget.
+- `budget.reconcile` — reconcile an invocation reservation using provider evidence.
+- `usage.events` — read a caller-scoped page of immutable consumption events.
+- `usage.ack` — acknowledge an event after the consumer's durable commit.
+
+There are 31 built-in management entries, including the rejecting
+`task.reconcile` compatibility entry, plus discovered executors. With the default
+namespace, REST exposes them at `/modules/apflow.<action>` and MCP/A2A use the
+same registry IDs. CLI promotes the five groups `task`, `schedule`, `run`,
+`budget`, and `usage`; for example:
+
+```bash
+apflow run get --run-id ROOT_ID
+apflow run retry --run-id OLD_ROOT_ID --idempotency-key retry-operation-1
+apflow budget scope --scope experiment-1 --limit-tokens 10000
+apflow usage events --after-index 0 --limit 100
+```
+
+The original `apflow apflow run.get` and other dot-namespaced commands remain
+available. CLI module calls execute against local configured storage; they are
+not HTTP clients. See [REST recovery](rest-api.md#durable-submission-and-recovery)
+and [budget and usage operations](cost-governance.md#public-budget-and-usage-operations)
+for the lifecycle and consumer contracts.
 
 **`src/apflow/bridge/registry_setup.py`**
 

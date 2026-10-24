@@ -57,7 +57,7 @@ def _require_webhook_secret(webhook: bool, auth: bool, webhook_secret: Optional[
 
 
 def _build_module_subgroups(module_group: Any) -> list[click.Group]:
-    """Extract task.* and schedule.* module commands into top-level Click groups.
+    """Extract management module commands into top-level Click groups.
 
     Transforms flat dot-namespaced names (task.create, schedule.set) into
     proper subgroups so users invoke `apflow task create` instead of
@@ -69,6 +69,9 @@ def _build_module_subgroups(module_group: Any) -> list[click.Group]:
     group_meta: dict[str, str] = {
         "task": "Task management (create, list, get, update, clone, link, etc.).",
         "schedule": "Schedule management (set, due, trigger, complete, etc.).",
+        "run": "Run management (get accepted definitions, create retry runs).",
+        "budget": "Shared token budgets (configure, inspect, reconcile usage).",
+        "usage": "Usage event delivery (read events, acknowledge persistence).",
     }
     groups: dict[str, click.Group] = {
         name: click.Group(name, help=help_text) for name, help_text in group_meta.items()
@@ -119,12 +122,12 @@ def _build_cli() -> click.Group:
     cli.add_command(scheduler)
     cli.add_command(dispatcher)
 
-    # Promote task.* and schedule.* into top-level groups (apflow task create, etc.)
+    # Promote management modules into top-level groups (apflow run retry, etc.).
     # apcore-cli returns a _LazyGroup (not a plain click.Group), so we resolve it
     # via get_command() rather than accessing .commands directly.
     # get_command() also triggers _build_group_map() and caches the lazy group in
     # _group_cache["apflow"], so we can safely remove "apflow" from _group_map
-    # to suppress the "Groups: apflow (25 commands)" line in --help output.
+    # to suppress the redundant module group in --help output.
     # The group remains fully accessible as `apflow apflow <cmd>` via the cache.
     module_grp = cli.get_command(click.Context(cli), "apflow")
     if module_grp is not None:

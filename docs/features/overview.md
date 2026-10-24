@@ -30,6 +30,13 @@ multiple protocol faces:
 The execution model is built around task trees, dependency DAGs, reusable
 workflows, and scheduled run instances:
 
+- [Runs, retries, and accounting](../architecture/task-orchestration.md#runs-retries-and-accounting)
+  explains immutable accepted Runs, retry scope, result reuse, and usage history.
+- [Durable submission and recovery](rest-api.md#durable-submission-and-recovery)
+  provides API/CLI steps for creation receipts, dispatch, and new retry Runs.
+- [Public budget and usage operations](cost-governance.md#public-budget-and-usage-operations)
+  covers shared token scopes, evidence, event delivery, and consumer acknowledgements.
+
 - [TaskCreator Relaxation](task-creator-relaxation.md) explains multi-root task
   forests and why `create_task_tree_from_array()` allows them.
 - [Built-in Scheduler](scheduler.md) explains the direct-DB poll loop,

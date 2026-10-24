@@ -25,12 +25,12 @@
 
 - [Feature Overview](https://apflow.aiperceivable.com/features/overview/): Feature index and dependency map.
 - [apcore Bridge](https://apflow.aiperceivable.com/features/apcore-bridge/): MCP, A2A, CLI, and REST exposure through apcore modules.
-- [REST / HTTP API](https://apflow.aiperceivable.com/features/rest-api/): Registry-driven REST API, OpenAPI, SSE, auth, webhook, and unified server behavior.
+- [REST / HTTP API](https://apflow.aiperceivable.com/features/rest-api/): Registry-driven REST API, OpenAPI, durable submission, immutable Run retries, SSE, auth, webhook, and unified server behavior.
 - [Built-in Scheduler](https://apflow.aiperceivable.com/features/scheduler/): Scheduling modules, direct database poll loop, webhook triggers, and run history.
 - [Durable Execution](https://apflow.aiperceivable.com/features/durable-execution/): Checkpoint/resume, retry, and circuit breaker behavior.
-- [Cost Governance](https://apflow.aiperceivable.com/features/cost-governance/): Token budgets, policy engine, model downgrade chains, and reporting.
+- [Cost Governance](https://apflow.aiperceivable.com/features/cost-governance/): Shared token budgets, evidenced reconciliation, immutable usage delivery and acknowledgement, policy engine, and reporting.
 - [Function Executor](https://apflow.aiperceivable.com/features/function-executor/): Register Python functions as apflow executors.
-- [Storage Migration](https://apflow.aiperceivable.com/features/storage-migration/): SQLite default storage and PostgreSQL production/distributed storage.
+- [Storage Migration](https://apflow.aiperceivable.com/features/storage-migration/): SQLite/PostgreSQL upgrade procedure for migrations 006/007, historical usage baselines, and rollback constraints.
 - [TaskCreator Relaxation](https://apflow.aiperceivable.com/features/task-creator-relaxation/): Multi-root task forest support.
 
 ## Project references
@@ -45,4 +45,7 @@
 - Use `parent_id` for task structure and reuse operations; use `dependencies` for execution ordering.
 - Link mode creates low-storage reference task rows and does not duplicate payload data.
 - Archive mode freezes existing completed workflow rows in place and keeps original task IDs.
+- Accepted Runs start once. Use run.retry for new task IDs and frozen completed results; unknown remote outcomes require evidence before replay.
+- CLI exposes task, schedule, run, budget, and usage groups against local configured storage.
+- Usage consumers deduplicate event IDs and commit business writes before usage.ack; prices, credits, and wallets remain application responsibilities.
 - The scheduler runs through direct database access; `APFLOW_API_SERVER_URL` does not route scheduler execution.

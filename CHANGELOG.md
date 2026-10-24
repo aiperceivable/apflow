@@ -15,6 +15,9 @@
 
 ### Added
 
+- Top-level `apflow run`, `apflow budget`, and `apflow usage` CLI groups, preserving
+  the generic dot-namespaced commands. Align API/CLI examples, Run recovery,
+  module inventory, usage acknowledgement, and migration 006/007 guidance.
 - Explicit `WorkflowRun` lifecycle, sanitized definition snapshots and hashes,
   direct retry/source lineage, and the `run.get` and `run.retry` modules.
   Retry scopes include affected downstream nodes, required dependencies and
@@ -78,12 +81,15 @@
 
 ### Tests
 
+- Add API/CLI regressions for management group discovery, storage-free help,
+  selective retry JSON input, legacy command aliases, immutable history,
+  idempotent reconciliation and usage acknowledgements.
 - Cover retry history, cancellation, late receipts, duplicates, atomic rollback,
   admission races, and lease recovery using SQLite and disposable native
   PostgreSQL databases.
 - Exercise authenticated credential rejection and actual execution, raw persisted
   rows, Run snapshots, REST/SSE responses, CLI reads, Copy and Archive round trips.
-- Verify 1,892 default tests, 19 native PostgreSQL acceptance cases and 33 isolated
+- Verify 1,898 default tests, 19 native PostgreSQL acceptance cases and 33 isolated
   migration/custom-model cases. Run/retry/usage module coverage reaches 91.75%.
   Optional integrations and distributed-cluster scheduling remain separate checks;
   no real provider side effects or customer billing were exercised.

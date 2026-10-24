@@ -1,8 +1,70 @@
 ---
-description: Feature specification for migrating apflow embedded storage from DuckDB to SQLite.
+description: Storage migration reference for SQLite, PostgreSQL, and the 0.24.0 service, Run, and usage schema upgrades.
 ---
 
 # Feature Spec: Storage Migration (DuckDB to SQLite)
+
+## Upgrading to 0.24.0 (SQLite and PostgreSQL)
+
+The original DuckDB-to-SQLite specification follows this upgrade section.
+The 0.24.0 upgrade adds schema migrations to the existing SQLite or PostgreSQL
+database; it does not convert its dialect or reset historical tasks.
+
+| Migration | Additions |
+|---|---|
+| `006_add_service_execution_contracts` | Task cancellation intent, structured errors, budget scope and execution identity; submission receipts, durable dispatch, token accounts/reservations, and invocation records |
+| `007_add_workflow_runs_usage_events` | `WorkflowRun`, immutable `UsageEvent`, nullable task `run_id` / `source_task_id` / `result_snapshot_hash`, and invocation `run_id` |
+
+`create_session()` and `create_app()` discover and apply pending migrations when
+initializing their selected database. Applied IDs are stored in
+`apflow_schema_migrations`; subsequent initialization skips recorded migrations.
+Both SQLite and PostgreSQL are supported. There is no separate CLI migration
+command. Initializing storage can perform DDL, so use the following upgrade order:
+
+1. Stop dispatchers, workers, schedulers, and service processes that write to this
+   database. Take a consistent database backup, including outstanding receipts and
+   budget liabilities, and test the upgrade on a copy.
+2. Install 0.24.0 and initialize the intended database once using the same URL as
+   the service. Do not run old and new writers concurrently.
+3. Inspect the migration history and representative old task statuses, results,
+   and usage. Restart the upgraded services and check `/readyz` before admitting work.
+
+```python
+import os
+from apflow.app import create_app
+from apflow.core.storage.migrate import MigrationManager
+
+app = create_app(connection_string=os.environ["APFLOW_DATABASE_URL"])
+try:
+    engine = app.session.get_bind().engine
+    manager = MigrationManager()
+    applied = manager.get_applied(engine)
+    pending = manager.get_pending(engine)
+    # Inspect applied and pending; IDs are full filename stems, without .py.
+finally:
+    app.session.close()
+```
+
+Migration 007 preserves recognizable nonempty legacy usage as baseline events;
+inherited Copy/Link totals are not evidence of another consumption. These
+baseline events remain available for historical reporting and are excluded from
+`usage.events` billing delivery, so deployment does not charge old usage again.
+Old task outcomes are preserved, and old rows may retain nullable Run lineage.
+For a legacy failed tree, pass its structural root ID to `run.retry`: historical
+Run enrollment and creation of the new retry commit together without resetting
+old nodes. Reused completed results in the new Run carry no inherited usage.
+Sanitized legacy definitions with redacted inline credentials require a fresh
+definition using a service-owned `credential_ref`.
+
+Migrations 006 and 007 intentionally reject destructive downgrade. Rollback
+requires a planned restore of the matching code and complete database backup;
+do not drop accounting tables or clear migration history. If new consumption
+has occurred after upgrade, preserve and reconcile those facts before a restore.
+Never replay interrupted remote operations merely because the schema upgraded.
+See [Run recovery](rest-api.md#durable-submission-and-recovery) and
+[usage delivery](cost-governance.md#public-budget-and-usage-operations).
+
+---
 
 **Feature ID:** F-SM
 **Priority:** P0
@@ -150,7 +212,8 @@ Remove from `dependencies`:
 
 ## Data Models
 
-No data model changes. This is a dialect-level change only.
+The original DuckDB-to-SQLite change was dialect-only. The 0.24.0 schema additions
+are described in the upgrade section above.
 
 ---
 

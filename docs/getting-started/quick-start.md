@@ -108,19 +108,106 @@ link_tree = await app.task_creator.from_link(original_task)
 archive_tree = await app.task_creator.from_archive(original_task)
 ```
 
-## 5. Let AI Agents Use apflow
+## 5. Durable Submission and Retry (CLI)
+
+CLI module commands use local storage, not the HTTP server. Select the same
+database as your service or standalone dispatcher:
+
+Ensure `storage.connection_string` and `DATABASE_URL` do not select a different
+database; they take precedence over `APFLOW_DATABASE_URL`. See
+[configuration precedence](../architecture/configuration.md#service-deployment-configuration).
+
+```bash
+export APFLOW_DATABASE_URL=sqlite:////absolute/path/apflow.db
+
+# Run in another terminal if no REST/unified server dispatcher is active.
+apflow dispatcher --db "$APFLOW_DATABASE_URL"
+```
+
+Create an idempotent draft using the built-in local aggregate executor:
+
+```bash
+apflow task create --name example --idempotency-key example-create-1 --input - <<'JSON'
+{"params":{"executor_id":"aggregate_results_executor"}}
+JSON
+
+# Recover the creation response if it was lost.
+apflow task receipt --idempotency-key example-create-1 --shape task
+
+# Use id from the creation receipt. This root ID is also the accepted Run ID.
+apflow task submit --task-id ROOT_ID
+apflow task get --task-id ROOT_ID
+apflow run get --run-id ROOT_ID
+```
+
+For a failed, cancelled, or uncertain Run, create a new retry Run and submit it:
+
+```bash
+apflow run retry --run-id OLD_ROOT_ID --idempotency-key example-retry-1
+
+# Use run_id from the retry receipt; retry creation alone does not execute it.
+apflow task submit --task-id NEW_RUN_ID
+```
+
+Completed reusable results become frozen snapshots without inherited charges.
+Supply optional `task_ids` through JSON input to select retry seeds:
+
+```bash
+apflow run retry --run-id OLD_ROOT_ID --idempotency-key selected-retry-1 --input - <<'JSON'
+{"task_ids":["FAILED_TASK_ID"]}
+JSON
+```
+
+Use `--input FILE` or `--input -` for object/array values; the current CLI's
+individual object/array options are text and do not decode JSON strings.
+Dependencies, affected downstream tasks, and structural ancestors determine the full scope.
+The old Run retains its outcomes. Ordinary Copy resets execution state, so it
+does not implement selective retry.
+
+If a remote outcome is unknown, first verify the remote receipt or the stable
+business idempotency key. Replay requires explicit authorization with
+`--replay-safe --evidence-ref receipt:operation-1`; authenticated services require
+an administrator. There is no generic tree `resume`, and `task reconcile` rejects
+in-place recovery. See [REST recovery](../features/rest-api.md#durable-submission-and-recovery)
+for HTTP examples.
+
+Inspect the shared budget and usage delivery surfaces with:
+
+```bash
+apflow budget scope --scope experiment-1 --limit-tokens 10000
+apflow budget scope --scope experiment-1
+apflow usage events --after-index 0 --limit 100
+
+# Only after committing the consuming application's receipt/business transaction.
+apflow usage ack --event-id EVENT_ID
+```
+
+Configuring a scope does not automatically enroll tasks. See
+[budget and usage operations](../features/cost-governance.md#public-budget-and-usage-operations)
+for task binding, bounded executors, reconciliation, and event deduplication.
+Pricing, credits, and wallets belong to the consuming application.
+
+## 6. Let AI Agents Use apflow
 
 All task operations are automatically exposed as MCP tools:
 
 ```
 apflow.task.create_tree   — Create multi-step workflow
 apflow.task.execute       — Execute a task
+apflow.task.submit        — Accept a root for durable background execution
+apflow.task.receipt       — Recover an idempotent creation receipt
+apflow.run.get            — Inspect an accepted Run
+apflow.run.retry          — Create a new retry Run
+apflow.budget.scope       — Configure or inspect a shared token budget
+apflow.budget.reconcile   — Settle usage using provider evidence
+apflow.usage.events       — Read immutable consumption events
+apflow.usage.ack          — Acknowledge a durably processed event
 apflow.task.copy          — Clone with modifications
 apflow.task.link          — Reference completed workflow
 apflow.task.cancel        — Cancel running tasks
 apflow.task.tree          — View full tree structure
 apflow.schedule.set       — Configure a task's schedule
-... and 14 more tools
+... plus other management modules and discovered executors
 ```
 
 Start MCP server: `apflow mcp` — Claude/Cursor will discover these tools automatically.

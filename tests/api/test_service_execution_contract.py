@@ -10,6 +10,53 @@ import pytest
 from starlette.testclient import TestClient
 
 
+def test_public_run_recovery_routes_create_new_run_and_reject_in_place_reset(
+    tmp_path: Path,
+) -> None:
+    from apflow.api.rest import build_rest_app
+    from apflow.app import create_app
+    from apflow.core.execution.runs import RunService
+
+    application = create_app(connection_string=f"sqlite:///{tmp_path / 'recovery.db'}")
+    try:
+        task = asyncio.run(
+            application.task_repository.create_task(name="Failed REST run", status="failed")
+        )
+        asyncio.run(RunService(application.session).ensure_run(task.id))
+        with TestClient(build_rest_app(application.registry)) as client:
+            paths = client.get("/openapi.json").json()["paths"]
+            for action in (
+                "task.submit",
+                "task.receipt",
+                "task.reconcile",
+                "run.get",
+                "run.retry",
+                "budget.scope",
+                "budget.reconcile",
+                "usage.events",
+                "usage.ack",
+            ):
+                assert f"/modules/apflow.{action}" in paths
+            before = client.post("/modules/apflow.run.get", json={"run_id": task.id})
+            assert before.status_code == 200
+            request = {"run_id": task.id, "idempotency_key": "rest-retry-1"}
+            first = client.post("/modules/apflow.run.retry", json=request)
+            repeated = client.post("/modules/apflow.run.retry", json=request)
+            assert first.status_code == repeated.status_code == 200
+            assert first.json() == repeated.json()
+            assert first.json()["run_id"] != task.id
+            assert first.json()["retry_of_run_id"] == task.id
+            obsolete = client.post("/modules/apflow.task.reconcile", json={"task_id": task.id})
+            assert obsolete.status_code == 422
+            assert obsolete.json()["error"]["code"] == "INVALID_INPUT"
+            after = client.post("/modules/apflow.run.get", json={"run_id": task.id})
+            assert after.status_code == 200 and before.json() == after.json()
+    finally:
+        engine = application.session.get_bind().engine
+        application.session.close()
+        engine.dispose()
+
+
 def test_rest_background_tree_survives_submit_and_receives_independent_cancel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reset_storage_singleton: None
 ) -> None:

@@ -66,6 +66,12 @@ apflow serve --all        # Unified REST + A2A + MCP on one port (/, /a2a, /mcp)
 apflow worker --db <postgres-url>  # Start distributed worker node (requires PostgreSQL)
 apflow rest               # REST/HTTP API + OpenAPI docs at /docs (default :8080)
 apflow scheduler          # Run the internal poll-based scheduler (foreground process)
+apflow dispatcher --db <database-url>  # Execute durably submitted roots
+apflow task submit --task-id <root-id> # Accept a root for background execution
+apflow run get --run-id <root-id>      # Inspect a Run and its retry lineage
+apflow run retry --run-id <old-root-id> --idempotency-key <operation-key>
+apflow budget scope --scope <name> --limit-tokens 10000
+apflow usage events --after-index 0 --limit 100
 apflow mcp                # MCP server (stdio, for Claude/Cursor)
 apflow mcp --transport streamable-http --approval  # HTTP + async human-approval workflow
 apflow info               # Show version, config, and registered modules
@@ -107,11 +113,26 @@ See [Task Orchestration Architecture](docs/architecture/task-orchestration.md) f
 
 ### Durable Execution
 
-Checkpoint/resume, retry with configurable backoff, circuit breaker per executor.
+Durable submission receipts, immutable accepted Runs, classified retries with
+backoff, and circuit breakers per executor. `run retry` creates a new Run and
+reuses confirmed completed results; submit its new root to execute it. Historical
+trees cannot be resumed in place. Checkpoint restoration is executor-specific
+within an active Run. Unknown remote outcomes require receipt verification and
+explicit replay authorization.
+
+CLI module commands use the local database configured by `APFLOW_DATABASE_URL`.
+For standalone CLI/MCP/A2A submission, run a dispatcher against that same database;
+REST and the unified server already run one during their application lifespan.
+See the [durable submission and recovery guide](docs/features/rest-api.md#durable-submission-and-recovery).
 
 ### Cost Governance
 
-Token budget management, model downgrade chains, policy engine (block/downgrade/notify).
+Shared token-budget reservations, evidenced reconciliation, model downgrade
+chains, and policy enforcement (block/downgrade/notify). Immutable usage events
+support delivery through `usage events` and `usage ack`. Consumers commit and
+deduplicate receipts with their business writes before acknowledging; pricing,
+credits, refunds, and wallets belong to the consuming application.
+See [budget and usage operations](docs/features/cost-governance.md#public-budget-and-usage-operations).
 
 ### Distributed Coordination
 

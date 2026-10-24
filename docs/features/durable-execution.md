@@ -15,6 +15,14 @@ description: Feature specification for apflow checkpointing, retry, circuit brea
 
 Enable checkpoint/resume for long-running agent tasks so that failures do not lose progress. Provides retry with configurable backoff strategies and circuit breaker pattern to prevent repeated execution of consistently failing executors.
 
+Checkpoint restoration is executor-specific and opt-in within an active Run's
+retry policy. It does not provide generic task-tree recovery. Accepted Runs start
+once; after a failed, cancelled, or uncertain Run, `run.retry` creates a new Run
+and frozen references to reusable completed results. Submit or execute its new
+root explicitly. The original outcomes remain historical. See
+[durable submission and Run recovery](rest-api.md#durable-submission-and-recovery)
+for API/CLI steps and unknown remote delivery requirements.
+
 ---
 
 ## Retry and Failure Contract
@@ -643,7 +651,9 @@ See the matching section in [Cost Governance](cost-governance.md#execution-wirin
 
 ## Acceptance Criteria
 
-1. A task that fails mid-execution can be retried and resumes from its last checkpoint.
+1. Within an active Run, an executor that opts into checkpointing can restore its
+   checkpoint during an authorized retry. Retrying a terminal Run creates a new
+   Run and does not inherit executor checkpoints.
 2. Retry backoff follows the configured strategy: fixed produces constant delay, exponential doubles each time, linear increases linearly.
 3. Circuit breaker prevents execution when consecutive failures exceed the threshold and allows test execution after the reset timeout.
 4. Checkpoint data persists across process restarts (verified via session close/reopen test).

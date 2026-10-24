@@ -23,7 +23,6 @@ security:
   admin_roles: [apflow.admin]
   allowed_modules: ["apflow.*"]
   module_roles:
-    "apflow.task.reconcile": [apflow.admin]
     "apflow.budget.reconcile": [apflow.admin]
   # Optional path to an apcore ACL YAML policy.
   acl_path: null
@@ -59,6 +58,11 @@ Run network-facing services with `--auth` and configured JWT verification.
 local library use remains compatible when this setting is false. Connection
 profile `allowed_subjects` matches the verified identity ID; role policy is a
 separate capability restriction.
+
+`run.retry` can create a new Run for an ordinary failed execution without an
+administrator role. Its `replay_safe: true` authorization for an unknown remote
+outcome requires an administrator and an evidence reference. `task.reconcile`
+is obsolete and rejects historical in-place recovery; a role rule cannot enable it.
 
 Task inputs select a profile using `connection_profile: training-api` and a URL
 within its configured origin/path/method policy. Private destinations remain

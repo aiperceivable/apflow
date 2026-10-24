@@ -150,11 +150,44 @@ the durable path above is the background execution contract. A stream is an
 observation channel, not an execution receipt or a remote idempotency guarantee.
 
 Expired leases with an interrupted child or unknown delivery state become
-`reconciliation_required`. They are never blindly replayed. After checking the
-remote operation receipt, an administrator can call `apflow.task.reconcile`
-with `replay_safe: true` and an `evidence_ref`. Reconciliation evidence is
-persisted atomically with the new acceptance. Checkpoints alone do not prove
-whether a remote side effect happened.
+`reconciliation_required`. They are never blindly replayed. Inspect the original
+Run with `apflow.run.get`. For a failed, cancelled, or uncertain Run, use
+`apflow.run.retry` with `run_id` and a caller-scoped `idempotency_key` to create a
+new Run. Its response includes the new `run_id` (also its root task ID),
+`retry_of_run_id`, and `task_mapping`. Then submit the new root with `task.submit`.
+Retry creation alone does not dispatch it. Repeating the same retry key and
+request returns the original receipt; changed content returns HTTP 409.
+
+Confirmed completed results are reused as frozen local snapshots without new
+consumption. Optional `task_ids` select retry seeds; the engine includes affected
+downstream nodes, required dependencies, and structural ancestors. The old Run's
+outcomes remain unchanged. Ordinary `task.copy` resets execution state and is not
+a replacement for this selective retry contract.
+
+When remote delivery is unknown, first check the remote receipt or use a stable
+business idempotency key. An authenticated administrator must explicitly provide
+`replay_safe: true` and an `evidence_ref` to authorize replay. New task IDs and
+checkpoints alone do not prove replay safety. The obsolete `task.reconcile`
+operation rejects in-place recovery with `INVALID_INPUT` (HTTP 422).
+
+```bash
+# Default registry namespace; add a verified Bearer token on authenticated services.
+curl -X POST localhost:8080/modules/apflow.run.get \
+  -H 'content-type: application/json' -d '{"run_id":"OLD_ROOT_ID"}'
+
+curl -X POST localhost:8080/modules/apflow.run.retry \
+  -H 'content-type: application/json' \
+  -d '{"run_id":"OLD_ROOT_ID","idempotency_key":"retry-operation-1"}'
+
+# Use run_id from the retry response, not OLD_ROOT_ID.
+curl -X POST localhost:8080/modules/apflow.task.submit \
+  -H 'content-type: application/json' -d '{"task_id":"NEW_RUN_ID"}'
+```
+
+The equivalent local CLI commands are `apflow run get`, `apflow run retry`, and
+`apflow task submit`. Module commands use the local configured database; they do
+not send these HTTP requests. Set `APFLOW_DATABASE_URL` to the same database and
+run `apflow dispatcher --db <url>` when no REST dispatcher is running.
 
 Cancellation records intent and signals the actual execution runtime. It may
 remain `cancelling` while the executor is still stopping; a late result cannot

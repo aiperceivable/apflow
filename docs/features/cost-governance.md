@@ -333,6 +333,92 @@ class UsageReporter:
 
 ---
 
+## Public Budget and Usage Operations
+
+The default registry namespace exposes the same operations through REST and CLI:
+
+| REST module (`POST /modules/<id>`) | Local CLI | Required input |
+|---|---|---|
+| `apflow.budget.scope` | `apflow budget scope` | `scope`; optional `limit_tokens` to configure |
+| `apflow.budget.reconcile` | `apflow budget reconcile` | `scope`, `reservation_id`, `actual_tokens`, `evidence_ref` |
+| `apflow.usage.events` | `apflow usage events` | Optional `after_index` (default 0), `limit` (1–1000, default 100) |
+| `apflow.usage.ack` | `apflow usage ack` | `event_id` |
+
+CLI module commands operate on the local database selected by
+`APFLOW_DATABASE_URL`; use authenticated REST calls when operating a remote
+service. Public scope names are bound to the verified owner. Only administrators
+may select another `owner_id` or reconcile consumption on authenticated services.
+Local CLI identity/role assertions are not service authentication.
+
+```bash
+# Configure once; repeating the same limit preserves accumulated spending.
+apflow budget scope --scope experiment-1 --limit-tokens 10000
+apflow budget scope --scope experiment-1
+
+# Read consumption facts. Save the returned next_index after processing the page.
+apflow usage events --after-index 0 --limit 100
+
+# Only after the consuming application has durably committed this event.
+apflow usage ack --event-id EVENT_ID
+
+# Trusted local operator: reconcile a reservation with a confirmed provider receipt.
+APCORE_CLI_AUTO_APPROVE=1 apflow budget reconcile --scope experiment-1 \
+  --reservation-id INVOCATION_ID --actual-tokens 120 \
+  --evidence-ref receipt:provider-operation-1
+```
+
+The scope response includes internal `scope_id`, `limit_tokens`, `spent_tokens`,
+`reserved_tokens`, `unknown_tokens`, `remaining_tokens`, and `reservations`.
+The `task.create` / `task.create_tree` modules and their CLI commands accept the
+public scope name as `budget_scope_id` and derive the internal owner-scoped key,
+including for trusted local CLI calls. Code using `TaskCreator` or the repository
+directly must bind that internal key itself. Configuring a scope alone does not
+enroll existing tasks. A bounded executor is still required. CLI reconciliation
+requires confirmation. With the current apcore-cli 0.12.5 baseline, `--yes` clears
+the CLI check but does not reach the executor's second approval gate. For a
+reviewed noninteractive operation, the command-scoped `APCORE_CLI_AUTO_APPROVE=1`
+shown above confirms both gates without granting administrator privileges. Do
+not export it as a session-wide default. Interactive approval remains available.
+
+Equivalent REST requests (add the verified Bearer token on authenticated services):
+
+```bash
+curl -X POST localhost:8080/modules/apflow.budget.scope \
+  -H 'content-type: application/json' \
+  -d '{"scope":"experiment-1","limit_tokens":10000}'
+
+curl -X POST localhost:8080/modules/apflow.usage.events \
+  -H 'content-type: application/json' -d '{"after_index":0,"limit":100}'
+
+curl -X POST localhost:8080/modules/apflow.usage.ack \
+  -H 'content-type: application/json' -d '{"event_id":"EVENT_ID"}'
+
+# Requires an administrator on an authenticated service.
+curl -X POST localhost:8080/modules/apflow.budget.reconcile \
+  -H 'content-type: application/json' \
+  -d '{"scope":"experiment-1","reservation_id":"INVOCATION_ID","actual_tokens":120,"evidence_ref":"receipt:provider-operation-1"}'
+```
+
+`ExecutionAttempt.id` is the invocation and reservation ID. Budget reconciliation
+settles that original invocation and can append evidenced correction facts; it
+does not reset tasks, change their outcomes, or create another execution. Use
+`run.retry` for a new execution Run. Missing counters remain unknown; explicitly
+reported zero is known. Late facts remain attributed to the original Run.
+
+`usage.events` returns `events` and a monotonic `next_index`. Delivery is at least
+once: unacknowledged events can reappear even below the requested cursor. The
+consumer must atomically deduplicate by event `id` and commit its business writes
+before calling `usage.ack`. Repeating an acknowledgement is safe. Corrections
+may contain signed token deltas and must be processed as events, not as fresh
+positive-only charges. Imported legacy baseline events are excluded from this
+delivery feed.
+
+apflow stores consumption facts and token-budget balances. The consuming
+application owns prices, credits, monetary transactions, refunds, and wallets;
+these commands do not start a billing consumer or wallet service.
+
+---
+
 ## Data Models
 
 ### TaskModel Additions
