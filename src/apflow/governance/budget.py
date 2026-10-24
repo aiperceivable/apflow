@@ -6,10 +6,14 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Awaitable, Callable, Dict, Optional, TypeVar
 
+from sqlalchemy import or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+
 from apflow.core.execution.errors import ConfigurationError
 from apflow.core.execution.context import current_invocation_id
 from apflow.core.execution.result_protocol import ResultFormat, normalize_executor_result
-from apflow.core.storage.sqlalchemy.models import TaskModel
+from apflow.core.storage.sqlalchemy.models import ExecutionAttempt, TaskModel, UsageEvent
 from apflow.governance.ledger import BudgetLedger
 
 from apflow.logger import get_logger
@@ -182,6 +186,8 @@ class BudgetManager:
             if key in token_usage and token_usage[key] < 0:
                 raise ValueError(f"token_usage['{key}'] must be >= 0, got {token_usage[key]}")
 
+        await self._require_legacy_usage(task_id)
+
         # Atomic DB-level increment (single UPDATE, computed from the row's
         # own current value inside the engine) instead of an application-side
         # read-accumulate-write: two concurrent calls for the same task_id
@@ -209,6 +215,37 @@ class BudgetManager:
             limit=task.token_budget,
             used=accumulated_total,
         )
+
+    async def _require_legacy_usage(self, task_id: str) -> None:
+        """Projection-only updates cannot account for an identified physical invocation."""
+        session = getattr(getattr(self._repo, "db", None), "session", None)
+        if isinstance(session, (Session, AsyncSession)):
+            await self._repo.db.execute(
+                update(TaskModel).where(TaskModel.id == task_id).values(id=TaskModel.id)
+            )
+            managed = (
+                await self._repo.db.execute(
+                    select(TaskModel.id).where(
+                        TaskModel.id == task_id,
+                        or_(
+                            TaskModel.run_id.is_not(None),
+                            select(ExecutionAttempt.id)
+                            .where(ExecutionAttempt.task_id == task_id)
+                            .exists(),
+                            select(UsageEvent.id).where(UsageEvent.task_id == task_id).exists(),
+                        ),
+                    )
+                )
+            ).first() is not None
+        else:
+            task = await self._repo.get_task_by_id(task_id)
+            managed = task is not None and isinstance(task.run_id, str) and bool(task.run_id)
+        if managed:
+            if isinstance(session, (Session, AsyncSession)):
+                await self._repo.db.rollback()
+            raise ValueError(
+                "Managed usage requires UsageRecorder with stable invocation and event IDs"
+            )
 
 
 def _reported_total(usage: Any) -> int | None:

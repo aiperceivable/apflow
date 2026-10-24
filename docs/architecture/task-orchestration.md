@@ -202,6 +202,9 @@ historical tasks. There is no generic tree `resume` argument. Dispatch recovery 
 requeue accepted work that never started; interrupted started work requires
 reconciliation. Executor-specific checkpoints remain opt-in within the active run's
 retry policy and are not inherited by a new run.
+Admission and retry also inspect physical invocation history: a pending task row
+does not authorize replay of previously invoked work, and an unknown invocation
+requires evidence even if its task's error projection is missing.
 
 `ExecutionAttempt.id` identifies one physical invocation and is also its budget
 reservation ID. `UsageEvent` stores immutable consumption facts with stable event
@@ -212,6 +215,12 @@ settlement commit together. Late usage remains attributable to its original run;
 stale workers cannot replace newer task results. Evidence-based reconciliation can
 append a correction without changing the original consumption facts or execution
 outcome. Missing usage keeps budget liability unknown rather than assuming zero.
+Final receipts with the same invocation and counters are idempotent; conflicting
+final counters require explicit reconciliation. A late executor cannot supersede
+an operator-confirmed correction. New consumption facts for a terminal invocation
+must use evidenced reconciliation so its event and budget adjustment commit together.
+The legacy `BudgetManager.update_usage` projection-only API is restricted to tasks
+without a Run, invocation history, or usage events.
 
 `usage.events` returns owner-scoped events ordered by an integer cursor;
 `usage.ack` acknowledges durable delivery. Unacknowledged events are redelivered

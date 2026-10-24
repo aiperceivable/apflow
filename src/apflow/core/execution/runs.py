@@ -14,7 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from sqlalchemy_session_proxy import SqlalchemySessionProxy
 
-from apflow.core.storage.sqlalchemy.models import TaskDispatch, TaskLease, TaskModel, WorkflowRun
+from apflow.core.storage.sqlalchemy.models import (
+    ExecutionAttempt,
+    TaskDispatch,
+    TaskLease,
+    TaskModel,
+    WorkflowRun,
+)
 from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
 from apflow.core.utils.credentials import redact_public_data
 
@@ -146,6 +152,9 @@ class RunService:
             raise ModuleError(code="INVALID_INPUT", message="A run requires an existing root task")
         tasks = await self.repository.get_all_tasks_in_tree(root)
         run = new_run_record(root, tasks, retry_of_run_id=retry_of_run_id)
+        if run.status == "accepted" and await self._has_invocations(tasks):
+            run.status = "reconciliation_required"
+            run.completed_at = datetime.now(timezone.utc)
         self.database.add(run)
         await self.database.flush()
         # Enrollment adds provenance to frozen rows without editing their business history.
@@ -159,6 +168,16 @@ class RunService:
             await self.database.commit()
         return run
 
+    async def _has_invocations(self, tasks: list[TaskModel]) -> bool:
+        identifier = (
+            await self.database.execute(
+                select(ExecutionAttempt.id)
+                .where(ExecutionAttempt.task_id.in_([task.id for task in tasks]))
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        return identifier is not None
+
     async def start_run(self, root_task_id: str) -> WorkflowRun:
         """Atomically claim an accepted run; a terminal run requires a derived new run."""
         run = await self.ensure_run(root_task_id)
@@ -169,7 +188,14 @@ class RunService:
             )
         root = await self.repository.get_task_by_id(root_task_id)
         assert root is not None
-        snapshot = snapshot_run_definition(await self.repository.get_all_tasks_in_tree(root))
+        tasks = await self.repository.get_all_tasks_in_tree(root)
+        if await self._has_invocations(tasks):
+            await self.finish_run(run.id, "reconciliation_required")
+            raise ModuleError(
+                code="RUN_NOT_EXECUTABLE",
+                message="This tree already has execution history; reconcile it before retrying",
+            )
+        snapshot = snapshot_run_definition(tasks)
         serialized = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), allow_nan=False)
         if hashlib.sha256(serialized.encode()).hexdigest() != run.definition_hash:
             raise ModuleError(

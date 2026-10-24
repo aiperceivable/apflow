@@ -7,7 +7,7 @@ to ensure exactly-once execution semantics across worker nodes.
 import uuid
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, or_, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -65,9 +65,39 @@ class LeaseManager:
             if run is not None and run.status != "accepted":
                 session.rollback()
                 return None
+            if not self._recover_expired_owner(session, task_id):
+                return None
             if is_postgresql(session):
                 return self._acquire_lease_postgresql(session, task_id, node_id)
             return self._acquire_lease_default(session, task_id, node_id)
+
+    def _recover_expired_owner(self, session: Session, task_id: str) -> bool:
+        """Lease expiry never authorizes replay of a previously started legacy tree."""
+        lease = session.get(TaskLease, task_id)
+        now = _utcnow()
+        if lease is None or as_utc(lease.expires_at) > now:
+            return True
+        removed = session.execute(
+            delete(TaskLease)
+            .where(
+                TaskLease.task_id == task_id,
+                TaskLease.lease_token == lease.lease_token,
+                TaskLease.expires_at <= now,
+            )
+            .returning(TaskLease.task_id)
+            .execution_options(synchronize_session="fetch")
+        ).scalar_one_or_none()
+        if removed is None:
+            session.rollback()
+            return False
+        task = session.get(TaskModel, task_id)
+        assert task is not None
+        run, tasks = self._recover_run(session, task)
+        self._reconcile_run(session, run, tasks, now)
+        if run.status != "accepted":
+            session.commit()
+            return False
+        return True
 
     def _acquire_lease_postgresql(
         self, session: Session, task_id: str, node_id: str
@@ -333,8 +363,15 @@ class LeaseManager:
             if not started:
                 run.started_at = None
         for invocation in interrupted:
-            invocation.status = "unknown"
-            invocation.completed_at = invocation.completed_at or now
+            session.execute(
+                update(ExecutionAttempt)
+                .where(ExecutionAttempt.id == invocation.id, ExecutionAttempt.status == "running")
+                .values(
+                    status="unknown",
+                    completed_at=func.coalesce(ExecutionAttempt.completed_at, now),
+                )
+                .execution_options(synchronize_session=False)
+            )
         if run.status == "reconciliation_required" or interrupted:
             self._hold_unknown_reservations(session, [node.id for node in tasks])
         return run.status == "reconciliation_required"

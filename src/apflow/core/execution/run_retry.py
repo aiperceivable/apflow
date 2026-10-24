@@ -15,6 +15,7 @@ from apflow.core.execution.runs import RunService
 from apflow.core.execution.submission import _read_receipt, submission_scope
 from apflow.core.execution.task_creator import TaskCreator
 from apflow.core.storage.sqlalchemy.models import (
+    ExecutionAttempt,
     SubmissionReceipt,
     TaskModel,
     TaskOriginType,
@@ -55,17 +56,17 @@ def _select_nodes(tasks: list[TaskModel], selected: list[str] | None) -> set[str
                 code="INVALID_INPUT", message="Run has dependencies outside its snapshot"
             )
         additions = dependencies - required
-        required.update(additions)
-        pending.extend(additions)
-    for identifier in list(required):
         parent_id = by_id[identifier].parent_id
         visited: set[str] = set()
         while parent_id:
             if parent_id in visited or parent_id not in by_id:
                 raise ModuleError(code="INVALID_INPUT", message="Invalid task structure")
             visited.add(parent_id)
-            required.add(parent_id)
+            if parent_id not in required:
+                additions.add(parent_id)
             parent_id = by_id[parent_id].parent_id
+        required.update(additions)
+        pending.extend(additions)
     return required
 
 
@@ -138,6 +139,10 @@ async def retry_run(
     administrator: bool = False,
 ) -> dict[str, Any]:
     """Commit the new tree, Run and idempotent receipt in one transaction."""
+    if replay_safe and owner is not None and not administrator:
+        raise ModuleError(
+            code="ACL_DENIED", message="Replay authorization requires an administrator"
+        )
     request = _retry_request(run_id, key, selected_task_ids, replay_safe, evidence_ref)
     digest = result_snapshot_hash(request)
     scope = submission_scope(owner, f"{namespace}:run.retry")
@@ -220,7 +225,7 @@ async def _derive_run(
             code="INVALID_INPUT", message="Run dependencies contain a cycle"
         ) from error
     required = _select_nodes(tasks, selected)
-    _validate_replay(source.status, tasks, required, replay_safe, evidence_ref)
+    await _validate_replay(repository, source.status, tasks, required, replay_safe, evidence_ref)
     execute = _execution_nodes(tasks, required, selected)
     new_root, identifiers = await _clone_nodes(repository, tasks, required, execute)
     run = await RunService(repository.db._session).ensure_run(
@@ -238,21 +243,36 @@ async def _derive_run(
     }
 
 
-def _validate_replay(
+async def _validate_replay(
+    repository: TaskRepository,
     status: str,
     tasks: list[TaskModel],
     required: set[str],
     replay_safe: bool,
     evidence_ref: str | None,
 ) -> None:
-    uncertain = status == "reconciliation_required" or any(
-        task.id in required
-        and (
-            task.status == "in_progress"
-            or isinstance(task.error_info, dict)
-            and task.error_info.get("delivery_state") == "unknown"
+    physical_unknown = (
+        await repository.db.execute(
+            select(ExecutionAttempt.id)
+            .where(
+                ExecutionAttempt.task_id.in_(required),
+                ExecutionAttempt.status.in_(["running", "unknown"]),
+            )
+            .limit(1)
         )
-        for task in tasks
+    ).scalar_one_or_none()
+    uncertain = (
+        physical_unknown is not None
+        or status == "reconciliation_required"
+        or any(
+            task.id in required
+            and (
+                task.status == "in_progress"
+                or isinstance(task.error_info, dict)
+                and task.error_info.get("delivery_state") == "unknown"
+            )
+            for task in tasks
+        )
     )
     if uncertain and (not replay_safe or not evidence_ref):
         raise ModuleError(

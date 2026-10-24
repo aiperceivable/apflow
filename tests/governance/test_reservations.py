@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.dml import Update
 
 from apflow.core.execution.errors import ConfigurationError
 from apflow.core.storage.sqlalchemy.models import (
@@ -264,3 +265,39 @@ async def test_denied_reservation_does_not_leave_running_invocation(budget_engin
             await manager.execute_with_reservation(task, invoke, token_bound=1000)
         assert not called
         assert session.scalars(select(ExecutionAttempt)).one().status == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["reserve", "settle"])
+async def test_cancelled_ledger_mutation_cannot_leak_partial_reservation(
+    budget_engine: Engine, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    with Session(budget_engine) as session:
+        ledger = BudgetLedger(session)
+        if operation == "settle":
+            await ledger.reserve("experiment", "task", "invocation", 20)
+        execute = ledger._db.execute
+
+        async def interrupt_balance_update(statement: Any, *args: Any, **kwargs: Any) -> Any:
+            if (
+                isinstance(statement, Update)
+                and getattr(statement.table, "name", None) == "apflow_budget_accounts"
+            ):
+                raise asyncio.CancelledError()
+            return await execute(statement, *args, **kwargs)
+
+        monkeypatch.setattr(ledger._db, "execute", interrupt_balance_update)
+        with pytest.raises(asyncio.CancelledError):
+            if operation == "reserve":
+                await ledger.reserve("experiment", "task", "invocation", 20)
+            else:
+                await ledger.settle("invocation", 5)
+        session.commit()
+        reservation = await ledger.get_reservation("experiment", "invocation")
+        snapshot = await ledger.get_scope("experiment")
+        assert snapshot.spent_tokens == 0 and snapshot.unknown_tokens == 0
+        if operation == "reserve":
+            assert reservation is None and snapshot.reserved_tokens == 0
+        else:
+            assert reservation is not None and reservation["state"] == "reserved"
+            assert reservation["actual_tokens"] is None and snapshot.reserved_tokens == 20

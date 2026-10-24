@@ -52,6 +52,28 @@ class UsageRecorder:
         evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Deduplicate facts; cumulative snapshots contribute only their new delta."""
+        return await self._record(
+            invocation_id,
+            event_id,
+            usage,
+            kind=kind,
+            commit=commit,
+            evidence=evidence,
+            allow_terminal=False,
+        )
+
+    async def _record(
+        self,
+        invocation_id: str,
+        event_id: str,
+        usage: dict[str, int],
+        *,
+        kind: UsageKind,
+        commit: bool,
+        evidence: dict[str, Any] | None,
+        allow_terminal: bool,
+    ) -> dict[str, Any]:
+        """Keep deduplication and terminal authorization inside the invocation lock."""
         if kind not in {"delta", "snapshot", "legacy"}:
             raise ValueError("Invalid usage event kind")
         if evidence is not None:
@@ -74,6 +96,8 @@ class UsageRecorder:
                 if commit:
                     await self._db.commit()
                 return result
+            if invocation.status != "running" and not allow_terminal:
+                raise ValueError("Terminal usage requires atomic reconciliation")
             event = await self._append(invocation, event_id, kind, digest, reported, evidence)
             result = _event_dict(event)
             if commit:
@@ -81,7 +105,7 @@ class UsageRecorder:
             else:
                 await self._db.flush()
             return result
-        except Exception:
+        except BaseException:
             await self._db.rollback()
             raise
 
@@ -94,7 +118,9 @@ class UsageRecorder:
         )
         invocation = (
             await self._db.execute(
-                select(ExecutionAttempt).where(ExecutionAttempt.id == invocation_id)
+                select(ExecutionAttempt)
+                .where(ExecutionAttempt.id == invocation_id)
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
         if invocation is None:
@@ -152,12 +178,20 @@ class UsageRecorder:
             invocation = await self._lock_invocation(invocation_id)
             if invocation.status == "running":
                 raise ValueError("Running invocations cannot be reconciled")
-            event = await self.record(
-                invocation_id, event_id, usage, kind="snapshot", evidence=evidence, commit=False
+            event = await self._record(
+                invocation_id,
+                event_id,
+                usage,
+                kind="snapshot",
+                evidence=evidence,
+                commit=False,
+                allow_terminal=True,
             )
             reservation = (
                 await self._db.execute(
-                    select(BudgetReservation).where(BudgetReservation.id == invocation_id)
+                    select(BudgetReservation)
+                    .where(BudgetReservation.id == invocation_id)
+                    .execution_options(populate_existing=True)
                 )
             ).scalar_one_or_none()
             if reservation is not None:
@@ -165,6 +199,7 @@ class UsageRecorder:
                 ledger = BudgetLedger(self._session)
                 if reservation.state == "settled" and reservation.actual_tokens != total:
                     await ledger._correct_settlement(invocation_id, total, evidence)
+                    await ledger._record_reconciliation(invocation_id, total, evidence)
                 else:
                     await ledger.settle(invocation_id, total, reconciliation=evidence, commit=False)
             await self._db.commit()

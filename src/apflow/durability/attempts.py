@@ -37,8 +37,15 @@ class AttemptRecorder:
         if min(attempt_id, attempt_number) < 0:
             raise ValueError("Attempt counters must be non-negative")
         record_id = uuid4().hex
+        await self._db.execute(
+            update(TaskModel).where(TaskModel.id == task_id).values(updated_at=TaskModel.updated_at)
+        )
         task = (
-            await self._db.execute(select(TaskModel).where(TaskModel.id == task_id))
+            await self._db.execute(
+                select(TaskModel)
+                .where(TaskModel.id == task_id)
+                .execution_options(populate_existing=True)
+            )
         ).scalar_one_or_none()
         if task is not None:
             await UsageRecorder(self._session).preserve_legacy(task)
@@ -113,23 +120,44 @@ class AttemptRecorder:
     async def _record_late_usage(
         self, invocation: ExecutionAttempt, usage: dict[str, int] | None
     ) -> None:
-        if invocation.status == "unknown" and usage:
+        if usage and (invocation.status == "unknown" or invocation.token_usage is None):
             event_id = invocation.id + ":late-final"
             previous = (
                 await self._db.execute(select(UsageEvent).where(UsageEvent.id == event_id))
             ).scalar_one_or_none()
-            evidence = (
-                previous.evidence
-                if previous is not None
-                else {
-                    "evidence_ref": "executor:" + invocation.id + ":final",
-                    "actor": None,
-                    "observed_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-            assert evidence is not None
-            await UsageRecorder(self._session).reconcile(invocation.id, event_id, usage, evidence)
+            if previous is not None:
+                if previous.reported_usage != usage:
+                    raise ValueError("Invocation was reported with different final usage")
+                await self._db.commit()
+                return
+            recorder = UsageRecorder(self._session)
+            total = await recorder.total(invocation.id)
+            prior_evidence = (
+                await self._db.execute(
+                    select(UsageEvent.evidence).where(
+                        UsageEvent.invocation_id == invocation.id,
+                        UsageEvent.id != event_id,
+                    )
+                )
+            ).scalars()
+            if any(value is not None for value in prior_evidence):
+                if any(usage[name] != total[name] for name in usage):
+                    raise ValueError(
+                        "Late executor usage conflicts with authoritative reconciliation"
+                    )
+                await self._db.commit()
+                return
+            if any(usage[name] < total[name] for name in usage):
+                raise ValueError("Late executor usage cannot decrease confirmed consumption")
+            evidence = {
+                "evidence_ref": "executor:" + invocation.id + ":final",
+                "actor": None,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await recorder.reconcile(invocation.id, event_id, usage, evidence)
         else:
+            if usage and invocation.token_usage != usage:
+                raise ValueError("Invocation was reported with different final usage")
             await self._db.commit()
 
     async def record_partial(self, task_id: str, generation: int, usage: dict[str, int]) -> None:
@@ -166,12 +194,28 @@ class AttemptRecorder:
             )
             self._db.add(invocation)
             await self._db.flush()
-        digest = hashlib.sha256(
-            json.dumps(normalized_usage(usage), sort_keys=True).encode()
-        ).hexdigest()
-        await UsageRecorder(self._session).record(
-            invocation.id, invocation.id + ":partial:" + digest, usage, kind="snapshot"
-        )
+        await self._record_partial_snapshot(invocation.id, usage)
+
+    async def _record_partial_snapshot(self, invocation_id: str, usage: dict[str, int]) -> None:
+        reported = normalized_usage(usage)
+        digest = hashlib.sha256(json.dumps(reported, sort_keys=True).encode()).hexdigest()
+        event_id = invocation_id + ":partial:" + digest
+        recorder = UsageRecorder(self._session)
+        try:
+            invocation = await recorder._lock_invocation(invocation_id)
+            existing = (
+                await self._db.execute(select(UsageEvent.id).where(UsageEvent.id == event_id))
+            ).scalar_one_or_none()
+            if existing is None and invocation.status != "running":
+                total = await recorder.total(invocation_id)
+                if any(reported[name] > total[name] for name in reported):
+                    raise ValueError("Terminal invocations require evidenced usage reconciliation")
+                await self._db.commit()
+                return
+            await recorder.record(invocation_id, event_id, reported, kind="snapshot")
+        except BaseException:
+            await self._db.rollback()
+            raise
 
     async def schedule_retry(self, record_id: str, retry_at: datetime) -> None:
         if retry_at.tzinfo is None:

@@ -27,6 +27,36 @@ async def test_repeated_cancel_does_not_repeat_cumulative_usage(sync_db_session:
 
 
 @pytest.mark.asyncio
+async def test_cancel_does_not_finalize_task_before_usage_is_persisted(
+    sync_db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from apflow.durability.attempts import AttemptRecorder
+
+    repository = TaskRepository(sync_db_session)
+    task = await repository.create_task(name="Running", status="in_progress", attempt_id=1)
+    task_id = task.id
+    executor = AsyncMock()
+    executor.cancel.return_value = {"status": "cancelled", "token_usage": {"total": 2}}
+    manager = TaskManager(sync_db_session, executor_instances={task_id: executor})
+    original = AttemptRecorder.record_partial
+
+    async def fail_usage(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("Usage storage unavailable")
+
+    monkeypatch.setattr(AttemptRecorder, "record_partial", fail_usage)
+    with pytest.raises(RuntimeError, match="storage unavailable"):
+        await manager.cancel_task(task_id)
+    sync_db_session.refresh(task)
+    assert task.status == "in_progress"
+    assert task.cancel_requested_at is not None
+    monkeypatch.setattr(AttemptRecorder, "record_partial", original)
+    await manager.cancel_task(task_id)
+    sync_db_session.refresh(task)
+    assert task.status == "cancelled"
+    assert task.token_usage is not None and task.token_usage["total"] == 2
+
+
+@pytest.mark.asyncio
 async def test_engine_finalizes_invocation_without_duplicate_projection(
     sync_db_session: Session,
 ) -> None:

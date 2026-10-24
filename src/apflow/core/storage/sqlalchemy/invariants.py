@@ -63,7 +63,7 @@ def protect_archived_tasks(
         state = inspect(task)
         changed = {
             column.key
-            for column in task.__table__.columns
+            for column in state.mapper.column_attrs
             if state.attrs[column.key].history.has_changes()
         } - {"has_references", "updated_at"}
         if not changed and task not in session.deleted:

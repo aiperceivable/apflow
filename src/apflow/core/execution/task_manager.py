@@ -175,6 +175,9 @@ class TaskManager:
         attempt_id = task.attempt_id
         response = await self._notify_cancellation(task_id)
         stopped = stopped or response.get("status") == "cancelled"
+        usage = await self._record_cancellation_usage(
+            task_id, attempt_id, response.get("token_usage")
+        )
         message = error_message or response.get("message") or "Cancellation requested"
         fields: Dict[str, Any] = {"error": message}
         if stopped:
@@ -191,9 +194,6 @@ class TaskManager:
             stopped = updated is not None
             if not stopped:
                 fields.pop("result", None)
-        usage = await self._record_cancellation_usage(
-            task_id, attempt_id, response.get("token_usage")
-        )
         result = {
             "status": "cancelled" if stopped else "cancelling",
             "cancel_requested": True,

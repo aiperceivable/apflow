@@ -3,7 +3,7 @@
 from decimal import Decimal
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.orm import Session
@@ -459,3 +459,145 @@ async def test_retry_enrolls_legacy_failed_tree_without_resetting_history(
     assert source.error == "Historical failure" and source.token_usage == {"total": 7}
     assert source.run_id == original.id
     assert receipt["run_id"] != original.id and receipt["retry_of_run_id"] == original.id
+
+
+@pytest.mark.asyncio
+async def test_core_retry_requires_administrator_for_uncertain_replay(
+    sync_db_session: Session,
+) -> None:
+    from apflow.core.execution.run_retry import retry_run
+    from apflow.core.storage.sqlalchemy.models import WorkflowRun
+    from sqlalchemy import update
+
+    repository, identifiers = await _failed_run(sync_db_session)
+    sync_db_session.execute(
+        update(WorkflowRun)
+        .where(WorkflowRun.id == identifiers[0])
+        .values(status="reconciliation_required")
+    )
+    sync_db_session.commit()
+    with pytest.raises(ModuleError) as denied:
+        await retry_run(
+            repository,
+            identifiers[0],
+            "core-replay",
+            "alice",
+            replay_safe=True,
+            evidence_ref="receipt:confirmed-safe",
+        )
+    assert denied.value.code == "ACL_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_targeted_retry_includes_dependencies_of_structural_ancestors(
+    sync_db_session: Session,
+) -> None:
+    repository = TaskRepository(sync_db_session)
+    root = await repository.create_task(name="Root", status="completed")
+    prerequisite = await repository.create_task(
+        name="Ancestor prerequisite",
+        parent_id=root.id,
+        task_tree_id=root.id,
+        status="completed",
+        result={"value": 1},
+    )
+    group = await repository.create_task(
+        name="Group",
+        parent_id=root.id,
+        task_tree_id=root.id,
+        status="completed",
+        dependencies=[prerequisite.id],
+    )
+    failed = await repository.create_task(
+        name="Failed", parent_id=group.id, task_tree_id=root.id, status="failed"
+    )
+    await RunService(sync_db_session).ensure_run(root.id)
+    receipt = await RunRetryModule(repository).execute(
+        {"run_id": root.id, "idempotency_key": "ancestor", "task_ids": [failed.id]}
+    )
+    mapping = receipt["task_mapping"]
+    assert set(mapping) == {root.id, prerequisite.id, group.id, failed.id}
+    copied_group = await repository.get_task_by_id(mapping[group.id])
+    assert copied_group is not None
+    assert copied_group.dependencies == [mapping[prerequisite.id]]
+    assert mapping[prerequisite.id] in receipt["reused_task_ids"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", [False, True])
+async def test_managed_run_cannot_gain_existing_unmanaged_child(
+    sync_db_session: Session, terminal: bool
+) -> None:
+    from apflow.core.execution.errors import ValidationError
+
+    repository = TaskRepository(sync_db_session)
+    root = await repository.create_task(name="Managed", status="failed" if terminal else "pending")
+    unrelated = await repository.create_task(name="Unmanaged")
+    await RunService(sync_db_session).ensure_run(root.id)
+    with pytest.raises(ValidationError, match="cannot change children"):
+        await repository.update_task(unrelated.id, parent_id=root.id)
+    unchanged = await repository.get_task_by_id(unrelated.id)
+    assert unchanged is not None and unchanged.parent_id is None
+
+
+@pytest.mark.asyncio
+async def test_historical_billing_uses_mapped_fields_with_extended_table(
+    sync_db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy import Column, MetaData, String, Table
+
+    repository = TaskRepository(sync_db_session)
+    root = await repository.create_task(name="Historical", status="failed")
+    await RunService(sync_db_session).ensure_run(root.id)
+    extended_table = cast(Table, root.__table__).to_metadata(MetaData())
+    extended_table.append_column(Column("custom_extension", String))
+    # Custom models may extend the shared table without changing the base mapper.
+    monkeypatch.setattr(root, "__table__", extended_table)
+    root.token_usage = {"total_tokens": 3}
+    sync_db_session.commit()
+    sync_db_session.refresh(root)
+    assert root.token_usage == {"total_tokens": 3}
+    assert root.status == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invocation_status", ["running", "unknown"])
+async def test_retry_checks_unknown_physical_invocation_without_task_error_projection(
+    sync_db_session: Session, invocation_status: str
+) -> None:
+    from datetime import datetime, timezone
+    from apflow.core.storage.sqlalchemy.models import ExecutionAttempt
+
+    repository = TaskRepository(sync_db_session)
+    root = await repository.create_task(name="Legacy failure", user_id="alice", status="failed")
+    sync_db_session.add(
+        ExecutionAttempt(
+            id="legacy-unknown",
+            task_id=root.id,
+            attempt_id=0,
+            attempt_number=1,
+            status=invocation_status,
+            started_at=datetime.now(timezone.utc),
+        )
+    )
+    sync_db_session.commit()
+    with pytest.raises(ModuleError) as unknown:
+        await RunRetryModule(repository).execute(
+            {"run_id": root.id, "idempotency_key": "unknown-invocation"},
+            Context.create(identity=Identity(id="alice")),
+        )
+    assert unknown.value.code == "RECONCILIATION_REQUIRED"
+    receipt = await RunRetryModule(repository).execute(
+        {
+            "run_id": root.id,
+            "idempotency_key": "authorized-unknown-invocation",
+            "replay_safe": True,
+            "evidence_ref": "provider:verified-safe",
+        },
+        Context.create(identity=Identity(id="alice", roles=("apflow.admin",))),
+    )
+    assert receipt["run_id"] != root.id
+    sync_db_session.refresh(root)
+    invocation = sync_db_session.get(ExecutionAttempt, "legacy-unknown")
+    assert root.status == "failed" and root.error_info is None
+    assert invocation is not None and invocation.status == invocation_status

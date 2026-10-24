@@ -234,6 +234,13 @@ class BudgetManager:
         """
 ```
 
+`update_usage` supports legacy tasks without a Run, invocation history, or usage
+events. For managed execution, it raises `ValueError`: record consumption through
+`UsageRecorder` with stable invocation and event IDs so reporting, deduplication,
+and budget settlement use the same facts.
+New facts for a terminal invocation require `UsageRecorder.reconcile` with evidence;
+`record` only accepts an identical existing receipt replay after finalization.
+
 ### CostPolicy
 
 ```python

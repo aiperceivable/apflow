@@ -78,7 +78,7 @@ Cancellation of remote side effects is cooperative and does not guarantee rollba
 | APF-01 | Trusted target profiles constrain origin, port, method, path and redirects; private URLs remain denied by default | `tests/test_service_connections.py::test_profile_allows_only_its_private_target` |
 | APF-02 | Shared effective Link resolution preserves Link IDs, nulls and isolated consumer values | `tests/core/execution/test_training_invariants.py::test_link_dependency_matches_query_without_shared_payload` |
 | APF-03 | Original-ID Archive freezes content and topology; Link/Mixed snapshots materialize effective data | `test_archive_blocks_supported_updates`, `test_mixed_archive_preserves_link_ids_dependencies_and_snapshot`, `test_archive_serializes_concurrent_child_insert` |
-| APF-04 | Persisted acceptance, bounded background dispatch, root leases, full-tree resume and explicit uncertain-outcome recovery | `tests/bridge/test_dispatch.py`, `tests/api/test_service_execution_contract.py` |
+| APF-04 | Persisted acceptance, bounded background dispatch, root leases, single-use tree execution and explicit uncertain-outcome reconciliation | `tests/bridge/test_dispatch.py`, `tests/api/test_service_execution_contract.py` |
 | APF-05 | Public cancellation reaches the live executor; durable intent, cooperative acknowledgement and fenced late writes | `test_rest_background_tree_survives_submit_and_receives_independent_cancel`, `test_requested_cancel_completion_confirms_without_late_result` |
 | APF-06 | Owner/namespace-scoped atomic creation receipts, conflicts, lookup and racing-request deduplication | `tests/bridge/test_submission.py::test_concurrent_create_commits_one_tree_and_one_receipt` |
 | APF-07 | Verified JWT identity reaches JSON/SSE; ownership/reference checks and native ACL apply to actual inner arguments | `tests/bridge/test_service_boundaries.py`, `tests/bridge/test_service_policy.py` |
@@ -213,3 +213,45 @@ use configured credential references in a fresh definition.
   out-of-order database commits cannot silently lose billing facts.
 - Coverage recheck: **91.07%** across the three new core modules; **56 passed,
   1 skipped**. Submission hooks check all **52 changed files**, imports and Ruff.
+
+### Post-implementation Accounting Review
+
+The follow-up review of `f223f47` reproduced implementation defects against the
+approved contracts. Each fix has a failing regression followed by a passing run:
+
+- Cancellation persists reported consumption before publishing the task's terminal
+  state. Transaction cancellation rolls back partial accounting writes.
+- Missing terminal consumption accepts one late final receipt. Conflicting final
+  receipts require reconciliation; original duplicate receipts cannot undo a newer
+  operator correction. New terminal facts cannot bypass atomic settlement.
+- Corrections persist their audit receipt with the event and balance, refresh
+  cached reservation state, and serialize evidence creation for duplicate requests.
+  Distinct concurrent corrections keep event totals, projections and balances equal.
+- The legacy projection API rejects managed tasks. Its allowed updates share a
+  task lock and fresh baseline read with first invocation creation.
+- Expired started legacy leases enter reconciliation rather than automatic replay;
+  recovery cannot overwrite an invocation that already completed.
+- Admission and retry inspect physical invocation history as well as task state;
+  legacy pending projections cannot restart invoked work, and failed projections
+  cannot conceal unknown invocation outcomes.
+- Accepted and historical Run parents reject grafted children. Retry includes
+  structural ancestors' dependencies and enforces administrative replay authorization
+  in the core entry point. Storage guards inspect mapped attributes for custom models.
+
+Acceptance evidence includes `test_retry_and_late_receipt_keep_original_run_accounting_separate`,
+`test_cancel_does_not_finalize_task_before_usage_is_persisted`,
+`test_original_final_duplicate_preserves_later_correction`,
+`test_concurrent_reconciliation_reuses_committed_evidence`,
+`test_concurrent_distinct_corrections_keep_usage_and_budget_aligned`, and
+`test_legacy_usage_and_first_invocation_preserve_accounting_boundary`.
+The six required history, cancellation, late receipt, duplicate report, recovery,
+and concurrent correction behaviors have named regression coverage.
+
+Final source-freeze verification for this review: **1863 passed, 11 skipped,
+34 warnings** in the full default suite. The isolated storage supplement passed
+**33 tests**. Retry, Run lifecycle and usage ledger coverage reached **91.46%**
+(**71 passed, 1 skipped**). Ruff, Black (285 files unchanged), Pyright (zero
+errors/warnings), the import graph (132 modules, no cycles), and whitespace checks
+passed. All six required acceptance behaviors are covered, including the combined
+retry and late-receipt scenario. Live World wallet, provider side effects and a
+PostgreSQL cluster were not exercised.

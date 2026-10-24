@@ -1,7 +1,7 @@
 {
   "feature": "apflow-training-integration-findings",
   "created": "2026-10-24T00:57:06.148128+00:00",
-  "updated": "2026-10-24T03:16:36Z",
+  "updated": "2026-10-24T04:28:59.245029+00:00",
   "status": "completed",
   "execution_order": [
     "core-invariants",
@@ -121,6 +121,29 @@
     "source_doc": "/Users/tercelyi/Workspace/corefirst/corefirst-world/docs/apflow-training-integration-findings.md",
     "created_by": "code-forge",
     "version": "1.0",
+    "accounting_review": {
+      "source_commit": "f223f47",
+      "status": "passed",
+      "acceptance": {
+        "retry_history": "test_retry_and_late_receipt_keep_original_run_accounting_separate",
+        "cancellation_atomicity": "test_cancel_does_not_finalize_task_before_usage_is_persisted",
+        "late_receipt": "test_missing_terminal_usage_accepts_late_receipt_once",
+        "duplicate_reports": "test_original_final_duplicate_preserves_later_correction",
+        "expired_recovery": "test_acquire_expired_started_legacy_lease_requires_reconciliation",
+        "concurrent_corrections": "test_concurrent_distinct_corrections_keep_usage_and_budget_aligned"
+      },
+      "verification": {
+        "core_coverage": "91.46%, 71 passed, 1 skipped",
+        "storage_supplement": "33 passed",
+        "ruff": "passed",
+        "black": "285 files unchanged",
+        "pyright": "0 errors, 0 warnings",
+        "imports": "132 modules, no circular imports",
+        "deployment_boundary": "No live world wallet, provider side effects or PostgreSQL cluster acceptance performed",
+        "default_suite": "1863 passed, 11 skipped, 34 warnings"
+      },
+      "uncovered_required_behaviors": []
+    },
     "verification": {
       "default_suite": "1824 passed, 11 skipped, 34 warnings",
       "final_governance_and_invocation": "140 passed, 1 skipped",

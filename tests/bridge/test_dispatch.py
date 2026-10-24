@@ -14,6 +14,99 @@ from apflow.core.storage.sqlalchemy.models import Base, TaskDispatch, TaskModel
 
 
 @pytest.mark.asyncio
+async def test_retry_and_late_receipt_keep_original_run_accounting_separate(
+    sync_db_session: Session,
+) -> None:
+    from apflow.bridge.execution_modules import RunRetryModule
+    from apflow.core.execution.dispatch import TaskDispatcher
+    from apflow.core.execution.runs import RunService
+    from apflow.core.storage.sqlalchemy.models import WorkflowRun
+    from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
+    from apflow.durability.attempts import AttemptRecorder
+    from apflow.governance.ledger import BudgetLedger
+    from apflow.governance.usage import UsageRecorder
+    from sqlalchemy_session_proxy import SqlalchemySessionProxy
+
+    repository = TaskRepository(sync_db_session)
+    root = await repository.create_task(name="B", user_id="alice", budget_scope_id="scope")
+    first = await repository.create_task(name="A", parent_id=root.id, user_id="alice")
+    await repository.update_task(root.id, dependencies=[first.id])
+    runs = RunService(sync_db_session)
+    await runs.start_run(root.id)
+    recorder = AttemptRecorder(sync_db_session)
+    ledger = BudgetLedger(sync_db_session)
+    await ledger.configure_scope("scope", 100)
+    assert await repository.try_claim_for_execution(first.id) is not None
+    first_invocation = await recorder.start(first.id, 1, 1)
+    await ledger.reserve("scope", first.id, first_invocation, 10)
+    await recorder.finish(first_invocation, "completed", token_usage={"total": 3})
+    await repository.transition_task(
+        first.id, expected_statuses=["in_progress"], status="completed", result="reusable"
+    )
+    assert await repository.try_claim_for_execution(root.id) is not None
+    old_invocation = await recorder.start(root.id, 1, 1)
+    await ledger.reserve("scope", root.id, old_invocation, 10)
+    sync_db_session.add(
+        TaskDispatch(
+            task_id=root.id,
+            state="running",
+            owner_token="expired",
+            lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+    )
+    sync_db_session.commit()
+    await TaskDispatcher(lambda: sync_db_session)._recover(SqlalchemySessionProxy(sync_db_session))
+    old_run = sync_db_session.get(WorkflowRun, root.id)
+    assert old_run is not None and old_run.status == "reconciliation_required"
+    old_history = (old_run.definition_hash, old_run.status, old_run.completed_at)
+    receipt = await RunRetryModule(repository).execute(
+        {
+            "run_id": root.id,
+            "idempotency_key": "retry-after-interruption",
+            "replay_safe": True,
+            "evidence_ref": "provider:replay-authorized",
+        }
+    )
+    new_root = receipt["root_task_id"]
+    await runs.start_run(new_root)
+    assert await repository.try_claim_for_execution(new_root) is not None
+    new_invocation = await recorder.start(new_root, 1, 1)
+    await ledger.reserve("scope", new_root, new_invocation, 10)
+    await recorder.finish(new_invocation, "completed", token_usage={"total": 5})
+    await repository.transition_task(
+        new_root, expected_statuses=["in_progress"], status="completed", result="new result"
+    )
+    assert await runs.finish_from_tasks(new_root) == "completed"
+    await recorder.finish(old_invocation, "completed", token_usage={"total": 8})
+    await recorder.finish(old_invocation, "completed", token_usage={"total": 8})
+    sync_db_session.refresh(old_run)
+    assert (old_run.definition_hash, old_run.status, old_run.completed_at) == old_history
+    original = await repository.get_task_by_id(root.id)
+    retried = await repository.get_task_by_id(new_root)
+    reused = await repository.get_task_by_id(receipt["task_mapping"][first.id])
+    assert original is not None and retried is not None and reused is not None
+    assert original.status == "in_progress" and original.result is None
+    assert original.token_usage == {"input": 0, "output": 0, "total": 8}
+    assert retried.result == "new result" and retried.token_usage is not None
+    assert retried.token_usage["total"] == 5
+    assert reused.result == "reusable" and reused.token_usage is None
+    assert (await ledger.get_scope("scope")).spent_tokens == 16
+    usage = UsageRecorder(sync_db_session)
+    events = await usage.list_events("alice")
+    assert (
+        sum(event["token_usage"]["total"] for event in events if event["run_id"] == root.id) == 11
+    )
+    assert (
+        sum(event["token_usage"]["total"] for event in events if event["run_id"] == new_root) == 5
+    )
+    for event in events:
+        await usage.acknowledge(event["id"], "alice")
+    cursor = events[-1]["index"]
+    await recorder.finish(old_invocation, "completed", token_usage={"total": 8})
+    assert await usage.list_events("alice", cursor) == []
+
+
+@pytest.mark.asyncio
 async def test_dispatch_executes_only_accepted_root_and_complete_tree(tmp_path: Path) -> None:
     from apflow.core.execution.dispatch import TaskDispatcher, accept_task
 

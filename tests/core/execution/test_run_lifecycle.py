@@ -287,3 +287,39 @@ async def test_retry_dispatch_executes_children_below_frozen_completed_root(
         assert calls == ["child"]
     finally:
         registry.unregister(RetryProbe.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enrolled", [False, True])
+async def test_pending_tree_with_prior_invocation_cannot_start(
+    sync_db_session: Session, enrolled: bool
+) -> None:
+    from datetime import datetime, timezone
+    from apflow.core.execution.runs import RunService
+    from apflow.core.storage.sqlalchemy.models import ExecutionAttempt
+    from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
+
+    repository = TaskRepository(sync_db_session)
+    root = await repository.create_task(name="Legacy pending")
+    service = RunService(sync_db_session)
+    if enrolled:
+        await service.ensure_run(root.id)
+    sync_db_session.add(
+        ExecutionAttempt(
+            id="prior-physical-call",
+            task_id=root.id,
+            attempt_id=0,
+            attempt_number=1,
+            status="completed",
+            started_at=datetime.now(timezone.utc),
+            token_usage={"total": 7},
+        )
+    )
+    sync_db_session.commit()
+    with pytest.raises(ModuleError) as rejected:
+        await service.start_run(root.id)
+    assert rejected.value.code == "RUN_NOT_EXECUTABLE"
+    sync_db_session.refresh(root)
+    assert root.status == "pending"
+    run = sync_db_session.get(WorkflowRun, root.id)
+    assert run is not None and run.status == "reconciliation_required"

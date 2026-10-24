@@ -5,6 +5,7 @@ from importlib import import_module
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -23,6 +24,7 @@ from apflow.durability.attempts import AttemptRecorder
 from apflow.governance.usage import UsageRecorder
 from apflow.governance.ledger import BudgetLedger
 from apflow.governance.reporter import UsageReporter
+from apflow.governance.budget import BudgetManager
 from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
 from apflow.core.execution.errors import ValidationError
 
@@ -262,6 +264,137 @@ async def test_evidenced_correction_appends_signed_delta(usage_session: Session)
 
 
 @pytest.mark.asyncio
+async def test_repeated_corrections_refresh_cached_reservation(usage_session: Session) -> None:
+    usage_session.expire_on_commit = False
+    recorder = AttemptRecorder(usage_session)
+    invocation = await recorder.start("task", 0, 1)
+    ledger = BudgetLedger(usage_session)
+    await ledger.configure_scope("scope", 100)
+    await ledger.reserve("scope", "task", invocation, 20)
+    await recorder.finish(invocation, "completed", token_usage={"total": 7})
+    from apflow.core.storage.sqlalchemy.models import BudgetReservation
+
+    cached = usage_session.get(BudgetReservation, invocation)
+    assert cached is not None and cached.actual_tokens == 7
+    usage = UsageRecorder(usage_session)
+    evidence = {
+        "evidence_ref": "provider:correction",
+        "actor": "owner",
+        "observed_at": "2026-10-24T00:00:00+00:00",
+    }
+    await usage.reconcile(invocation, "correction-5", {"total": 5}, evidence)
+    await usage.reconcile(invocation, "correction-6", {"total": 6}, evidence)
+    assert (await ledger.get_scope("scope")).spent_tokens == 6
+    assert (await usage.total(invocation))["total"] == 6
+
+
+@pytest.mark.asyncio
+async def test_old_receipt_replay_cannot_reapply_superseded_usage(usage_session: Session) -> None:
+    recorder = AttemptRecorder(usage_session)
+    invocation = await recorder.start("task", 0, 1)
+    ledger = BudgetLedger(usage_session)
+    await ledger.configure_scope("scope", 100)
+    await ledger.reserve("scope", "task", invocation, 20)
+    await recorder.finish(invocation, "completed", token_usage={"total": 7})
+    usage = UsageRecorder(usage_session)
+    evidence = {
+        "evidence_ref": "provider:correction",
+        "actor": "owner",
+        "observed_at": "2026-10-24T00:00:00+00:00",
+    }
+    first = await usage.reconcile(invocation, "older-receipt", {"total": 5}, evidence)
+    await usage.reconcile(invocation, "newer-receipt", {"total": 9}, evidence)
+    assert await usage.reconcile(invocation, "older-receipt", {"total": 5}, evidence) == first
+    assert (await ledger.get_scope("scope")).spent_tokens == 9
+    assert (await usage.total(invocation))["total"] == 9
+    assert len(await usage.list_events("owner")) == 3
+    usage_session.expire_all()
+    attempt = usage_session.get(ExecutionAttempt, invocation)
+    assert attempt is not None and attempt.status == "completed"
+    assert attempt.token_usage == {"total": 7}
+
+
+@pytest.mark.asyncio
+async def test_correction_audit_failure_rolls_back_usage_and_budget(
+    usage_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder = AttemptRecorder(usage_session)
+    invocation = await recorder.start("task", 0, 1)
+    ledger = BudgetLedger(usage_session)
+    await ledger.configure_scope("scope", 100)
+    await ledger.reserve("scope", "task", invocation, 20)
+    await recorder.finish(invocation, "completed", token_usage={"total": 7})
+    evidence = {
+        "evidence_ref": "provider:correction",
+        "actor": "owner",
+        "observed_at": "2026-10-24T00:00:00+00:00",
+    }
+
+    async def fail_audit(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("Audit store unavailable")
+
+    monkeypatch.setattr(BudgetLedger, "_record_reconciliation", fail_audit)
+    usage = UsageRecorder(usage_session)
+    with pytest.raises(RuntimeError, match="Audit store"):
+        await usage.reconcile(invocation, "failed-correction", {"total": 5}, evidence)
+    usage_session.expire_all()
+    task = usage_session.get(TaskModel, "task")
+    assert task is not None and task.token_usage["total"] == 7
+    assert (await ledger.get_scope("scope")).spent_tokens == 7
+    assert (await usage.total(invocation))["total"] == 7
+    assert len(await usage.list_events("owner")) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidenced", [False, True])
+async def test_terminal_new_usage_requires_atomic_reconciliation(
+    usage_session: Session, evidenced: bool
+) -> None:
+    recorder = AttemptRecorder(usage_session)
+    invocation = await recorder.start("task", 0, 1)
+    ledger = BudgetLedger(usage_session)
+    await ledger.configure_scope("scope", 100)
+    await ledger.reserve("scope", "task", invocation, 20)
+    await recorder.finish(invocation, "completed", token_usage={"total": 5})
+    evidence = (
+        {
+            "evidence_ref": "provider:receipt",
+            "actor": "owner",
+            "observed_at": "2026-10-24T00:00:00+00:00",
+        }
+        if evidenced
+        else None
+    )
+    usage = UsageRecorder(usage_session)
+    with pytest.raises(ValueError, match="Terminal.*reconciliation"):
+        await usage.record(invocation, "unsettled-late-delta", {"total": 3}, evidence=evidence)
+    assert (await ledger.get_scope("scope")).spent_tokens == 5
+    assert (await usage.total(invocation))["total"] == 5
+    usage_session.expire_all()
+    task = usage_session.get(TaskModel, "task")
+    assert task is not None and task.token_usage["total"] == 5
+
+
+@pytest.mark.asyncio
+async def test_cancelled_usage_append_cannot_leak_on_later_commit(
+    usage_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    invocation = await AttemptRecorder(usage_session).start("task", 0, 1)
+
+    async def interrupted_projection(*args: object, **kwargs: object) -> None:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(TaskRepository, "increment_token_usage", interrupted_projection)
+    with pytest.raises(asyncio.CancelledError):
+        await UsageRecorder(usage_session).record(invocation, "cancelled-report", {"total": 5})
+    usage_session.commit()
+    usage_session.expire_all()
+    assert usage_session.scalars(select(UsageEvent)).all() == []
+    task = usage_session.get(TaskModel, "task")
+    assert task is not None and task.token_usage is None
+
+
+@pytest.mark.asyncio
 async def test_consumption_facts_reject_orm_rewrites(usage_session: Session) -> None:
     invocation = await AttemptRecorder(usage_session).start("task", 0, 1)
     await UsageRecorder(usage_session).record(invocation, "immutable", {"total": 1})
@@ -353,6 +486,49 @@ def test_racing_duplicate_events_charge_once(tmp_path: Path) -> None:
     engine.dispose()
 
 
+def test_legacy_usage_and_first_invocation_preserve_accounting_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-boundary.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(TaskModel(id="task", name="task", user_id="owner", token_usage={"total": 100}))
+        session.commit()
+    checked = Event()
+    started = Event()
+    original_check = BudgetManager._require_legacy_usage
+
+    async def pause_after_check(self: BudgetManager, task_id: str) -> None:
+        await original_check(self, task_id)
+        checked.set()
+        started.wait(timeout=1)
+
+    monkeypatch.setattr(BudgetManager, "_require_legacy_usage", pause_after_check)
+
+    def update_legacy() -> None:
+        with Session(engine) as session:
+            asyncio.run(BudgetManager(TaskRepository(session)).update_usage("task", {"total": 3}))
+
+    def invoke() -> None:
+        assert checked.wait(timeout=5)
+        with Session(engine) as session:
+            recorder = AttemptRecorder(session)
+            invocation = asyncio.run(recorder.start("task", 0, 1))
+            started.set()
+            asyncio.run(recorder.finish(invocation, "completed", token_usage={"total": 5}))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(update_legacy), pool.submit(invoke)]
+        for future in futures:
+            future.result()
+    with Session(engine) as session:
+        report = asyncio.run(UsageReporter(TaskRepository(session)).get_task_usage("task"))
+        task = session.get(TaskModel, "task")
+        assert task is not None and task.token_usage["total"] == 108
+        assert report.total_tokens == 108
+    engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_async_expiring_session_returns_durable_event_without_lazy_io() -> None:
     pytest.importorskip("aiosqlite")
@@ -424,3 +600,67 @@ async def test_period_uses_consumption_event_time_not_task_creation(usage_sessio
     start, end = event.created_at - timedelta(seconds=1), event.created_at + timedelta(seconds=1)
     report = await UsageReporter(TaskRepository(usage_session)).get_user_usage("owner", start, end)
     assert report.total_tokens == 5 and report.task_count == 1
+
+
+def test_concurrent_distinct_corrections_keep_usage_and_budget_aligned(tmp_path: Path) -> None:
+    from threading import Barrier
+    from apflow.core.storage.sqlalchemy.models import BudgetReservation
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'distinct-corrections.db'}", connect_args={"timeout": 10}
+    )
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(TaskModel(id="task", name="task", user_id="owner"))
+        session.commit()
+        recorder = AttemptRecorder(session)
+        invocation = asyncio.run(recorder.start("task", 0, 1))
+        ledger = BudgetLedger(session)
+        asyncio.run(ledger.configure_scope("scope", 100))
+        asyncio.run(ledger.reserve("scope", "task", invocation, 20))
+        asyncio.run(recorder.finish(invocation, "completed", token_usage={"total": 7}))
+    both_cached = Barrier(2)
+
+    def correct(total: int) -> None:
+        with Session(engine, expire_on_commit=False) as session:
+            cached = session.get(BudgetReservation, invocation)
+            assert cached is not None and cached.actual_tokens == 7
+            both_cached.wait(timeout=5)
+            asyncio.run(
+                UsageRecorder(session).reconcile(
+                    invocation,
+                    f"correction-{total}",
+                    {"total": total},
+                    {
+                        "evidence_ref": f"provider:correction-{total}",
+                        "actor": "operator",
+                        "observed_at": "2026-10-24T00:00:00+00:00",
+                    },
+                )
+            )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(correct, [5, 9]))
+        with Session(engine) as session:
+            events = session.scalars(
+                select(UsageEvent)
+                .where(UsageEvent.invocation_id == invocation)
+                .order_by(UsageEvent.index)
+            ).all()
+            assert len(events) == 3
+            assert events[0].token_usage["total"] == 7
+            assert {event.id for event in events[1:]} == {"correction-5", "correction-9"}
+            total = sum(event.token_usage["total"] for event in events)
+            assert total == events[-1].reported_usage["total"]
+            assert total in {5, 9}
+            task = session.get(TaskModel, "task")
+            attempt = session.get(ExecutionAttempt, invocation)
+            assert task is not None and task.token_usage["total"] == total
+            assert attempt is not None and attempt.token_usage == {"total": 7}
+            assert attempt.status == "completed"
+            balance = asyncio.run(BudgetLedger(session).get_scope("scope"))
+            assert balance.spent_tokens == total
+            assert balance.reserved_tokens == balance.unknown_tokens == 0
+    finally:
+        engine.dispose()

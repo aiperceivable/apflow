@@ -104,9 +104,8 @@ class BudgetReconcileModule:
         reservation = await ledger.get_reservation(key, inputs["reservation_id"])
         if reservation is None:
             raise ModuleError(code="ACL_DENIED", message="Reservation is outside this budget scope")
-        evidence = await self._evidence(key, inputs, context)
         try:
-            await self._settle_confirmed(ledger, inputs, evidence)
+            await self._settle_confirmed(ledger, key, inputs, context)
         except ValueError as error:
             raise ModuleError(
                 code="INVALID_INPUT",
@@ -127,7 +126,7 @@ class BudgetReconcileModule:
         }
 
     async def _settle_confirmed(
-        self, ledger: BudgetLedger, inputs: dict[str, Any], evidence: dict[str, Any]
+        self, ledger: BudgetLedger, key: str, inputs: dict[str, Any], context: Any
     ) -> None:
         """Publish newly confirmed invocation usage in the settlement transaction."""
         invocation = (
@@ -138,13 +137,17 @@ class BudgetReconcileModule:
         if invocation is not None:
             from apflow.governance.usage import UsageRecorder
 
-            await UsageRecorder(self._repo.db._session).reconcile(
+            recorder = UsageRecorder(self._repo.db._session)
+            await recorder._lock_invocation(invocation.id)
+            evidence = await self._evidence(key, inputs, context)
+            await recorder.reconcile(
                 invocation.id,
                 "reconcile:" + invocation.id,
                 {"total": inputs["actual_tokens"]},
                 evidence,
             )
         else:
+            evidence = await self._evidence(key, inputs, context)
             await ledger.settle(
                 inputs["reservation_id"], inputs["actual_tokens"], reconciliation=evidence
             )

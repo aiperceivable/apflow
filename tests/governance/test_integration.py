@@ -88,6 +88,49 @@ async def test_update_usage_accumulates_and_persists(sync_db_session):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("managed", ["run", "invocation", "event"])
+async def test_projection_only_usage_rejects_managed_accounting(
+    sync_db_session: Session, managed: str
+) -> None:
+    from apflow.durability.attempts import AttemptRecorder
+    from apflow.governance.usage import UsageRecorder
+    from apflow.governance.reporter import UsageReporter
+    from apflow.core.storage.sqlalchemy.models import UsageEvent
+
+    repository = TaskRepository(sync_db_session)
+    task = await repository.create_task(name="Managed usage", user_id="owner")
+    invocation: str | None = None
+    if managed == "run":
+        await repository.update_task(task.id, run_id="accepted-run")
+    elif managed == "invocation":
+        invocation = await AttemptRecorder(sync_db_session).start(task.id, 0, 1)
+        await AttemptRecorder(sync_db_session).finish(
+            invocation, "completed", token_usage={"total": 5}
+        )
+    else:
+        sync_db_session.add(
+            UsageEvent(
+                id="historical-fact",
+                invocation_id="historical",
+                task_id=task.id,
+                owner_id="owner",
+                kind="legacy",
+                digest="baseline",
+                reported_usage={"total": 5},
+                token_usage={"total": 5},
+            )
+        )
+        await repository.db.commit()
+    before = (await UsageReporter(repository).get_task_usage(task.id)).total_tokens
+    with pytest.raises(ValueError, match="UsageRecorder.*invocation.*event"):
+        await BudgetManager(repository).update_usage(task.id, {"total": 3})
+    assert (await UsageReporter(repository).get_task_usage(task.id)).total_tokens == before
+    if managed == "invocation":
+        assert invocation is not None
+        assert (await UsageRecorder(sync_db_session).total(invocation))["total"] == 5
+
+
+@pytest.mark.asyncio
 async def test_all_governance_fields_persist_after_identity_map_reload(
     sync_db_session: Session,
 ) -> None:

@@ -585,12 +585,21 @@ class TaskRepository(Generic[TaskModelType]):
                 .execution_options(synchronize_session=False)
             )
         result = await self.db.execute(
-            select(self.task_model_class.origin_type)
+            select(
+                self.task_model_class.origin_type,
+                self.task_model_class.run_id,
+                self.task_model_class.result_snapshot_hash,
+            )
             .where(self.task_model_class.id == parent_id)
             .with_for_update()
         )
-        if result.scalar_one_or_none() == TaskOriginType.archive:
+        parent = result.one_or_none()
+        if parent is None:
+            return
+        if parent.origin_type == TaskOriginType.archive:
             raise ValidationError(f"Archived task {parent_id} cannot change children")
+        if parent.run_id is not None or parent.result_snapshot_hash is not None:
+            raise ValidationError(f"Historical task {parent_id} cannot change children")
 
     async def archive_tasks(self, task_ids: List[str]) -> None:
         """Freeze a completed set in one transaction, preserving existing IDs."""

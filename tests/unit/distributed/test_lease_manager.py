@@ -119,6 +119,61 @@ class TestLeaseManager:
         assert run is not None and run.status == "reconciliation_required"
         assert manager.acquire_lease("task-1", "worker-1") is None
 
+    def test_acquire_expired_started_legacy_lease_requires_reconciliation(
+        self, session_factory, config, session, sample_node, sample_task
+    ):
+        manager = LeaseManager(session_factory, config)
+        assert manager.acquire_lease("task-1", "worker-1") is not None
+        task = session.get(TaskModel, "task-1")
+        task.status = "in_progress"
+        task.result = {"partial": "historical"}
+        lease = session.get(TaskLease, "task-1")
+        lease.expires_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+        session.commit()
+        assert manager.acquire_lease("task-1", "worker-2") is None
+        session.expire_all()
+        task = session.get(TaskModel, "task-1")
+        run = session.get(WorkflowRun, "task-1")
+        assert run is not None and run.status == "reconciliation_required"
+        assert task.status == "in_progress" and task.result == {"partial": "historical"}
+        assert session.get(TaskLease, "task-1") is None
+
+    def test_recovery_cannot_overwrite_a_finalized_cached_invocation(
+        self, session_factory, config, session, sample_task
+    ):
+        from sqlalchemy import update
+        from apflow.core.storage.sqlalchemy.models import ExecutionAttempt
+
+        manager = LeaseManager(session_factory, config)
+        sample_task.status = "in_progress"
+        run, tasks = manager._recover_run(session, sample_task)
+        invocation = ExecutionAttempt(
+            id="invocation",
+            task_id=sample_task.id,
+            run_id=run.id,
+            attempt_id=0,
+            attempt_number=1,
+            status="running",
+            started_at=datetime.now(timezone.utc),
+        )
+        session.add(invocation)
+        session.commit()
+        completed_at = datetime.now(timezone.utc) - timedelta(seconds=2)
+        session.execute(
+            update(ExecutionAttempt)
+            .where(ExecutionAttempt.id == invocation.id)
+            .values(status="completed", completed_at=completed_at, token_usage={"total": 7})
+            .execution_options(synchronize_session=False)
+        )
+        assert invocation.status == "running"
+        manager._reconcile_run(session, run, tasks, datetime.now(timezone.utc))
+        session.commit()
+        session.refresh(invocation)
+        assert invocation.status == "completed"
+        assert invocation.token_usage == {"total": 7}
+        assert invocation.completed_at is not None
+        assert invocation.completed_at.replace(tzinfo=timezone.utc) == completed_at
+
     def test_cleanup_expired_leases_does_not_report_already_completed_task(
         self, session_factory, config, session, sample_node, sample_task
     ):

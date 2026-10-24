@@ -77,7 +77,7 @@ class BudgetLedger:
                 raise ValueError("Budget scope already exists with a different limit")
             await self._db.commit()
             return snapshot
-        except Exception:
+        except BaseException:
             await self._db.rollback()
             raise
 
@@ -145,7 +145,7 @@ class BudgetLedger:
                 await self._hold_tokens(scope_id, tokens)
             await self._db.commit()
             return reservation_id
-        except Exception:
+        except BaseException:
             await self._db.rollback()
             raise
 
@@ -222,7 +222,7 @@ class BudgetLedger:
                 await self._record_reconciliation(reservation_id, actual_tokens, reconciliation)
             if commit:
                 await self._db.commit()
-        except Exception:
+        except BaseException:
             await self._db.rollback()
             raise
 
@@ -266,6 +266,7 @@ class BudgetLedger:
             select(BudgetReservation)
             .where(BudgetReservation.id == reservation_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         reservation = result.scalar_one_or_none()
         if (
