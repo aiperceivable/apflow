@@ -101,6 +101,15 @@ for the lifecycle and consumer contracts.
 
 Contains `create_apflow_registry()` function.
 
+**`src/apflow/bridge/protocol.py`**
+
+`PublicExecutor` delegates execution, identity, ACL, and approval to apcore and
+sanitizes returned objects and stream chunks using the declared output schema
+and apflow's credential rules. `ApflowMCP` retains the SDK's configured execution
+pipeline while replacing broad token-name masking with that public output policy.
+Token counters remain readable; declared sensitive fields and credentials remain
+redacted. The standalone and unified server entry points both use these adapters.
+
 ### Test Files
 
 ```
@@ -110,6 +119,87 @@ tests/bridge/test_scanner_bridge.py
 tests/bridge/test_task_modules.py
 tests/bridge/test_registry_setup.py
 ```
+
+---
+
+## MCP and A2A Operations
+
+The same registered IDs are available through both protocols:
+
+| Capability | MCP tool / A2A skill ID |
+|---|---|
+| Durable submission and creation receipt | `apflow.task.submit`, `apflow.task.receipt` |
+| Run inspection and new retry Run | `apflow.run.get`, `apflow.run.retry` |
+| Shared token budget and evidenced settlement | `apflow.budget.scope`, `apflow.budget.reconcile` |
+| Consumption delivery and acknowledgement | `apflow.usage.events`, `apflow.usage.ack` |
+
+`apflow.task.reconcile` remains a rejecting compatibility entry. Neither protocol
+may reset historical Runs. Cancellation, late usage, idempotency, and owner
+boundaries follow the same module contracts as REST and CLI.
+
+### MCP
+
+Start `apflow mcp` for stdio, or `apflow mcp --transport streamable-http` for HTTP
+(default `http://127.0.0.1:8001/mcp`). The unified server exposes `/mcp` on port
+8000. Use an MCP client to initialize the session, discover with `tools/list`,
+and invoke a discovered tool with structured arguments:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "retry-1",
+  "method": "tools/call",
+  "params": {
+    "name": "apflow.run.retry",
+    "arguments": {"run_id": "OLD_ROOT_ID", "idempotency_key": "retry-operation-1"}
+  }
+}
+```
+
+Read the new `run_id` from the tool's structured result, then call
+`apflow.task.submit` with `{"task_id":"NEW_RUN_ID"}`. MCP clients handle the
+transport initialization and HTTP session headers; this JSON is a protocol
+message, not a standalone unauthenticated HTTP request.
+
+### A2A
+
+For `apflow serve --all`, discover at `/a2a/.well-known/agent-card.json` and send
+JSON-RPC to `/a2a/`. Standalone `apflow serve` uses `/.well-known/agent-card.json`
+and `/` instead:
+
+```bash
+curl -X POST localhost:8000/a2a/ \
+  -H 'content-type: application/json' -H 'A2A-Version: 1.0' \
+  -d '{"jsonrpc":"2.0","id":"retry-1","method":"SendMessage","params":{"message":{"messageId":"retry-message-1","role":"ROLE_USER","parts":[{"data":{"run_id":"OLD_ROOT_ID","idempotency_key":"retry-operation-1"}}],"metadata":{"skillId":"apflow.run.retry"}}}}'
+```
+
+The returned A2A task/artifact contains the module result. An A2A task ID is a
+transport invocation ID, not an apflow Run ID. A completed `task.submit` protocol
+request confirms acceptance, not completion of the submitted workflow; observe
+the workflow through `run.get` / `task.get`.
+Protocol errors use their native envelopes: MCP returns `isError`, while A2A can
+return `TASK_STATE_REJECTED` for access denial. These are separate from the
+persisted workflow's execution state.
+
+A2A public cards omit approval-required skills such as `budget.reconcile`.
+Authenticated extended-card discovery and invocation remain subject to the
+deployment's ACL, role checks, and approval policy; omission from the public
+card does not mean the module is unimplemented. Add the verified Bearer token
+when calling authenticated HTTP services on either protocol.
+
+A2A protobuf numbers use IEEE-754 doubles. Governance inputs normalize exact
+integral values such as `100.0` to integers and reject booleans, fractions, and
+floating values outside the safe integer range. Use REST or MCP when values
+exceed `2**53 - 1`; A2A cannot preserve those accounting integers exactly.
+
+For embedded MCP use `ApflowMCP(app.registry)` from
+`apflow.bridge.protocol`; for embedded A2A pass
+`PublicExecutor(Executor.from_registry(app.registry))` to the A2A SDK. These
+entry points retain the public output protections used by the CLI servers.
+Standalone MCP/A2A submission requires a dispatcher against the same database;
+the unified server already runs one. Consumers on either protocol must commit
+and deduplicate events before `usage.ack`. Pricing and wallets remain application
+responsibilities. See [budget and usage operations](cost-governance.md#public-budget-and-usage-operations).
 
 ---
 
@@ -495,8 +585,8 @@ async def test_registry_custom_namespace():
 
 ## Acceptance Criteria
 
-1. `apcore-mcp` exposes registered modules through `serve(registry)`; real MCP requests verify native input schema semantics, structured outputs, and sensitive-data redaction.
-2. `apcore-a2a` exposes registered modules through `serve(registry)`; real A2A requests verify skill discovery and execution.
+1. `ApflowMCP` exposes registered modules using the MCP SDK; real MCP requests verify discovery, structured output, accounting counters, schema-sensitive fields, and credential redaction.
+2. A2A exposes the same registry through `PublicExecutor`; real JSON-RPC requests verify discovery, Run retries, durable submission, budget settlement, usage acknowledgement, and per-chunk redaction.
 3. `apcore-cli` generates commands for registered modules; real task create/get/list commands verify omitted defaults and JSON payload nulls.
 4. Each module has valid JSON Schema for inputs and outputs (input_schema and output_schema are non-empty dicts with "type" key).
 5. Module registration is automatic: adding a new `@executor_register` decorated class causes it to appear in the registry without any code changes to the bridge.

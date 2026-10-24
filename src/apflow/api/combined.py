@@ -102,7 +102,8 @@ async def _serve_all_async(
     """
     import uvicorn
     from apcore_a2a import async_serve as a2a_async_serve
-    from apcore_mcp import async_serve as mcp_async_serve
+    from apcore import Executor
+    from apflow.bridge.protocol import ApflowMCP, PublicExecutor
 
     base_url = f"http://{host}:{port}"
     # The webhook route is lifted to the top level alongside the other REST routes
@@ -137,7 +138,7 @@ async def _serve_all_async(
     # sub-app is built without its own CORS layer here.
     rest_app = build_rest_app(registry, title=title, version=version, extra_routes=extra_routes)
     a2a_app = await a2a_async_serve(
-        registry,
+        PublicExecutor(Executor.from_registry(registry)),
         name=title,
         version=version,
         description=description,
@@ -152,16 +153,15 @@ async def _serve_all_async(
 
     # The MCP transport session manager lives for the duration of this block, so
     # uvicorn must run inside it (per apcore_mcp.async_serve's documented pattern).
-    async with mcp_async_serve(
+    mcp_server = ApflowMCP(
         registry,
         name=title,
         version=version,
-        explorer=explorer,
-        allow_execute=explorer,
         observability=metrics,
         authenticator=mcp_auth,
         require_auth=auth,
-    ) as mcp_app:
+    )
+    async with mcp_server.async_serve(explorer=explorer, allow_execute=explorer) as mcp_app:
         combined = assemble_combined(rest_app, a2a_app, mcp_app, cors_origins=cors_origins)
         app: Any = combined
         if auth:

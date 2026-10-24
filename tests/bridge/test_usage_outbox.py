@@ -50,7 +50,10 @@ async def test_usage_outbox_preserves_owner_boundary(sync_db_session: Session) -
 
 
 @pytest.mark.asyncio
-async def test_budget_reconciliation_delivers_confirmed_usage(sync_db_session: Session) -> None:
+@pytest.mark.parametrize("actual_tokens", [5, 5.0])
+async def test_budget_reconciliation_delivers_confirmed_usage(
+    sync_db_session: Session, actual_tokens: int | float
+) -> None:
     from apflow.bridge.governance_modules import BudgetReconcileModule
     from apflow.governance.ledger import BudgetLedger, scope_budget_key
 
@@ -68,7 +71,7 @@ async def test_budget_reconciliation_delivers_confirmed_usage(sync_db_session: S
         "scope": "scope",
         "owner_id": "alice",
         "reservation_id": invocation,
-        "actual_tokens": 5,
+        "actual_tokens": actual_tokens,
         "evidence_ref": "receipt:confirmed",
     }
     module = BudgetReconcileModule(repository)
@@ -78,6 +81,22 @@ async def test_budget_reconciliation_delivers_confirmed_usage(sync_db_session: S
     assert len(events) == 1 and events[0]["token_usage"]["total"] == 5
     assert events[0]["evidence"]["evidence_ref"] == "receipt:confirmed"
     assert (await ledger.get_scope(key)).spent_tokens == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [True, 1.5, "5", float("nan"), float("inf"), float(2**53)])
+async def test_governance_rejects_invalid_or_inexact_integer_inputs(
+    sync_db_session: Session, value: Any
+) -> None:
+    from apflow.bridge.governance_modules import BudgetScopeModule
+
+    repository = TaskRepository(sync_db_session)
+    with pytest.raises(ModuleError) as denied:
+        await BudgetScopeModule(repository).execute({"scope": "invalid", "limit_tokens": value})
+    assert denied.value.code == "INVALID_INPUT"
+    with pytest.raises(ModuleError) as denied_cursor:
+        await UsageEventsModule(repository).execute({"after_index": value, "limit": 10})
+    assert denied_cursor.value.code == "INVALID_INPUT"
 
 
 @pytest.mark.asyncio

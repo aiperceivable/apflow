@@ -55,7 +55,10 @@ app = create_app()
 
 # Start A2A server — AI agents can now discover and invoke orchestration
 from apcore_a2a import serve
-serve(app.registry, name="apflow")
+from apcore import Executor
+from apflow.bridge.protocol import PublicExecutor
+
+serve(PublicExecutor(Executor.from_registry(app.registry)), name="apflow")
 ```
 
 ```bash

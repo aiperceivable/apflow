@@ -2,15 +2,15 @@
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from apcore import Executor, Registry
-from apcore_mcp import ExecutionRouter, MCPServerFactory
 from click.testing import CliRunner
 from mcp import ClientSession
 from mcp.shared.memory import create_connected_server_and_client_session
@@ -21,6 +21,7 @@ from sqlalchemy.engine import Engine
 from apflow.api.combined import _serve_all_async
 from apflow.app import ApflowApp, create_app
 from apflow.bridge.module_adapter import ExecutableTaskModuleAdapter
+from apflow.bridge.protocol import ApflowMCP, PublicExecutor
 from apflow.cli import _build_cli, mcp, serve
 
 
@@ -38,20 +39,250 @@ def sdk_app(tmp_path: Path) -> Iterator[ApflowApp]:
 
 
 @asynccontextmanager
-async def _mcp_client(app: ApflowApp) -> AsyncIterator[ClientSession]:
-    factory = MCPServerFactory()
-    server = factory.create_server(name="apflow-test")
-    tools = factory.build_tools(app.registry)
-    schemas = {}
-    for module_id in app.registry.list():
-        definition = app.registry.get_definition(module_id)
-        assert definition is not None
-        schemas[module_id] = definition.output_schema
-    executor = Executor.from_registry(app.registry)
-    router = ExecutionRouter(executor, output_schema_map=schemas)
-    factory.register_handlers(server, tools, router)
+async def _mcp_client(
+    app: ApflowApp, executor: Executor | None = None, *, trace: bool = False
+) -> AsyncIterator[ClientSession]:
+    runtime = ApflowMCP(
+        executor or app.registry, name="apflow-test", require_auth=False, trace=trace
+    )
+    server, _, _, _, _ = runtime._build_server_components()
     async with create_connected_server_and_client_session(server) as client:
         yield client
+
+
+ModuleCall = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+@pytest.mark.asyncio
+async def test_public_protocol_stream_closes_upstream_immediately() -> None:
+    closed: list[bool] = []
+
+    async def chunks(*arguments: Any) -> AsyncIterator[dict[str, Any]]:
+        try:
+            yield {"remaining_tokens": 10}
+        finally:
+            closed.append(True)
+
+    native = SimpleNamespace(registry=Registry(), stream=chunks)
+    stream = PublicExecutor(cast(Executor, native)).stream("apflow.probe", {})
+    assert await anext(stream) == {"remaining_tokens": 10}
+    await getattr(stream, "aclose")()
+    assert closed == [True]
+
+
+@asynccontextmanager
+async def _management_client(app: ApflowApp, protocol: str) -> AsyncIterator[ModuleCall]:
+    from apcore.approval import AutoApproveHandler
+    from apcore_a2a import async_serve
+
+    # These isolated synthetic reconciliation calls have explicit test approval.
+    executor = Executor.from_registry(app.registry)
+    executor.set_approval_handler(AutoApproveHandler())
+    if protocol.startswith("mcp"):
+        async with _mcp_client(app, executor, trace=protocol == "mcp-trace") as client:
+
+            async def call(action: str, inputs: dict[str, Any]) -> dict[str, Any]:
+                result = await client.call_tool(f"apflow.{action}", inputs)
+                assert not result.isError, result.content
+                assert result.structuredContent is not None
+                return result.structuredContent
+
+            yield call
+    else:
+        server = await async_serve(PublicExecutor(executor), name="apflow-management-test")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=server), base_url="http://test"
+        ) as client:
+
+            async def call(action: str, inputs: dict[str, Any]) -> dict[str, Any]:
+                request = {
+                    "jsonrpc": "2.0",
+                    "id": action,
+                    "method": "SendMessage",
+                    "params": {
+                        "message": {
+                            "messageId": action,
+                            "role": "ROLE_USER",
+                            "parts": [{"data": inputs}],
+                            "metadata": {"skillId": f"apflow.{action}"},
+                        }
+                    },
+                }
+                response = await client.post("/", json=request, headers={"A2A-Version": "1.0"})
+                assert response.status_code == 200, response.text
+                body = response.json()
+                assert "result" in body, body
+                task = body["result"].get("task", body["result"])
+                assert task["status"]["state"] == "TASK_STATE_COMPLETED", body
+                return task["artifacts"][0]["parts"][0]["data"]
+
+            yield call
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["mcp", "mcp-trace", "a2a"])
+async def test_protocol_redacts_secrets_and_preserves_accounting_fields(
+    sdk_app: ApflowApp, protocol: str
+) -> None:
+    class SensitiveModule:
+        description = "Verify schema and credential redaction without hiding token counters."
+        input_schema = {"type": "object"}
+        output_schema = {
+            "type": "object",
+            "$defs": {"private": {"type": "string", "x-sensitive": True}},
+            "properties": {
+                "private": {"$ref": "#/$defs/private"},
+                "actual_tokens": {"type": ["integer", "string"], "x-sensitive": True},
+            },
+        }
+
+        async def execute(self, inputs: dict[str, Any], context: Any) -> dict[str, Any]:
+            return {
+                "private": "private-value",
+                "api_key": "credential-value",
+                "resetToken": "reset-value",
+                "actual_tokens": 17,
+                "embedded": {"token_usage": {"resetToken": 23}},
+                "token_usage": {"total": 7},
+                "remaining_tokens": 93,
+            }
+
+        async def stream(
+            self, inputs: dict[str, Any], context: Any
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield await self.execute(inputs, context)
+
+    sdk_app.registry.register("apflow.protocol_redaction", SensitiveModule())
+    async with _management_client(sdk_app, protocol) as call:
+        result = await call("protocol_redaction", {})
+    assert result["token_usage"] == {"total": 7}
+    assert result["remaining_tokens"] == 93
+    assert "private-value" not in json.dumps(result)
+    assert "credential-value" not in json.dumps(result)
+    assert "reset-value" not in json.dumps(result)
+    assert result["actual_tokens"] != 17
+    assert result["embedded"]["token_usage"] == "***REDACTED***"
+
+
+@pytest.mark.asyncio
+async def test_protocol_management_discovery_respects_a2a_public_approval_filter(
+    sdk_app: ApflowApp,
+) -> None:
+    from apcore_a2a import async_serve
+
+    expected = {
+        f"apflow.{action}"
+        for action in (
+            "task.submit",
+            "task.receipt",
+            "task.reconcile",
+            "run.get",
+            "run.retry",
+            "budget.scope",
+            "budget.reconcile",
+            "usage.events",
+            "usage.ack",
+        )
+    }
+    async with _mcp_client(sdk_app) as client:
+        assert expected <= {tool.name for tool in (await client.list_tools()).tools}
+    server = await async_serve(PublicExecutor(Executor.from_registry(sdk_app.registry)))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=server), base_url="http://test"
+    ) as client:
+        response = await client.get("/.well-known/agent-card.json")
+    assert response.status_code == 200
+    visible = {skill["id"] for skill in response.json()["skills"]}
+    assert expected - {"apflow.budget.reconcile"} <= visible
+    assert "apflow.budget.reconcile" not in visible
+
+
+@pytest.mark.asyncio
+async def test_mcp_protocol_backend_preserves_sdk_approval_configuration(
+    sdk_app: ApflowApp,
+) -> None:
+    from apcore_mcp import InMemoryApprovalStore
+
+    runtime = ApflowMCP(
+        sdk_app.registry, approval_store=InMemoryApprovalStore(), require_auth=False
+    )
+    server, _, _, _, _ = runtime._build_server_components()
+    async with create_connected_server_and_client_session(server) as client:
+        assert "__apcore_approval_check" in {
+            tool.name for tool in (await client.list_tools()).tools
+        }
+        result = await client.call_tool(
+            "apflow.budget.reconcile",
+            {
+                "scope": "unconfigured",
+                "reservation_id": "never-started",
+                "actual_tokens": 0,
+                "evidence_ref": "receipt:pending",
+            },
+        )
+    assert result.isError
+    assert "approval pending" in json.dumps([item.model_dump() for item in result.content]).lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["mcp", "a2a"])
+async def test_protocol_budget_reconciliation_and_usage_ack_are_idempotent(
+    sdk_app: ApflowApp, protocol: str
+) -> None:
+    from apflow.durability.attempts import AttemptRecorder
+    from apflow.governance.ledger import BudgetLedger
+    from apflow.governance.usage import UsageRecorder
+
+    async with _management_client(sdk_app, protocol) as call:
+        scope = await call("budget.scope", {"scope": "protocol-budget", "limit_tokens": 100})
+        task = await sdk_app.task_repository.create_task(name="Unknown protocol receipt")
+        recorder = AttemptRecorder(sdk_app.session)
+        invocation = await recorder.start(task.id, 0, 1)
+        ledger = BudgetLedger(sdk_app.session)
+        await ledger.reserve(scope["scope_id"], task.id, invocation, 10)
+        await recorder.finish(invocation, "unknown")
+        inputs = {
+            "scope": "protocol-budget",
+            "reservation_id": invocation,
+            "actual_tokens": 5,
+            "evidence_ref": "receipt:protocol-test",
+        }
+        first = await call("budget.reconcile", inputs)
+        assert await call("budget.reconcile", inputs) == first
+        page = await call("usage.events", {"after_index": 0, "limit": 10})
+        assert len(page["events"]) == 1
+        event = page["events"][0]
+        assert event["token_usage"]["total"] == 5
+        acknowledgement = await call("usage.ack", {"event_id": event["id"]})
+        assert await call("usage.ack", {"event_id": event["id"]}) == acknowledgement
+        stored = await UsageRecorder(sdk_app.session).list_events(None)
+        assert len(stored) == 1 and stored[0]["delivered_at"] is not None
+        assert (await ledger.get_scope(scope["scope_id"])).spent_tokens == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["mcp", "a2a"])
+async def test_protocol_retry_and_submission_preserve_original_run(
+    sdk_app: ApflowApp, protocol: str
+) -> None:
+    from apflow.core.execution.runs import RunService
+
+    task = await sdk_app.task_repository.create_task(name="Failed protocol run", status="failed")
+    await RunService(sdk_app.session).ensure_run(task.id)
+    async with _management_client(sdk_app, protocol) as call:
+        before = await call("run.get", {"run_id": task.id})
+        request = {"run_id": task.id, "idempotency_key": "protocol-retry-1"}
+        receipt = await call("run.retry", request)
+        assert await call("run.retry", request) == receipt
+        assert receipt["run_id"] != task.id and receipt["retry_of_run_id"] == task.id
+        assert await call("run.get", {"run_id": task.id}) == before
+        created = await call(
+            "task.create", {"name": "Protocol draft", "idempotency_key": "protocol-create-1"}
+        )
+        recovered = await call("task.receipt", {"idempotency_key": "protocol-create-1"})
+        assert recovered["id"] == created["id"]
+        submitted = await call("task.submit", {"task_id": created["id"]})
+        assert await call("task.submit", {"task_id": created["id"]}) == submitted
 
 
 @pytest.mark.asyncio
@@ -224,15 +455,20 @@ def test_cli_protocol_servers_receive_working_executors(
 ) -> None:
     outputs = []
 
-    def capture_serve(backend: Registry | Executor, **kwargs: Any) -> None:
-        assert isinstance(backend, Registry)
+    def capture_serve(backend: Registry | Executor | PublicExecutor, **kwargs: Any) -> None:
         assert "middleware" not in kwargs
-        executor = Executor.from_registry(backend)
+        executor = Executor.from_registry(backend) if isinstance(backend, Registry) else backend
         assert executor.registry is sdk_app.registry
         outputs.append(asyncio.run(executor.call_async("apflow.task.list", {})))
 
     monkeypatch.setattr("apflow.app.create_app", lambda **_kwargs: sdk_app)
-    monkeypatch.setattr(f"apcore_{protocol}.serve", capture_serve)
+    if protocol == "a2a":
+        monkeypatch.setattr("apcore_a2a.serve", capture_serve)
+    else:
+        monkeypatch.setattr(
+            "apflow.bridge.protocol.ApflowMCP.serve",
+            lambda self, **kwargs: capture_serve(self.executor, **kwargs),
+        )
     result = CliRunner().invoke(serve if protocol == "a2a" else mcp)
     assert result.exit_code == 0, result.output
     assert outputs == [{"tasks": [], "total": 0}]

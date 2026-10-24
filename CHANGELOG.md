@@ -41,6 +41,12 @@
 
 ### Fixed
 
+- Preserve readable usage and budget counters over MCP while retaining schema
+  and credential redaction for normal, traced, and streaming protocol outputs.
+  Keep SDK approval and ACL configuration intact in standalone and unified servers.
+  Close upstream streams immediately when the protocol consumer stops reading.
+- Normalize exact integral A2A protobuf numbers for budget configuration,
+  reconciliation, and usage cursors without accepting fractions or imprecise floats.
 - Route cancellation to the actual executor and persist reported consumption
   before confirming stop. Preserve completed nodes and reject stale result writes;
   isolate live handles and running-task tracking across storage engines.
@@ -84,12 +90,14 @@
 - Add API/CLI regressions for management group discovery, storage-free help,
   selective retry JSON input, legacy command aliases, immutable history,
   idempotent reconciliation and usage acknowledgements.
+- Verify MCP/A2A discovery and actual protocol calls for Run retry, durable
+  receipts/submission, budget settlement, duplicate acknowledgement, and redaction.
 - Cover retry history, cancellation, late receipts, duplicates, atomic rollback,
   admission races, and lease recovery using SQLite and disposable native
   PostgreSQL databases.
 - Exercise authenticated credential rejection and actual execution, raw persisted
   rows, Run snapshots, REST/SSE responses, CLI reads, Copy and Archive round trips.
-- Verify 1,898 default tests, 19 native PostgreSQL acceptance cases and 33 isolated
+- Verify 1,915 default tests, 19 native PostgreSQL acceptance cases and 33 isolated
   migration/custom-model cases. Run/retry/usage module coverage reaches 91.75%.
   Optional integrations and distributed-cluster scheduling remain separate checks;
   no real provider side effects or customer billing were exercised.

@@ -288,6 +288,8 @@ def serve(
         click.echo("Auth: JWT Bearer required")
 
     from apcore_a2a import serve as a2a_serve
+    from apcore import Executor
+    from apflow.bridge.protocol import PublicExecutor
 
     from apflow.api.auth import build_a2a_authenticator
 
@@ -298,7 +300,7 @@ def serve(
     # A2A protocol 1.0: the Agent Card now carries a version; apcore-a2a resolves
     # execution_timeout from the APCORE_A2A Config Bus when omitted.
     a2a_serve(
-        app.registry,
+        PublicExecutor(Executor.from_registry(app.registry)),
         host=host,
         port=port,
         name=name,
@@ -380,7 +382,8 @@ def mcp(
         # stdio mode — no console output (would corrupt protocol)
         pass
 
-    from apcore_mcp import InMemoryApprovalStore, serve as mcp_serve
+    from apcore_mcp import InMemoryApprovalStore
+    from apflow.bridge.protocol import ApflowMCP
 
     from apflow.api.auth import build_mcp_authenticator
 
@@ -389,19 +392,16 @@ def mcp(
     # authenticator wired, rejecting every request. auth=False → both off.
     authenticator = build_mcp_authenticator() if auth else None
 
-    mcp_serve(
+    server = ApflowMCP(
         app.registry,
-        transport=transport,
-        host=host,
-        port=port,
         name="apflow",
-        explorer=explorer,
         observability=metrics,
         log_level=log_level,
         approval_store=InMemoryApprovalStore() if approval else None,
         authenticator=authenticator,
         require_auth=auth,
     )
+    server.serve(transport=transport, host=host, port=port, explorer=explorer)
 
 
 @click.command()

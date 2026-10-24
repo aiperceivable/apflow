@@ -11,8 +11,18 @@ from apcore.errors import ModuleError
 from sqlalchemy import select
 
 from apflow.bridge.access import authorize_capability, is_administrator, task_owner
+from apflow.bridge.errors import invalid_input_error
 from apflow.governance.ledger import BudgetLedger, scope_budget_key
 from apflow.core.storage.sqlalchemy.models import ExecutionAttempt, SubmissionReceipt
+
+
+def _integer_input(value: Any, name: str) -> int:
+    """Normalize exact protobuf numbers without accepting fractions or lost precision."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float) and value.is_integer() and abs(value) <= 2**53 - 1:
+        return int(value)
+    raise invalid_input_error(f"{name} must be an exact integer")
 
 
 class BudgetScopeModule:
@@ -50,7 +60,9 @@ class BudgetScopeModule:
         ledger = BudgetLedger(self._repo.db._session)
         if "limit_tokens" in inputs:
             try:
-                snapshot = await ledger.configure_scope(key, inputs["limit_tokens"])
+                snapshot = await ledger.configure_scope(
+                    key, _integer_input(inputs["limit_tokens"], "limit_tokens")
+                )
             except ValueError as error:
                 raise ModuleError(
                     code="INVALID_INPUT",
@@ -99,6 +111,10 @@ class BudgetReconcileModule:
             raise ModuleError(
                 code="ACL_DENIED", message="Usage reconciliation requires an administrator"
             )
+        inputs = {
+            **inputs,
+            "actual_tokens": _integer_input(inputs["actual_tokens"], "actual_tokens"),
+        }
         key = scope_budget_key(inputs.get("owner_id", task_owner(context)), inputs["scope"])
         ledger = BudgetLedger(self._repo.db._session)
         reservation = await ledger.get_reservation(key, inputs["reservation_id"])
@@ -194,10 +210,10 @@ class UsageEventsModule:
         authorize_capability(
             getattr(self, "module_id", "apflow.usage.events"), context, inputs=inputs
         )
-        cursor = inputs.get("after_index", 0)
+        cursor = _integer_input(inputs.get("after_index", 0), "after_index")
         try:
             events = await UsageRecorder(self._repo.db._session).list_events(
-                task_owner(context), cursor, inputs.get("limit", 100)
+                task_owner(context), cursor, _integer_input(inputs.get("limit", 100), "limit")
             )
         except ValueError as error:
             raise ModuleError(code="INVALID_INPUT", message=str(error)) from error

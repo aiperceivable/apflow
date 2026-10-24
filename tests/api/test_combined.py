@@ -1,6 +1,8 @@
 """Tests for the unified REST+A2A+MCP mount assembly (apflow.api.combined)."""
 
 from unittest.mock import patch
+from types import SimpleNamespace
+from typing import Any, Callable
 
 import pytest
 from apcore.registry.registry import Registry
@@ -12,6 +14,15 @@ from starlette.testclient import TestClient
 
 from apflow.api.combined import _serve_all_async, assemble_combined
 from apflow.api.rest import build_rest_app
+
+
+def _mcp_adapter(factory: Callable[..., Any]) -> Callable[..., Any]:
+    def create(registry: object, **options: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            async_serve=lambda **settings: factory(registry, **options, **settings)
+        )
+
+    return create
 
 
 def _stub(path: str, label: str) -> Starlette:
@@ -83,7 +94,7 @@ async def test_serve_all_async_assembles_and_runs() -> None:
 
     with (
         patch("apcore_a2a.async_serve", fake_a2a_serve),
-        patch("apcore_mcp.async_serve", fake_mcp_serve),
+        patch("apflow.bridge.protocol.ApflowMCP", side_effect=_mcp_adapter(fake_mcp_serve)),
         patch("uvicorn.Server", _FakeServer),
     ):
         await _serve_all_async(
@@ -148,7 +159,7 @@ async def test_serve_all_threads_sys_modules() -> None:
 
     with (
         patch("apcore_a2a.async_serve", fake_a2a_serve),
-        patch("apcore_mcp.async_serve", fake_mcp_serve),
+        patch("apflow.bridge.protocol.ApflowMCP", side_effect=_mcp_adapter(fake_mcp_serve)),
         patch("uvicorn.Server", _FakeServer),
     ):
         await _serve_all_async(
@@ -209,7 +220,7 @@ async def test_serve_all_threads_jwt_auth() -> None:
 
     with (
         patch("apcore_a2a.async_serve", fake_a2a_serve),
-        patch("apcore_mcp.async_serve", fake_mcp_serve),
+        patch("apflow.bridge.protocol.ApflowMCP", side_effect=_mcp_adapter(fake_mcp_serve)),
         patch("uvicorn.Server", _FakeServer),
         patch("apflow.api.auth.build_a2a_authenticator", lambda: a2a_sentinel),
         patch("apflow.api.auth.build_mcp_authenticator", lambda: mcp_sentinel),
@@ -260,7 +271,7 @@ async def test_serve_all_raises_when_auth_requested_but_unconfigured() -> None:
 
     with (
         patch("apcore_a2a.async_serve", fake_a2a_serve),
-        patch("apcore_mcp.async_serve", fake_mcp_serve),
+        patch("apflow.bridge.protocol.ApflowMCP", side_effect=_mcp_adapter(fake_mcp_serve)),
         patch("apflow.api.auth.build_a2a_authenticator", lambda: None),
         patch("apflow.api.auth.build_mcp_authenticator", lambda: None),
     ):
@@ -316,7 +327,7 @@ async def test_serve_all_runs_in_process_scheduler() -> None:
 
     with (
         patch("apcore_a2a.async_serve", fake_a2a_serve),
-        patch("apcore_mcp.async_serve", fake_mcp_serve),
+        patch("apflow.bridge.protocol.ApflowMCP", side_effect=_mcp_adapter(fake_mcp_serve)),
         patch("uvicorn.Server", _FakeServer),
         patch("apflow.scheduler.internal.InternalScheduler", return_value=sched),
     ):

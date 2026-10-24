@@ -417,6 +417,12 @@ apflow stores consumption facts and token-budget balances. The consuming
 application owns prices, credits, monetary transactions, refunds, and wallets;
 these commands do not start a billing consumer or wallet service.
 
+The same operations are available as MCP tools and A2A skills. Use apflow's
+protocol entry points to preserve token counters while redacting credentials.
+A2A exact integer inputs are normalized at the bridge boundary; larger accounting
+values need a transport that preserves integers. See
+[MCP and A2A operations](apcore-bridge.md#mcp-and-a2a-operations).
+
 ---
 
 ## Data Models
