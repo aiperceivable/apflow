@@ -1,229 +1,115 @@
-"""
-Test task re-execution functionality
+"""Repeated execution creates a new run while preserving the original history."""
 
-Tests the re-execution of failed tasks and their dependencies.
-"""
+from typing import Any
 
 import pytest
+from apcore.errors import ModuleError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+
+from apflow.core.execution.run_retry import retry_run
+from apflow.core.execution.runs import RunService
 from apflow.core.execution.task_executor import TaskExecutor
 from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
-from apflow.core.config import get_task_model_class
 
 
-class TestTaskReexecution:
-    """Test cases for task re-execution functionality"""
+@pytest.mark.asyncio
+async def test_reexecute_failed_task_creates_new_history(
+    use_test_db_session: Session | AsyncSession,
+) -> None:
+    repository = TaskRepository(use_test_db_session)
+    task = await repository.create_task(
+        name="Failed",
+        user_id="owner",
+        status="failed",
+        error="Prior failure",
+        params={"executor_id": "aggregate_results_executor"},
+        token_usage={"total": 7},
+    )
+    await RunService(use_test_db_session).ensure_run(task.id)
+    before = task.to_dict()
+    receipt = await retry_run(repository, task.id, "retry", "owner")
+    result = await TaskExecutor().execute_task_by_id(
+        receipt["run_id"], db_session=use_test_db_session
+    )
+    assert result["status"] == "completed"
+    original = await repository.get_task_by_id(task.id)
+    assert original is not None and original.to_dict() == before
+    fresh = await repository.get_task_by_id(receipt["run_id"])
+    assert fresh is not None and fresh.error is None and fresh.result is not None
+    assert fresh.token_usage is None
 
-    @pytest.mark.asyncio
-    async def test_reexecute_failed_task(self, use_test_db_session):
-        """Test re-executing a failed task"""
-        task_repository = TaskRepository(
-            use_test_db_session, task_model_class=get_task_model_class()
-        )
-        task_executor = TaskExecutor()
 
-        # Create a task that will fail (using invalid executor)
-        task = await task_repository.create_task(
-            name="test_failed_task",
-            user_id="test-user",
-            status="pending",
-            priority=1,
-            inputs={"resource": "cpu"},
-            schemas={"method": "aggregate_results_executor"},
-        )
+@pytest.mark.asyncio
+async def test_reexecute_failed_parent_reuses_completed_dependency(
+    use_test_db_session: Session | AsyncSession,
+) -> None:
+    repository = TaskRepository(use_test_db_session)
+    parent = await repository.create_task(
+        name="Parent",
+        user_id="owner",
+        status="failed",
+        error="Prior failure",
+        params={"executor_id": "aggregate_results_executor"},
+    )
+    child = await repository.create_task(
+        name="Child",
+        user_id="owner",
+        parent_id=parent.id,
+        status="completed",
+        result={"value": 7},
+        token_usage={"total": 10},
+    )
+    parent.dependencies = [{"id": child.id, "required": True}]
+    await repository.db.commit()
+    await RunService(use_test_db_session).ensure_run(parent.id)
+    before = child.to_dict()
+    receipt = await retry_run(repository, parent.id, "retry-tree", "owner")
+    result = await TaskExecutor().execute_task_by_id(
+        receipt["run_id"], db_session=use_test_db_session
+    )
+    child_id = receipt["task_mapping"][child.id]
+    assert result["status"] == "completed"
+    assert result["result"]["results"] == {child_id: {"value": 7}}
+    reused = await repository.get_task_by_id(child_id)
+    assert reused is not None and reused.status == "completed" and reused.token_usage is None
+    original = await repository.get_task_by_id(child.id)
+    assert original is not None and original.to_dict() == before
+    with pytest.raises(ModuleError) as repeated:
+        await TaskExecutor().execute_task_by_id(receipt["run_id"], db_session=use_test_db_session)
+    assert repeated.value.code == "RUN_NOT_EXECUTABLE"
 
-        # Execute the task first time - should succeed
-        await task_executor.execute_task_by_id(
-            task_id=task.id, use_streaming=False, db_session=use_test_db_session
-        )
 
-        # Verify task completed successfully
-        task_after_first = await task_repository.get_task_by_id(task.id)
-        assert task_after_first is not None
-        assert task_after_first.status == "completed"
+@pytest.mark.asyncio
+async def test_pending_tasks_execute_once(use_test_db_session: Session | AsyncSession) -> None:
+    repository = TaskRepository(use_test_db_session)
+    task = await repository.create_task(
+        name="Pending",
+        params={"executor_id": "aggregate_results_executor"},
+    )
+    result: dict[str, Any] = await TaskExecutor().execute_task_by_id(
+        task.id, db_session=use_test_db_session
+    )
+    assert result["status"] == "completed"
+    fresh = await repository.get_task_by_id(task.id)
+    assert fresh is not None and fresh.status == "completed" and fresh.result is not None
 
-        # Manually set task to failed status to simulate failure
-        task_after_first.status = "failed"
-        task_after_first.error = "Simulated failure for testing"
-        if task_repository.db.is_async:
-            await use_test_db_session.commit()
-            await use_test_db_session.refresh(task_after_first)
-        else:
-            use_test_db_session.commit()
-            use_test_db_session.refresh(task_after_first)
 
-        # Re-execute the failed task
-        await task_executor.execute_task_by_id(
-            task_id=task.id, use_streaming=False, db_session=use_test_db_session
-        )
-
-        # Verify task was re-executed and completed
-        task_after_reexecution = await task_repository.get_task_by_id(task.id)
-        assert task_after_reexecution is not None
-        assert task_after_reexecution.status == "completed"
-        assert task_after_reexecution.error is None
-        assert task_after_reexecution.result is not None
-
-    @pytest.mark.asyncio
-    async def test_reexecute_failed_task_with_dependencies(self, use_test_db_session):
-        """Test re-executing a failed task with dependencies"""
-        task_repository = TaskRepository(
-            use_test_db_session, task_model_class=get_task_model_class()
-        )
-        task_executor = TaskExecutor()
-
-        # Create child task (dependency)
-        child_task = await task_repository.create_task(
-            name="child_task",
-            user_id="test-user",
-            status="pending",
-            priority=1,
-            inputs={"resource": "cpu"},
-            schemas={"method": "aggregate_results_executor"},
-        )
-
-        # Create parent task that depends on child
-        parent_task = await task_repository.create_task(
-            name="parent_task",
-            user_id="test-user",
-            status="pending",
-            priority=2,
-            has_children=True,
-            dependencies=[{"id": child_task.id, "required": True}],
-            params={"executor_id": "aggregate_results_executor"},
-        )
-
-        # Set parent-child relationship
-        child_task.parent_id = parent_task.id
-        if task_repository.db.is_async:
-            await use_test_db_session.commit()
-            await use_test_db_session.refresh(child_task)
-        else:
-            use_test_db_session.commit()
-            use_test_db_session.refresh(child_task)
-
-        # Execute the task tree first time - should succeed
-        await task_executor.execute_task_by_id(
-            task_id=parent_task.id, use_streaming=False, db_session=use_test_db_session
-        )
-
-        # Verify both tasks completed successfully
-        parent_after_first = await task_repository.get_task_by_id(parent_task.id)
-        assert parent_after_first is not None
-        child_after_first = await task_repository.get_task_by_id(child_task.id)
-        assert child_after_first is not None
-        assert parent_after_first.status == "completed"
-        assert child_after_first.status == "completed"
-
-        # Manually set parent task to failed status
-        parent_after_first.status = "failed"
-        parent_after_first.error = "Simulated failure for testing"
-        if task_repository.db.is_async:
-            await use_test_db_session.commit()
-            await use_test_db_session.refresh(parent_after_first)
-        else:
-            use_test_db_session.commit()
-            use_test_db_session.refresh(parent_after_first)
-
-        # Re-execute the failed parent task
-        await task_executor.execute_task_by_id(
-            task_id=parent_task.id, use_streaming=False, db_session=use_test_db_session
-        )
-
-        # Wait a bit for async execution to complete
-        import asyncio
-
-        await asyncio.sleep(0.1)
-
-        # Verify parent task was re-executed and completed
-        parent_after_reexecution = await task_repository.get_task_by_id(parent_task.id)
-        assert parent_after_reexecution is not None
-        # Note: Parent task might still be in_progress if child task is being re-executed
-        # Check that it's not failed anymore
-        assert (
-            parent_after_reexecution.status != "failed"
-        ), f"Parent task should not be failed, got status: {parent_after_reexecution.status}, error: {parent_after_reexecution.error}"
-
-        # Verify child task was also re-executed (dependency re-execution)
-        child_after_reexecution = await task_repository.get_task_by_id(child_task.id)
-        assert child_after_reexecution is not None
-        assert child_after_reexecution.status == "completed"
-
-        # Wait a bit more for parent task to complete after child task completes
-        await asyncio.sleep(0.2)
-
-        # Re-check parent task status
-        parent_final = await task_repository.get_task_by_id(parent_task.id)
-        assert parent_final is not None
-        assert (
-            parent_final.status == "completed"
-        ), f"Parent task should be completed, got status: {parent_final.status}, error: {parent_final.error}"
-        assert parent_final.error is None
-
-    @pytest.mark.asyncio
-    async def test_pending_tasks_not_marked_for_reexecution(self, use_test_db_session):
-        """Test that newly created pending tasks are not marked for re-execution"""
-        task_repository = TaskRepository(
-            use_test_db_session, task_model_class=get_task_model_class()
-        )
-        task_executor = TaskExecutor()
-
-        # Create a new pending task
-        task = await task_repository.create_task(
-            name="new_pending_task",
-            user_id="test-user",
-            status="pending",
-            priority=1,
-            inputs={"resource": "cpu"},
-            schemas={"method": "aggregate_results_executor"},
-        )
-
-        # Execute the task - should execute normally (not as re-execution)
-        await task_executor.execute_task_by_id(
-            task_id=task.id, use_streaming=False, db_session=use_test_db_session
-        )
-
-        # Verify task completed successfully
-        task_after = await task_repository.get_task_by_id(task.id)
-        assert task_after is not None
-        assert task_after.status == "completed"
-        assert task_after.result is not None
-
-    @pytest.mark.asyncio
-    async def test_completed_tasks_skipped_unless_dependency(self, use_test_db_session):
-        """Test that completed tasks are skipped unless they are dependencies of a re-executed task"""
-        task_repository = TaskRepository(
-            use_test_db_session, task_model_class=get_task_model_class()
-        )
-        task_executor = TaskExecutor()
-
-        # Create a completed task
-        task = await task_repository.create_task(
-            name="completed_task",
-            user_id="test-user",
-            status="pending",
-            priority=1,
-            inputs={"resource": "cpu"},
-            schemas={"method": "aggregate_results_executor"},
-        )
-
-        # Execute the task first time
-        await task_executor.execute_task_by_id(
-            task_id=task.id, use_streaming=False, db_session=use_test_db_session
-        )
-
-        # Verify task completed
-        task_after_first = await task_repository.get_task_by_id(task.id)
-        assert task_after_first is not None
-        assert task_after_first.status == "completed"
-
-        # Try to execute again - should be skipped (task already completed)
-        await task_executor.execute_task_by_id(
-            task_id=task.id, use_streaming=False, db_session=use_test_db_session
-        )
-
-        # Verify task is still completed and result hasn't changed
-        task_after_second = await task_repository.get_task_by_id(task.id)
-        assert task_after_second is not None
-        assert task_after_second.status == "completed"
-        # Note: The result might be the same or different depending on execution,
-        # but the task should remain completed
+@pytest.mark.asyncio
+async def test_completed_run_rejects_reexecution_without_changing_results(
+    use_test_db_session: Session | AsyncSession,
+) -> None:
+    repository = TaskRepository(use_test_db_session)
+    task = await repository.create_task(
+        name="Completed",
+        params={"executor_id": "aggregate_results_executor"},
+    )
+    await TaskExecutor().execute_task_by_id(task.id, db_session=use_test_db_session)
+    completed = await repository.get_task_by_id(task.id)
+    assert completed is not None
+    before = completed.to_dict()
+    with pytest.raises(ModuleError) as failure:
+        await TaskExecutor().execute_task_by_id(task.id, db_session=use_test_db_session)
+    assert failure.value.code == "RUN_NOT_EXECUTABLE"
+    after = await repository.get_task_by_id(task.id)
+    assert after is not None and after.to_dict() == before

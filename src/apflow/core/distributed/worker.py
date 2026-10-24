@@ -19,7 +19,12 @@ from apflow.core.distributed.lease_manager import LeaseManager
 from apflow.core.distributed.node_registry import NodeRegistry
 from apflow.core.distributed.placement import PlacementEngine
 from apflow.core.distributed.types import TaskExecutorFn
-from apflow.core.storage.sqlalchemy.models import DistributedNode, TaskModel, TaskDispatch
+from apflow.core.storage.sqlalchemy.models import (
+    DistributedNode,
+    TaskModel,
+    TaskDispatch,
+    WorkflowRun,
+)
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
@@ -160,15 +165,33 @@ class WorkerRuntime:
             return []
         with self._session_factory() as session:
             query = session.query(TaskModel).filter(
-                TaskModel.status == "pending",
+                or_(
+                    TaskModel.status == "pending",
+                    (TaskModel.status == "completed")
+                    & (TaskModel.origin_type == "link")
+                    & TaskModel.result_snapshot_hash.isnot(None)
+                    & exists(
+                        select(WorkflowRun.id).where(
+                            WorkflowRun.root_task_id == TaskModel.id,
+                            WorkflowRun.status == "accepted",
+                        )
+                    ),
+                ),
                 TaskModel.schedule_enabled.isnot(True),
                 TaskModel.parent_id.is_(None),
                 TaskModel.cancel_requested_at.is_(None),
                 or_(
                     TaskModel.origin_type.is_(None),
                     TaskModel.origin_type.notin_(["archive", "link"]),
+                    (TaskModel.origin_type == "link") & TaskModel.result_snapshot_hash.isnot(None),
                 ),
                 ~exists(select(TaskDispatch.task_id).where(TaskDispatch.task_id == TaskModel.id)),
+                ~exists(
+                    select(WorkflowRun.id).where(
+                        WorkflowRun.root_task_id == TaskModel.id,
+                        WorkflowRun.status != "accepted",
+                    )
+                ),
             )
             if is_postgresql(session):
                 query = query.with_for_update(skip_locked=True)

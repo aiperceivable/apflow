@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from apflow.bridge.access import authorize_capability, is_administrator, task_owner
 from apflow.governance.ledger import BudgetLedger, scope_budget_key
-from apflow.core.storage.sqlalchemy.models import SubmissionReceipt
+from apflow.core.storage.sqlalchemy.models import ExecutionAttempt, SubmissionReceipt
 
 
 class BudgetScopeModule:
@@ -104,16 +104,9 @@ class BudgetReconcileModule:
         reservation = await ledger.get_reservation(key, inputs["reservation_id"])
         if reservation is None:
             raise ModuleError(code="ACL_DENIED", message="Reservation is outside this budget scope")
+        evidence = await self._evidence(key, inputs, context)
         try:
-            await ledger.settle(
-                inputs["reservation_id"],
-                inputs["actual_tokens"],
-                reconciliation={
-                    "evidence_ref": inputs["evidence_ref"],
-                    "actor": task_owner(context),
-                    "observed_at": datetime.now(timezone.utc).isoformat(),
-                },
-            )
+            await self._settle_confirmed(ledger, inputs, evidence)
         except ValueError as error:
             raise ModuleError(
                 code="INVALID_INPUT",
@@ -132,3 +125,110 @@ class BudgetReconcileModule:
             "state": "settled",
             "evidence_ref": audit.receipt["evidence_ref"],
         }
+
+    async def _settle_confirmed(
+        self, ledger: BudgetLedger, inputs: dict[str, Any], evidence: dict[str, Any]
+    ) -> None:
+        """Publish newly confirmed invocation usage in the settlement transaction."""
+        invocation = (
+            await self._repo.db.execute(
+                select(ExecutionAttempt).where(ExecutionAttempt.id == inputs["reservation_id"])
+            )
+        ).scalar_one_or_none()
+        if invocation is not None:
+            from apflow.governance.usage import UsageRecorder
+
+            await UsageRecorder(self._repo.db._session).reconcile(
+                invocation.id,
+                "reconcile:" + invocation.id,
+                {"total": inputs["actual_tokens"]},
+                evidence,
+            )
+        else:
+            await ledger.settle(
+                inputs["reservation_id"], inputs["actual_tokens"], reconciliation=evidence
+            )
+
+    async def _evidence(self, key: str, inputs: dict[str, Any], context: Any) -> dict[str, Any]:
+        """Reuse the first evidence timestamp so repeated delivery has the same digest."""
+        audit = (
+            await self._repo.db.execute(
+                select(SubmissionReceipt).where(
+                    SubmissionReceipt.scope == "budget-reconciliation:" + key,
+                    SubmissionReceipt.key == inputs["reservation_id"],
+                )
+            )
+        ).scalar_one_or_none()
+        if audit is not None:
+            return {name: audit.receipt[name] for name in ("evidence_ref", "actor", "observed_at")}
+        return {
+            "evidence_ref": inputs["evidence_ref"],
+            "actor": task_owner(context),
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+
+class UsageEventsModule:
+    """Expose immutable usage facts to an owner-scoped billing consumer."""
+
+    description = "Read a cursor page of immutable usage events for billing delivery."
+    annotations = ModuleAnnotations(readonly=True)
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "after_index": {"type": "integer", "minimum": 0},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+        },
+    }
+    output_schema = {"type": "object"}
+
+    def __init__(self, task_repository: Any) -> None:
+        self._repo = task_repository
+
+    async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        from apflow.governance.usage import UsageRecorder
+
+        authorize_capability(
+            getattr(self, "module_id", "apflow.usage.events"), context, inputs=inputs
+        )
+        cursor = inputs.get("after_index", 0)
+        try:
+            events = await UsageRecorder(self._repo.db._session).list_events(
+                task_owner(context), cursor, inputs.get("limit", 100)
+            )
+        except ValueError as error:
+            raise ModuleError(code="INVALID_INPUT", message=str(error)) from error
+        return {
+            "events": events,
+            "next_index": max(cursor, events[-1]["index"]) if events else cursor,
+        }
+
+
+class UsageAcknowledgeModule:
+    """Mark delivery only after the billing consumer has persisted an event."""
+
+    description = "Acknowledge durable delivery of one owned usage event."
+    annotations = ModuleAnnotations(idempotent=True)
+    input_schema = {
+        "type": "object",
+        "properties": {"event_id": {"type": "string", "minLength": 1, "maxLength": 255}},
+        "required": ["event_id"],
+    }
+    output_schema = {"type": "object"}
+
+    def __init__(self, task_repository: Any) -> None:
+        self._repo = task_repository
+
+    async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        from apflow.governance.usage import UsageRecorder
+
+        authorize_capability(getattr(self, "module_id", "apflow.usage.ack"), context, inputs=inputs)
+        try:
+            await UsageRecorder(self._repo.db._session).acknowledge(
+                inputs["event_id"], task_owner(context)
+            )
+        except KeyError as error:
+            raise ModuleError(
+                code="MODULE_NOT_FOUND", message="Usage event does not exist"
+            ) from error
+        return {"event_id": inputs["event_id"], "acknowledged": True}

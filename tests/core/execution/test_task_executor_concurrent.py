@@ -180,12 +180,13 @@ class TestTaskExecutorConcurrentProtection:
         # Verify task is not running after execution completes
         assert not task_executor.is_task_running(root_task_id)
 
-        # Should be able to execute again
-        result = await task_executor.execute_task_tree(
-            task_tree=task_tree,
-            root_task_id=root_task_id,
-            db_session=sync_db_session,
-        )
+        # Tracking is cleaned up, but execution history cannot be reset in place.
+        from apcore.errors import ModuleError
 
-        # Second execution should proceed (not blocked)
-        assert result["status"] != "already_running"
+        with pytest.raises(ModuleError, match="new run"):
+            await task_executor.execute_task_tree(
+                task_tree=task_tree,
+                root_task_id=root_task_id,
+                db_session=sync_db_session,
+            )
+        assert not task_executor.is_task_running(root_task_id)

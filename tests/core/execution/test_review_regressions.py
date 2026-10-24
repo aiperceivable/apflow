@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from apflow.core.base import BaseTask
 from apflow.core.execution.result_protocol import normalize_executor_result
 from apflow.core.execution.task_creator import TaskCreator
+from apcore.errors import ModuleError
 from apflow.core.execution.task_executor import TaskExecutor
 from apflow.core.execution.task_manager import TaskManager
 from apflow.core.extensions import get_registry
@@ -242,10 +243,14 @@ async def test_child_execution_excludes_ancestors_and_unrelated_siblings(
         monkeypatch.setattr(executor, "pre_hooks", [])
         monkeypatch.setattr(executor, "post_hooks", [])
         monkeypatch.setattr(executor, "_build_execution_components", lambda session: {})
-        result = await executor.execute_task_by_id(child_id, db_session=sync_db_session)
-        assert calls == ["dependency", "child"]
-        assert result["status"] == "completed"
-        assert result["result"] == {"label": "child"}
+        with pytest.raises(ModuleError) as rejected:
+            await executor.execute_task_by_id(child_id, db_session=sync_db_session)
+        assert rejected.value.code == "RUN_ROOT_REQUIRED"
+        assert calls == []
+        persisted_child = await repository.get_task_by_id(child_id)
+        persisted_dependency = await repository.get_task_by_id(dependency.id)
+        assert persisted_child is not None and persisted_dependency is not None
+        assert persisted_child.status == persisted_dependency.status == "pending"
         persisted_root = await repository.get_task_by_id(root_id)
         persisted_sibling = await repository.get_task_by_id(sibling_id)
         assert persisted_root is not None and persisted_sibling is not None
@@ -314,13 +319,17 @@ async def test_child_execution_preserves_rejection_status(
     root = await repository.create_task(name="Root")
     child = await repository.create_task(name="Child", parent_id=root.id)
     executor = TaskExecutor()
+    execution = AsyncMock(return_value={"status": status, "root_task_id": root.id})
     monkeypatch.setattr(
         executor,
         "execute_task_tree",
-        AsyncMock(return_value={"status": status, "root_task_id": root.id}),
+        execution,
     )
-    result = await executor.execute_task_by_id(child.id, db_session=sync_db_session)
-    assert result["status"] == status
+    with pytest.raises(ModuleError) as rejected:
+        await executor.execute_task_by_id(child.id, db_session=sync_db_session)
+    assert rejected.value.code == "RUN_ROOT_REQUIRED"
+    execution.assert_not_awaited()
+    assert root.status == child.status == "pending"
 
 
 @pytest.mark.asyncio
@@ -367,22 +376,18 @@ async def test_child_execution_completion_hooks_and_stream_ignore_pending_parent
         monkeypatch.setattr(executor, "pre_hooks", [])
         monkeypatch.setattr(executor, "post_hooks", [])
         monkeypatch.setattr(executor, "_build_execution_components", lambda session: {})
-        result = await executor.execute_task_by_id(
-            child_id,
-            db_session=sync_db_session,
-            use_streaming=streaming,
-            streaming_callbacks_context=object() if streaming else None,
-        )
-        assert result["status"] == "completed"
-        hook_types = [call.args[0] for call in hook.await_args_list]
-        assert "on_tree_completed" in hook_types
-        assert "on_tree_failed" not in hook_types
-        if streaming:
-            final_events = [event for event in events if event["type"] == "final"]
-            assert len(final_events) == 1
-            assert final_events[0]["status"] == "completed"
-            assert final_events[0]["result"] == {"label": "child"}
-            assert final_events[0]["progress"] == 1.0
+        with pytest.raises(ModuleError) as rejected:
+            await executor.execute_task_by_id(
+                child_id,
+                db_session=sync_db_session,
+                use_streaming=streaming,
+                streaming_callbacks_context=object() if streaming else None,
+            )
+        assert rejected.value.code == "RUN_ROOT_REQUIRED"
+        hook.assert_not_awaited()
+        assert events == []
+        persisted_child = await repository.get_task_by_id(child_id)
+        assert persisted_child is not None and persisted_child.status == "pending"
         persisted_root = await repository.get_task_by_id(root_id)
         assert persisted_root is not None
         assert persisted_root.status == "pending"

@@ -5,6 +5,7 @@ from apflow.core.builders import TaskBuilder
 from apflow.core.extensions.decorators import executor_register
 from apflow.core.extensions.registry import get_registry
 from apflow.core.execution.task_manager import TaskManager
+from apflow.core.execution.task_executor import TaskExecutor
 from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
 
 
@@ -104,10 +105,11 @@ async def test_task_builder_executes_with_multiple_dependencies(sync_db_session)
         .depends_on(str(dep1.id), str(dep2.id))
     )
 
-    result = await builder.execute()
+    built = await builder.build()
+    result = await TaskExecutor().execute_task_by_id(root.id, db_session=sync_db_session)
 
     assert result["status"] == "completed"
-    stored = await repo.get_task_by_id(result["root_task_id"])
+    stored = await repo.get_task_by_id(built.task.id)
     assert stored is not None
     assert stored.result["echo"]["base"] == "ok"
     assert {d["id"] for d in stored.dependencies} == {str(dep1.id), str(dep2.id)}
@@ -155,10 +157,11 @@ async def test_task_builder_executes_with_multi_level_dependencies(sync_db_sessi
         .depends_on(str(dep_b.id))
     )
 
-    result = await builder.execute()
+    built = await builder.build()
+    result = await TaskExecutor().execute_task_by_id(root.id, db_session=sync_db_session)
 
     assert result["status"] == "completed"
-    stored = await repo.get_task_by_id(result["root_task_id"])
+    stored = await repo.get_task_by_id(built.task.id)
     assert stored is not None
     assert stored.result["echo"]["c"] == 3
     assert stored.dependencies == [{"id": str(dep_b.id), "required": True}]

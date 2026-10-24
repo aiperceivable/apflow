@@ -56,7 +56,7 @@ class SessionBoundModule:
         """Stop new service work if a required capability becomes unavailable."""
         identifier = getattr(self._module, "module_id", "")
         if self._registry is None or not identifier.endswith(
-            (".task.create", ".task.create_tree", ".task.submit")
+            (".task.create", ".task.create_tree", ".task.submit", ".run.retry")
         ):
             return
         from apcore.errors import ModuleError

@@ -7,6 +7,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
 
+from sqlalchemy import and_, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+
+from apflow.core.storage.sqlalchemy.models import ExecutionAttempt, TaskModel, UsageEvent
+
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
@@ -49,8 +55,7 @@ class UsageReporter:
         if task is None:
             raise KeyError(f"Task '{task_id}' not found")
 
-        usage = task.token_usage or {}
-        cost = float(task.actual_cost_usd) if task.actual_cost_usd else 0.0
+        usage, cost, unknown_usage, unknown_cost = await self._accounted_usage(task)
 
         return UsageSummary(
             scope="task",
@@ -60,8 +65,8 @@ class UsageReporter:
             total_tokens=usage.get("total", 0),
             total_cost_usd=cost,
             task_count=1,
-            unknown_cost_task_count=int(task.actual_cost_usd is None),
-            unknown_usage_task_count=int(not task.token_usage),
+            unknown_cost_task_count=unknown_cost,
+            unknown_usage_task_count=unknown_usage,
         )
 
     async def get_user_usage(
@@ -84,33 +89,24 @@ class UsageReporter:
         unknown_cost_count = 0
         unknown_usage_count = 0
 
-        # query_tasks() is paginated (default limit=100); page through every
-        # result instead of only the first page, or a user with more tasks
-        # than one page would silently get an incomplete usage report. The
-        # time window is pushed into SQL (created_after/created_before) so a
-        # bounded report scans only the window, not the user's full history.
+        # Event time governs managed consumption, including receipts arriving later.
         page_size = 100
         offset = 0
         while True:
-            tasks = await self._repo.query_tasks(
-                user_id=user_id,
-                limit=page_size,
-                offset=offset,
-                created_after=start_time,
-                created_before=end_time,
-            )
+            tasks = await self._report_tasks(user_id, start_time, end_time, page_size, offset)
             if not tasks:
                 break
 
             for task in tasks:
-                usage = task.token_usage or {}
+                usage, cost, unknown_usage, unknown_cost = await self._accounted_usage(
+                    task, start_time, end_time
+                )
                 total_input += usage.get("input", 0)
                 total_output += usage.get("output", 0)
                 total_tokens += usage.get("total", 0)
-                if task.actual_cost_usd:
-                    total_cost += float(task.actual_cost_usd)
-                unknown_cost_count += int(task.actual_cost_usd is None)
-                unknown_usage_count += int(not task.token_usage)
+                total_cost += cost
+                unknown_cost_count += unknown_cost
+                unknown_usage_count += unknown_usage
                 count += 1
 
             if len(tasks) < page_size:
@@ -130,6 +126,82 @@ class UsageReporter:
             period_start=start_time,
             period_end=end_time,
         )
+
+    async def _report_tasks(
+        self, user_id: str, start: datetime | None, end: datetime | None, limit: int, offset: int
+    ) -> list[TaskModel]:
+        session = getattr(getattr(self._repo, "db", None), "session", None)
+        if not isinstance(session, (Session, AsyncSession)):
+            return await self._repo.query_tasks(
+                user_id=user_id, limit=limit, offset=offset, created_after=start, created_before=end
+            )
+        model = self._repo.task_model_class
+        events = select(UsageEvent.id).where(UsageEvent.task_id == model.id)
+        window = events
+        legacy = []
+        if start is not None:
+            window = window.where(UsageEvent.created_at >= start)
+            legacy.append(model.created_at >= start)
+        if end is not None:
+            window = window.where(UsageEvent.created_at <= end)
+            legacy.append(model.created_at <= end)
+        query = select(model).where(
+            model.user_id == user_id, or_(window.exists(), and_(~events.exists(), *legacy))
+        )
+        return list(
+            (
+                await self._repo.db.execute(query.order_by(model.id).offset(offset).limit(limit))
+            ).scalars()
+        )
+
+    async def _accounted_usage(
+        self, task: TaskModel, start: datetime | None = None, end: datetime | None = None
+    ) -> tuple[dict[str, int], float, int, int]:
+        """Prefer consumption facts; inherited reference totals never become new spend."""
+        session = getattr(getattr(self._repo, "db", None), "session", None)
+        events: list[UsageEvent] = []
+        attempts: list[ExecutionAttempt] = []
+        if isinstance(session, (Session, AsyncSession)):
+            events = list(
+                (
+                    await self._repo.db.execute(
+                        select(UsageEvent).where(
+                            UsageEvent.task_id == task.id,
+                            *([UsageEvent.created_at >= start] if start else []),
+                            *([UsageEvent.created_at <= end] if end else []),
+                        )
+                    )
+                ).scalars()
+            )
+            attempts = list(
+                (
+                    await self._repo.db.execute(
+                        select(ExecutionAttempt).where(ExecutionAttempt.task_id == task.id)
+                    )
+                ).scalars()
+            )
+        if task.origin_type in {"link", "copy"} and not events and not attempts:
+            return {}, 0.0, int(bool(task.token_usage)), int(task.actual_cost_usd is not None)
+        managed = bool(events or attempts or isinstance(task.run_id, str) and task.run_id)
+        if managed:
+            usage = {"input": 0, "output": 0, "total": 0}
+            for event in events:
+                for name in usage:
+                    usage[name] += event.token_usage.get(name, 0)
+            confirmed = {event.invocation_id for event in events if event.evidence is not None}
+            unknown = not events or any(
+                attempt.id not in confirmed
+                and (attempt.status in {"running", "unknown"} or not attempt.token_usage)
+                for attempt in attempts
+            )
+        else:
+            usage = task.token_usage or {}
+            unknown = not task.token_usage
+        cost = float(task.actual_cost_usd) if task.actual_cost_usd else 0.0
+        # Legacy row-level money has no per-event timestamp attribution.
+        if managed and (start is not None or end is not None):
+            return usage, 0.0, int(unknown), 1
+        return usage, cost, int(unknown), int(task.actual_cost_usd is None)
 
     def export_json(self, summary: UsageSummary) -> str:
         """Export usage summary as JSON string."""

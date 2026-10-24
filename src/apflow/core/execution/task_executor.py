@@ -231,7 +231,6 @@ class TaskExecutor:
         db_session: Optional[Union[Session, AsyncSession]] = None,
         executable_task_ids: Optional[set[str]] = None,
         execution_task_id: Optional[str] = None,
-        resume: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute a task tree
@@ -260,7 +259,6 @@ class TaskExecutor:
                     db_session=session,
                     executable_task_ids=executable_task_ids,
                     execution_task_id=execution_task_id,
-                    resume=resume,
                 )
 
         from apflow.core.execution.context import execution_context
@@ -280,7 +278,6 @@ class TaskExecutor:
                     db_session=db_session,
                     executable_task_ids=executable_task_ids,
                     execution_task_id=execution_task_id,
-                    resume=resume,
                 )
             finally:
                 execution_context.reset(token)
@@ -318,11 +315,49 @@ class TaskExecutor:
 
         # Start task tracking
         await self.start_task_tracking(root_task_id)
+        from sqlalchemy_session_proxy import SqlalchemySessionProxy
 
+        task_database = SqlalchemySessionProxy(db_session)
+        run_service = None
+        run_context_token = None
         try:
-            # Mark all tasks in the tree for re-execution
-            # This ensures failed tasks and their dependencies are re-executed
-            tasks_to_reexecute = set() if resume else self._mark_tasks_for_reexecution(task_tree)
+            from apflow.core.execution.runs import RunService
+
+            # Persisted runs are single-use. Pure injected trees retain their test contract.
+            persisted_root = (
+                await task_database.execute(
+                    select(self.task_model_class).where(self.task_model_class.id == root_task_id)
+                )
+            ).scalar_one_or_none()
+            if persisted_root is not None:
+                from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
+
+                repository = TaskRepository(db_session, task_model_class=self.task_model_class)
+                fence = await repository._execution_fence(root_task_id)
+                allowed = (
+                    await task_database.execute(
+                        select(self.task_model_class.id).where(
+                            self.task_model_class.id == root_task_id, fence
+                        )
+                    )
+                ).first()
+                if allowed is None:
+                    return {
+                        "status": "already_running",
+                        "root_task_id": root_task_id,
+                        "message": "Another runtime owns this run",
+                    }
+                run_service = RunService(db_session)
+                await run_service.start_run(root_task_id)
+                from apcore import Context
+
+                current = execution_context.get()
+                scoped = copy.copy(current) if current is not None else Context.create()
+                scoped.data = {**scoped.data, "run_id": root_task_id}
+                run_context_token = execution_context.set(scoped)
+            tasks_to_reexecute = (
+                set() if run_service else self._mark_tasks_for_reexecution(task_tree)
+            )
 
             # Create TaskManager with hooks (cached at initialization)
             # In production, hooks are registered at application startup before TaskExecutor creation
@@ -381,13 +416,22 @@ class TaskExecutor:
             if updated_root_task is not None:
                 result["result"] = root_result
 
+            if run_service is not None:
+                result["run_id"] = root_task_id
+                result["status"] = await run_service.finish_from_tasks(root_task_id)
             return result
 
-        except Exception as e:
-            logger.error(f"Error executing task tree: {str(e)}", exc_info=True)
+        except asyncio.CancelledError:
+            # A process shutdown is not evidence of remote completion. Lease recovery
+            # determines whether an invocation began before permitting redispatch.
+            raise
+        except Exception:
+            if run_service is not None and run_context_token is not None:
+                await run_service.finish_run(root_task_id, "reconciliation_required")
             raise
         finally:
-            # Stop task tracking
+            if run_context_token is not None:
+                execution_context.reset(run_context_token)
             await self.stop_task_tracking(root_task_id)
 
     async def start_task_tracking(self, context_id: str) -> None:
@@ -483,6 +527,10 @@ class TaskExecutor:
         if not results:
             return await self.cancel_task(root_task_id, error_message, db_session)
         confirmed = all(result.get("stop_confirmed", False) for result in results)
+        if confirmed:
+            from apflow.core.execution.runs import RunService
+
+            await RunService(db_session).finish_from_tasks(root_task_id)
         return {
             "status": "cancelled" if confirmed else "cancelling",
             "results": results,
@@ -1103,14 +1151,12 @@ class TaskExecutor:
         streaming_callbacks_context: Optional[Any] = None,
         use_demo: bool = False,
         db_session: Optional[Union[Session, AsyncSession]] = None,
-        resume: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute a task by ID with automatic dependency handling
 
-        This method supports executing both root tasks and child tasks:
-        - Root task: Executes the entire task tree
-        - Child task: Executes the task and all its dependencies (including transitive dependencies)
+        A run always executes its complete accepted graph. Child task requests must
+        execute the structural root or create a derived retry run.
 
         Args:
             task_id: Task ID to execute
@@ -1135,7 +1181,6 @@ class TaskExecutor:
                     streaming_callbacks_context=streaming_callbacks_context,
                     use_demo=use_demo,
                     db_session=session,
-                    resume=resume,
                 )
 
         # Create repository
@@ -1161,7 +1206,6 @@ class TaskExecutor:
                     streaming_callbacks_context=streaming_callbacks_context,
                     use_demo=use_demo,
                     db_session=db_session,
-                    resume=resume,
                 )
             finally:
                 execution_context.reset(token)
@@ -1172,40 +1216,19 @@ class TaskExecutor:
 
         # Check if the task is a root task (no parent_id)
         is_root_task = task.parent_id is None
+        if not is_root_task:
+            from apcore.errors import ModuleError
+
+            raise ModuleError(
+                code="RUN_ROOT_REQUIRED",
+                message="Execute the structural root or create a new retry run",
+            )
 
         # Build full task tree starting from root task
         full_task_tree = await task_repository.build_task_tree(root_task)
 
-        # Determine which tasks to execute
-        required_task_ids: Optional[set[str]] = None
-        if is_root_task:
-            # If it's a root task, execute the entire tree
-            task_tree = full_task_tree
-            logger.info(f"Executing root task {task_id}: full tree will be executed")
-        else:
-            # If it's a child task, collect all dependencies (including transitive)
-            # Get all tasks in the tree for dependency lookup
-            all_tasks_in_tree = await task_repository.get_all_tasks_in_tree(root_task)
-
-            # Collect all dependencies recursively (excluding the target task itself)
-            dependency_ids = await self._collect_all_dependencies(
-                task_id, task_repository, set(), set(), all_tasks_in_tree
-            )
-            # Add the target task itself and all its dependencies
-            required_task_ids = dependency_ids.copy()
-            required_task_ids.add(task_id)
-
-            logger.info(
-                f"Executing child task {task_id}: will execute task and {len(required_task_ids) - 1} dependencies"
-            )
-
-            # Build subtree containing target task and all dependencies
-            task_tree = self._build_subtree_with_dependencies(
-                task_id, full_task_tree, required_task_ids
-            )
-
-            if not task_tree:
-                raise ValueError(f"Could not build subtree for task {task_id}")
+        task_tree = full_task_tree
+        logger.info("Executing run %s with its complete accepted graph", root_task_id)
 
         # Execute task tree using existing method
         execution_result = await self.execute_task_tree(
@@ -1215,9 +1238,7 @@ class TaskExecutor:
             streaming_callbacks_context=streaming_callbacks_context,
             use_demo=use_demo,
             db_session=db_session,
-            executable_task_ids=required_task_ids,
             execution_task_id=task_id,
-            resume=resume,
         )
 
         return execution_result

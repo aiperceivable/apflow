@@ -30,3 +30,11 @@ See plan.md § Design Decisions: Persistence, API, execution state, and cross-se
 
 ## Verification
 See [plan.md](../plan.md#final-verification) for named APF coverage, final commands, results, and deployment boundaries.
+
+## Approved Run Revision
+
+The accepted revision replaces resetting old tasks with `run.retry` and requires
+root execution for a managed graph. Unknown outcomes require replay evidence.
+`test_task_reexecution.py` verifies new identities, retained original failures,
+unbilled dependency reuse and terminal rejection. Error taxonomy tests verify
+transport status 409 for Run conflicts.

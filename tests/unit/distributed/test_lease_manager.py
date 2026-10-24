@@ -9,6 +9,7 @@ from apflow.core.distributed.lease_manager import LeaseManager
 from apflow.core.storage.sqlalchemy.models import (
     TaskLease,
     TaskModel,
+    WorkflowRun,
 )
 
 
@@ -88,7 +89,7 @@ class TestLeaseManager:
     def test_cleanup_expired_leases(
         self, session_factory, config, session, sample_node, sample_task
     ):
-        """Cleanup removes expired leases and reverts task status to pending."""
+        """Cleanup preserves interrupted execution history and requires reconciliation."""
         manager = LeaseManager(session_factory, config)
 
         lease = manager.acquire_lease("task-1", "worker-1")
@@ -110,9 +111,13 @@ class TestLeaseManager:
         remaining = session.get(TaskLease, "task-1")
         assert remaining is None
 
-        # Verify task reverted to pending
+        # Losing a lease cannot prove the remote operation did not happen.
         task = session.get(TaskModel, "task-1")
-        assert task.status == "pending"
+        assert task.status == "in_progress"
+        assert task.error_info["delivery_state"] == "unknown"
+        run = session.get(WorkflowRun, "task-1")
+        assert run is not None and run.status == "reconciliation_required"
+        assert manager.acquire_lease("task-1", "worker-1") is None
 
     def test_cleanup_expired_leases_does_not_report_already_completed_task(
         self, session_factory, config, session, sample_node, sample_task
@@ -283,30 +288,85 @@ class TestLeaseManagerValidation:
             manager.release_lease("task-1", "")
 
 
-class TestCleanupBumpsAttemptId:
-    """cleanup_expired_leases must bump attempt_id when reverting a task so the
-    reassigned execution gets a fresh idempotency key (mock-based; no DB)."""
+class TestCleanupPreservesExecutionHistory:
+    """Lease expiry preserves the complete legacy structural root and execution generation."""
 
-    def test_revert_in_progress_bumps_attempt_id(self):
-        from unittest.mock import MagicMock
-
-        from apflow.core.distributed.config import DistributedConfig
-
-        lease = MagicMock()
-        lease.task_id = "t1"
-        task = MagicMock()
-        task.status = "in_progress"
-        task.attempt_id = 0
-
-        session = MagicMock()
-        session.__enter__ = MagicMock(return_value=session)
-        session.__exit__ = MagicMock(return_value=False)
-        session.query.return_value.filter.return_value.all.return_value = [lease]
-        session.get.return_value = task
-        factory = MagicMock(return_value=session)
-
-        manager = LeaseManager(factory, DistributedConfig(node_id="n"))
+    def test_child_lease_enrolls_whole_tree_without_resetting_generation(
+        self, session_factory, config, session, sample_node, sample_task
+    ):
+        child = TaskModel.create(
+            {
+                "id": "child",
+                "name": "Child",
+                "parent_id": "task-1",
+                "status": "in_progress",
+                "attempt_id": 4,
+            }
+        )
+        session.add(child)
+        session.commit()
+        manager = LeaseManager(session_factory, config)
+        lease = manager.acquire_lease("child", "worker-1")
+        assert lease is not None
+        session.get(TaskLease, "child").expires_at = datetime.now(timezone.utc) - timedelta(
+            seconds=5
+        )
+        session.commit()
         manager.cleanup_expired_leases()
+        session.expire_all()
+        child = session.get(TaskModel, "child")
+        root = session.get(TaskModel, "task-1")
+        run = session.get(WorkflowRun, "task-1")
+        assert child.status == "in_progress" and child.attempt_id == 4
+        assert root.status == "pending"
+        assert child.run_id == root.run_id == run.id
+        assert run.status == "reconciliation_required"
+        assert {row["id"] for row in run.definition_snapshot["tasks"]} == {"task-1", "child"}
 
-        assert task.status == "pending"
-        assert task.attempt_id == 1
+    def test_expired_invocation_moves_reserved_budget_to_unknown_once(
+        self, session_factory, config, session, sample_node, sample_task
+    ):
+        from apflow.core.storage.sqlalchemy.models import (
+            BudgetAccount,
+            BudgetReservation,
+            ExecutionAttempt,
+        )
+
+        manager = LeaseManager(session_factory, config)
+        lease = manager.acquire_lease("task-1", "worker-1")
+        assert lease is not None
+        task = session.get(TaskModel, "task-1")
+        task.status = "in_progress"
+        session.add_all(
+            [
+                BudgetAccount(scope_id="scope", limit_tokens=10, reserved_tokens=5),
+                BudgetReservation(
+                    id="invocation",
+                    scope_id="scope",
+                    task_id="task-1",
+                    state="reserved",
+                    reserved_tokens=5,
+                ),
+                ExecutionAttempt(
+                    id="invocation",
+                    task_id="task-1",
+                    attempt_id=0,
+                    attempt_number=1,
+                    status="running",
+                    started_at=datetime.now(timezone.utc),
+                ),
+            ]
+        )
+        session.get(TaskLease, "task-1").expires_at = datetime.now(timezone.utc) - timedelta(
+            seconds=5
+        )
+        session.commit()
+        manager.cleanup_expired_leases()
+        manager.cleanup_expired_leases()
+        session.expire_all()
+        account = session.get(BudgetAccount, "scope")
+        reservation = session.get(BudgetReservation, "invocation")
+        invocation = session.get(ExecutionAttempt, "invocation")
+        assert account.reserved_tokens == 0 and account.unknown_tokens == 5
+        assert reservation.state == "unknown" and reservation.actual_tokens is None
+        assert invocation.status == "unknown" and invocation.run_id == "task-1"

@@ -5,9 +5,9 @@ to ensure exactly-once execution semantics across worker nodes.
 """
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 
-from sqlalchemy import select, text, update
+from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -18,7 +18,15 @@ from apflow.core.distributed.config import (
     utcnow as _utcnow,
 )
 from apflow.core.distributed.events import emit_task_event
-from apflow.core.storage.sqlalchemy.models import TaskDispatch, TaskLease, TaskModel
+from apflow.core.storage.sqlalchemy.models import (
+    BudgetAccount,
+    BudgetReservation,
+    ExecutionAttempt,
+    TaskDispatch,
+    TaskLease,
+    TaskModel,
+    WorkflowRun,
+)
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
@@ -51,6 +59,10 @@ class LeaseManager:
                 session.rollback()
                 return None
             if session.scalar(select(TaskDispatch.task_id).where(TaskDispatch.task_id == task_id)):
+                session.rollback()
+                return None
+            run = session.get(WorkflowRun, task_id)
+            if run is not None and run.status != "accepted":
                 session.rollback()
                 return None
             if is_postgresql(session):
@@ -209,41 +221,139 @@ class LeaseManager:
                 )
 
     def cleanup_expired_leases(self) -> list[str]:
-        """Delete expired leases and revert their tasks to pending status.
-
-        Returns a list of task_ids whose leases were cleaned up.
-        """
+        """Remove expired ownership; preserve every started execution for reconciliation."""
+        cleaned: list[str] = []
         with self._session_factory() as session:
             now = _utcnow()
-            expired_leases = session.query(TaskLease).filter(TaskLease.expires_at <= now).all()
-
-            cleaned_task_ids: list[str] = []
-            for lease in expired_leases:
-                task = session.get(TaskModel, lease.task_id)
-                if task is not None and task.status == "in_progress":
-                    task.status = "pending"
-                    # Bump attempt_id so the reassigned execution computes a fresh
-                    # idempotency key rather than colliding with the timed-out
-                    # attempt's stored (and possibly failed) result.
-                    task.attempt_id = (task.attempt_id or 0) + 1
-                    cleaned_task_ids.append(lease.task_id)
-                    logger.info("Cleaned up expired lease for task %s", lease.task_id)
-                else:
-                    # A racing worker already moved the task past in_progress
-                    # (or it no longer exists) before this sweep ran — the
-                    # stale lease row is still removed, but the task was never
-                    # actually reassigned, so it must not be reported as such.
-                    logger.debug(
-                        "Removed expired lease for task %s without reassignment "
-                        "(task status: %s)",
-                        lease.task_id,
-                        task.status if task is not None else "missing",
+            leases = session.query(TaskLease).filter(TaskLease.expires_at <= now).all()
+            for lease in leases:
+                removed = session.execute(
+                    delete(TaskLease)
+                    .where(
+                        TaskLease.task_id == lease.task_id,
+                        TaskLease.lease_token == lease.lease_token,
+                        TaskLease.expires_at <= now,
                     )
-                session.delete(lease)
-
+                    .execution_options(synchronize_session=False)
+                )
+                if not removed.rowcount:
+                    continue
+                task = session.get(TaskModel, lease.task_id)
+                if task is None:
+                    continue
+                run, tasks = self._recover_run(session, task)
+                if self._reconcile_run(session, run, tasks, now):
+                    cleaned.append(lease.task_id)
             session.commit()
+        for task_id in cleaned:
+            emit_task_event(self._session_factory, task_id, "task_reconciliation_required")
+        return cleaned
 
-        for tid in cleaned_task_ids:
-            emit_task_event(self._session_factory, tid, "task_reassigned")
+    def _recover_run(
+        self, session: Session, task: TaskModel
+    ) -> tuple[WorkflowRun, list[TaskModel]]:
+        from apflow.core.execution.runs import new_run_record
+        from apflow.core.execution.error_info import execution_error_info
 
-        return cleaned_task_ids
+        root, visited = task, {task.id}
+        while root.parent_id is not None:
+            parent = session.get(TaskModel, root.parent_id)
+            if parent is None or parent.id in visited:
+                raise ValueError("Interrupted task has an invalid structural ancestry")
+            root = parent
+            visited.add(root.id)
+        session.execute(
+            update(TaskModel).where(TaskModel.id == root.id).values(updated_at=TaskModel.updated_at)
+        )
+        descendants = (
+            select(TaskModel.id)
+            .where(TaskModel.id == root.id)
+            .cte(name="recovery_tree", recursive=True)
+        )
+        descendants = descendants.union_all(
+            select(TaskModel.id).where(TaskModel.parent_id == descendants.c.id)
+        )
+        tasks = list(
+            session.scalars(
+                select(TaskModel).where(TaskModel.id.in_(select(descendants.c.id)))
+            ).all()
+        )
+        run = session.get(WorkflowRun, root.run_id or root.id)
+        if run is None:
+            for node in tasks:
+                if (
+                    node.status == "in_progress"
+                    and (node.error_info or {}).get("delivery_state") != "unknown"
+                ):
+                    node.error_info = dict(
+                        execution_error_info(
+                            RuntimeError("Execution lease expired without a confirmed outcome"),
+                            task_id=node.id,
+                            attempt_id=node.attempt_id or 0,
+                            phase="lease_recovery",
+                        )
+                    )
+            run = new_run_record(root, tasks)
+            session.add(run)
+            session.flush()
+            session.execute(
+                update(TaskModel)
+                .where(TaskModel.id.in_([node.id for node in tasks]), TaskModel.run_id.is_(None))
+                .values(run_id=run.id)
+                .execution_options(synchronize_session="fetch")
+            )
+        return run, tasks
+
+    def _reconcile_run(
+        self, session: Session, run: WorkflowRun, tasks: list[TaskModel], now: datetime
+    ) -> bool:
+        invocations = list(
+            session.scalars(
+                select(ExecutionAttempt).where(
+                    or_(
+                        ExecutionAttempt.run_id == run.id,
+                        ExecutionAttempt.task_id.in_([node.id for node in tasks]),
+                    )
+                )
+            ).all()
+        )
+        interrupted = [
+            invocation for invocation in invocations if invocation.status in {"running", "unknown"}
+        ]
+        for invocation in invocations:
+            if invocation.run_id is None:
+                invocation.run_id = run.id
+        started = bool(invocations) or any(
+            node.started_at is not None or (node.status != "pending" and node.origin_type != "link")
+            for node in tasks
+        )
+        if run.status in {"accepted", "running"}:
+            run.status = "reconciliation_required" if started else "accepted"
+            run.completed_at = now if started else None
+            if not started:
+                run.started_at = None
+        for invocation in interrupted:
+            invocation.status = "unknown"
+            invocation.completed_at = invocation.completed_at or now
+        if run.status == "reconciliation_required" or interrupted:
+            self._hold_unknown_reservations(session, [node.id for node in tasks])
+        return run.status == "reconciliation_required"
+
+    def _hold_unknown_reservations(self, session: Session, task_ids: list[str]) -> None:
+        held = session.execute(
+            update(BudgetReservation)
+            .where(BudgetReservation.task_id.in_(task_ids), BudgetReservation.state == "reserved")
+            .values(state="unknown", actual_tokens=None)
+            .returning(BudgetReservation.scope_id, BudgetReservation.reserved_tokens)
+            .execution_options(synchronize_session=False)
+        ).all()
+        for scope_id, tokens in held:
+            session.execute(
+                update(BudgetAccount)
+                .where(BudgetAccount.scope_id == scope_id)
+                .values(
+                    reserved_tokens=BudgetAccount.reserved_tokens - tokens,
+                    unknown_tokens=BudgetAccount.unknown_tokens + tokens,
+                )
+                .execution_options(synchronize_session=False)
+            )

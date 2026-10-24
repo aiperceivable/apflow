@@ -150,7 +150,13 @@ def create_app(
     setattr(registry, "apflow_session_factory", factory)
     for module_id in list(registry.list()):
         if module_id.startswith(
-            (f"{namespace}.task.", f"{namespace}.schedule.", f"{namespace}.budget.")
+            (
+                f"{namespace}.task.",
+                f"{namespace}.schedule.",
+                f"{namespace}.budget.",
+                f"{namespace}.run.",
+                f"{namespace}.usage.",
+            )
         ):
             module = registry.get(module_id)
             registry.unregister(module_id)

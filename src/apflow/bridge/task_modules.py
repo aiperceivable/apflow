@@ -479,6 +479,20 @@ class TaskGetModule:
             dispatch = result.scalar_one_or_none()
             if dispatch is not None:
                 payload["dispatch"] = {"state": dispatch.state, "attempt_id": dispatch.attempt_id}
+            if task.run_id is not None:
+                from apflow.core.storage.sqlalchemy.models import WorkflowRun
+
+                run = (
+                    await self._repo.db.execute(
+                        select(WorkflowRun).where(WorkflowRun.id == task.run_id)
+                    )
+                ).scalar_one_or_none()
+                if run is not None:
+                    payload["run"] = {
+                        "run_id": run.id,
+                        "state": run.status,
+                        "retry_of_run_id": run.retry_of_run_id,
+                    }
         return redact_public_data(payload)
 
 

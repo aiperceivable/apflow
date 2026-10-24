@@ -70,7 +70,7 @@ tree = await task_creator.from_link(original_task)
 - Creates new tasks that **point to** the originals via `original_task_id`
 - Result/params/inputs/schemas are cleared (the link reads from the original)
 - Requires entire source tree to be `completed`
-- Does not duplicate data — minimal storage cost
+- Does not duplicate business results; the reference has no new usage or actual cost
 - Source and Link must have the same owner; linking does not grant cross-user access.
 - Tree queries and dependency injection share bounded effective-result resolution.
   Missing originals, ownership violations, and reference cycles raise explicit errors;
@@ -84,7 +84,8 @@ tree = await task_creator.from_link(original_task)
 tree = await task_creator.from_copy(original_task, priority=0, inputs={"url": "new_url"})
 ```
 
-- Creates a full copy with new UUIDs
+- Creates a full copy with new UUIDs and fresh pending execution state
+- Clears results, errors, checkpoints, invocation counters, usage, and actual costs
 - All `dependencies` IDs are automatically remapped to new IDs
 - Upstream dependencies are auto-included (`_auto_include_deps=True`)
 - Override any field via `**reset_kwargs`
@@ -171,6 +172,63 @@ When the scheduled definition was itself created fresh (`origin_type=create`, th
 case) this is exactly the definition; if the definition is itself a copy, runs group under
 that ancestor instead. Promote to a dedicated `template_id` column only if precise
 provenance for copied-then-scheduled definitions is required.
+
+---
+
+## Runs, retries, and accounting
+
+`WorkflowRun` records one accepted graph definition, its hash, owner, and lifecycle.
+Its ID is the structural root ID; every participating task carries `run_id`.
+Run status is calculated from every node, independently of the root task's own status.
+Execution starts at the structural root. Executing a child alone is rejected because
+it would leave the accepted graph only partly executed. Use `TaskBuilder.build()`
+to assemble child definitions before executing their structural root; `execute()`
+is for a builder that creates an execution root.
+
+An accepted run can start once. Terminal runs retain their task states and outputs.
+`run.retry` requires `run_id` and an `idempotency_key`, creates a new run and new task
+IDs, and records `retry_of_run_id` plus each node's direct `source_task_id`.
+Confirmed completed results become immutable local snapshots with a result hash;
+unfinished nodes start pending. Reused results incur no new consumption. Optional
+`task_ids` select seeds, affected downstream nodes, required dependencies, and
+structural ancestors; an incomplete dependency scope is rejected. The response's
+`task_mapping` describes the resulting scope. Create the retry with `run.retry`, then
+execute its root with `task.execute` or enqueue it with `task.submit`.
+
+Unknown remote outcomes require replay authorization and an evidence reference.
+A new task ID does not make a remote side effect safe to repeat: confirm the remote
+receipt or retain the same business idempotency key. `task.reconcile` no longer resets
+historical tasks. There is no generic tree `resume` argument. Dispatch recovery may
+requeue accepted work that never started; interrupted started work requires
+reconciliation. Executor-specific checkpoints remain opt-in within the active run's
+retry policy and are not inherited by a new run.
+
+`ExecutionAttempt.id` identifies one physical invocation and is also its budget
+reservation ID. `UsageEvent` stores immutable consumption facts with stable event
+IDs. Duplicate reports with identical IDs and content have no effect; conflicting
+content is rejected. Cumulative cancellation snapshots contribute only the new delta.
+Invocation finalization, its usage event, task usage projection, and local budget
+settlement commit together. Late usage remains attributable to its original run;
+stale workers cannot replace newer task results. Evidence-based reconciliation can
+append a correction without changing the original consumption facts or execution
+outcome. Missing usage keeps budget liability unknown rather than assuming zero.
+
+`usage.events` returns owner-scoped events ordered by an integer cursor;
+`usage.ack` acknowledges durable delivery. Unacknowledged events are redelivered
+even below the cursor, because sequence allocation can precede another transaction's
+commit. `next_index` never moves backward. Delivery is at least once: the billing
+owner must persist and deduplicate by event ID in the same transaction as its wallet
+entry before acknowledging. apflow maintains consumption and budget accounting;
+the billing owner maintains monetary transactions. Imported legacy baseline facts
+remain available to usage reporting and are excluded from new billing delivery.
+Migration 007 adds the new tables and nullable lineage without resetting old tasks.
+For a legacy failed tree, pass its root task ID to `run.retry`; historical Run
+enrollment and the new retry commit together without resetting the old nodes.
+Retry configuration must be reproducible from the sanitized snapshot: legacy inline
+credentials that were redacted require a fresh definition using `credential_ref`.
+
+Cancellation affects pending and running nodes. Completed and failed nodes retain
+their state, results, and fees; cancellation is not rollback of remote effects.
 
 ---
 

@@ -288,6 +288,6 @@ async def test_execution_summary_includes_failed_child(sync_db_session: Session)
         db_session=sync_db_session,
     )
     assert str(tree.task.status) == "completed"
-    assert result["status"] == "failed"
+    assert result["status"] == "reconciliation_required"
     assert result["progress"] == pytest.approx(2 / 3)
     assert result["result"]["results"] == {"leaf": {"value": 1}}

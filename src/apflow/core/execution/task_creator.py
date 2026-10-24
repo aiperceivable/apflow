@@ -645,6 +645,24 @@ class TaskCreator:
             "params": None,
             "inputs": None,
             "schemas": None,
+            "token_usage": None,
+            "actual_cost_usd": None,
+            "attempt_id": 0,
+            "attempt_count": 0,
+            "cancel_requested_at": None,
+            "lease_id": None,
+            "lease_expires_at": None,
+            "run_id": None,
+            "source_task_id": None,
+            "result_snapshot_hash": None,
+            "started_at": None,
+            "completed_at": None,
+            "created_at": None,
+            "updated_at": None,
+            "checkpoint_at": None,
+            "resume_from": None,
+            "last_assigned_node": None,
+            "idempotency_key": None,
         }
 
     async def from_link(
@@ -1358,23 +1376,28 @@ class TaskCreator:
         # entire tree clone, so mutating it here (id / lineage) would leak this
         # task's identity onto sibling/descendant clones.
         fields = dict(reset_kwargs)
+        origin = fields.get("origin_type", original_task.origin_type)
+        if origin in (TaskOriginType.copy, TaskOriginType.scheduled_run):
+            fields.update(self._fresh_execution_fields())
+        elif origin == TaskOriginType.link:
+            fields.update(token_usage=None, actual_cost_usd=None, attempt_id=0, attempt_count=0)
         fields["id"] = str(uuid.uuid4())
         fields["has_references"] = False
 
         most_original_task = await self._get_original_task_for_link(original_task)
         fields["original_task_id"] = most_original_task.id
 
+        if (
+            original_task.origin_type == TaskOriginType.link
+            and fields.get("origin_type") == TaskOriginType.copy
+        ):
+            effective = await self.task_repository.resolve_effective_task(original_task)
+            content = {
+                field: copy.deepcopy(getattr(effective, field))
+                for field in ("inputs", "params", "schemas")
+            }
+            fields = {**content, **fields}
         if is_copy:
-            if (
-                original_task.origin_type == TaskOriginType.link
-                and fields.get("origin_type") == TaskOriginType.copy
-            ):
-                effective = await self.task_repository.resolve_effective_task(original_task)
-                content = {
-                    field: copy.deepcopy(getattr(effective, field))
-                    for field in ("inputs", "params", "schemas", "result")
-                }
-                fields = {**content, **fields}
             fields.update(
                 parent_id=None, dependencies=None, task_tree_id=fields["id"], has_children=False
             )
@@ -1395,6 +1418,36 @@ class TaskCreator:
             task = task.convert_to_link()
 
         return task
+
+    @staticmethod
+    def _fresh_execution_fields() -> Dict[str, Any]:
+        """A clone is a new execution, never a copy of historical consumption."""
+        return {
+            "status": "pending",
+            "result": None,
+            "error": None,
+            "error_info": None,
+            "progress": 0.0,
+            "created_at": None,
+            "updated_at": None,
+            "started_at": None,
+            "completed_at": None,
+            "cancel_requested_at": None,
+            "token_usage": None,
+            "actual_cost_usd": None,
+            "estimated_cost_usd": None,
+            "attempt_id": 0,
+            "attempt_count": 0,
+            "lease_id": None,
+            "lease_expires_at": None,
+            "last_assigned_node": None,
+            "checkpoint_at": None,
+            "resume_from": None,
+            "idempotency_key": None,
+            "source_task_id": None,
+            "result_snapshot_hash": None,
+            "run_id": None,
+        }
 
     async def _validate_no_external_dependencies(self, task: TaskModel) -> None:
         """

@@ -477,11 +477,45 @@ class TaskRepository(Generic[TaskModelType]):
             ),
         )
 
-    @staticmethod
-    def assert_mutable(task: TaskModelType) -> None:
+    async def assert_mutable(self, task: TaskModelType, fields: set[str] | None = None) -> None:
         """Reject supported mutations of frozen task content."""
-        if task.origin_type == TaskOriginType.archive:
+        if task.origin_type == TaskOriginType.archive or task.result_snapshot_hash is not None:
             raise ValidationError(f"Archived task {task.id} is immutable; copy it before editing")
+        from apflow.core.storage.sqlalchemy.models import WorkflowRun
+
+        if task.run_id is None:
+            return
+        run = (
+            await self.db.execute(
+                select(WorkflowRun).where(WorkflowRun.id == task.run_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        billing_fields = {"token_usage", "actual_cost_usd", "estimated_cost_usd"}
+        if (
+            run is not None
+            and run.status in {"completed", "failed", "cancelled", "reconciliation_required"}
+            and (fields is None or fields - billing_fields)
+        ):
+            raise ValidationError(f"Historical task {task.id} is immutable; derive a new run")
+        if run is not None:
+            from apflow.core.storage.sqlalchemy.invariants import definition_mutation_allowed
+
+            if fields is None or not definition_mutation_allowed(task.run_id, fields):
+                raise ValidationError(f"Run task {task.id} definition is immutable")
+
+    def _business_write_allowed(self) -> Any:
+        """Fence bulk SQL against frozen results and terminal managed runs."""
+        from apflow.core.storage.sqlalchemy.models import WorkflowRun
+
+        terminal = exists(
+            select(WorkflowRun.id).where(
+                WorkflowRun.id == self.task_model_class.run_id,
+                WorkflowRun.status.in_(
+                    ["completed", "failed", "cancelled", "reconciliation_required"]
+                ),
+            )
+        )
+        return and_(self.task_model_class.result_snapshot_hash.is_(None), ~terminal)
 
     async def resolve_effective_task(
         self, task: TaskModelType, max_depth: int = 64
@@ -490,6 +524,15 @@ class TaskRepository(Generic[TaskModelType]):
         owner = task.user_id
         seen: Set[str] = set()
         for _ in range(max_depth):
+            if task.result_snapshot_hash is not None:
+                from apflow.core.execution.result_protocol import result_snapshot_hash
+
+                if (
+                    task.status != "completed"
+                    or result_snapshot_hash(task.result) != task.result_snapshot_hash
+                ):
+                    raise ValidationError(f"Frozen result snapshot {task.id} is invalid")
+                return task
             if task.origin_type != TaskOriginType.link:
                 return task
             if str(task.id) in seen:
@@ -584,7 +627,7 @@ class TaskRepository(Generic[TaskModelType]):
                 await self._validate_parent_mutation(fields["parent_id"])
             protected = set(fields) - {"has_references"}
             if protected:
-                self.assert_mutable(task)
+                await self.assert_mutable(task, protected)
             if "status" in fields and fields["status"] in {"completed", "failed", "cancelled"}:
                 fields.setdefault("completed_at", datetime.now(timezone.utc))
             if not fields:
@@ -599,6 +642,8 @@ class TaskRepository(Generic[TaskModelType]):
                         self.task_model_class.origin_type != TaskOriginType.archive,
                     )
                 )
+                if protected - {"token_usage", "actual_cost_usd", "estimated_cost_usd"}:
+                    stmt = stmt.where(self._business_write_allowed())
             result = await self.db.execute(
                 stmt.values(**fields).execution_options(synchronize_session=False)
             )
@@ -625,6 +670,7 @@ class TaskRepository(Generic[TaskModelType]):
         stmt = update(self.task_model_class).where(
             self.task_model_class.id == task_id,
             self.task_model_class.status.in_(expected_statuses),
+            self._business_write_allowed(),
             await self._execution_fence(task_id, allow_external_cancel=allow_cancel_requested),
             or_(
                 self.task_model_class.origin_type.is_(None),
@@ -650,6 +696,7 @@ class TaskRepository(Generic[TaskModelType]):
             .where(
                 self.task_model_class.id == task_id,
                 self.task_model_class.status.in_(["pending", "in_progress"]),
+                self._business_write_allowed(),
                 or_(
                     self.task_model_class.origin_type.is_(None),
                     self.task_model_class.origin_type != TaskOriginType.archive,
@@ -693,6 +740,7 @@ class TaskRepository(Generic[TaskModelType]):
                 .where(
                     self.task_model_class.id == task_id,
                     self.task_model_class.status.in_(allowed_statuses),
+                    self._business_write_allowed(),
                     await self._execution_fence(task_id),
                     or_(
                         self.task_model_class.origin_type.is_(None),
@@ -736,6 +784,8 @@ class TaskRepository(Generic[TaskModelType]):
         input_delta: int,
         output_delta: int,
         total_delta: int,
+        *,
+        commit: bool = True,
     ) -> Optional[TaskModelType]:
         """
         Atomically increment a task's token_usage JSON fields at the DB level.
@@ -810,7 +860,10 @@ class TaskRepository(Generic[TaskModelType]):
                     """)
 
             result = await self.db.execute(stmt, params)
-            await self.db.commit()
+            if commit:
+                await self.db.commit()
+            else:
+                await self.db.flush()
 
             if cast(CursorResult[Any], result).rowcount == 0:  # type: ignore[union-attr]
                 return None
@@ -1275,7 +1328,7 @@ class TaskRepository(Generic[TaskModelType]):
             task = await self.get_task_by_id(task_id)
             if not task:
                 return None
-            self.assert_mutable(task)
+            await self.assert_mutable(task)
 
             # Guard: skip if task is still running to avoid double-execution
             if task.status == "in_progress":
@@ -1351,7 +1404,7 @@ class TaskRepository(Generic[TaskModelType]):
             task = await self.get_task_by_id(task_id)
             if not task:
                 return None
-            self.assert_mutable(task)
+            await self.assert_mutable(task)
 
             from datetime import timezone as tz
 
@@ -1439,7 +1492,7 @@ class TaskRepository(Generic[TaskModelType]):
             task = await self.get_task_by_id(task_id)
             if not task:
                 return None
-            self.assert_mutable(task)
+            await self.assert_mutable(task)
 
             if not task.schedule_type or not task.schedule_expression:
                 logger.warning(f"Task {task_id} missing schedule_type or schedule_expression")
@@ -1589,12 +1642,13 @@ class TaskRepository(Generic[TaskModelType]):
             task = await self.get_task_by_id(task_id)
             if not task:
                 return False
-            self.assert_mutable(task)
+            await self.assert_mutable(task)
             await self._validate_parent_mutation(task.parent_id)
 
             # For async session, use delete statement
             stmt = delete(self.task_model_class).where(
                 self.task_model_class.id == task_id,
+                self._business_write_allowed(),
                 or_(
                     self.task_model_class.origin_type.is_(None),
                     self.task_model_class.origin_type != TaskOriginType.archive,
@@ -1648,6 +1702,21 @@ class TaskRepository(Generic[TaskModelType]):
                     )
         else:
             keep_fields = default_keep_fields
+        keep_fields = list(
+            dict.fromkeys(
+                [
+                    *keep_fields,
+                    "token_usage",
+                    "actual_cost_usd",
+                    "run_id",
+                    "source_task_id",
+                    "result_snapshot_hash",
+                    "attempt_id",
+                    "attempt_count",
+                    "original_task_id",
+                ]
+            )
+        )
 
         def merge_task(link_task: TaskModelType, original_task: TaskModelType) -> TaskModelType:
             # Use TaskModel.copy for safe copying and merging

@@ -1,7 +1,7 @@
 {
   "feature": "apflow-training-integration-findings",
   "created": "2026-10-24T00:57:06.148128+00:00",
-  "updated": "2026-10-24T01:39:57.714368+00:00",
+  "updated": "2026-10-24T03:16:36Z",
   "status": "completed",
   "execution_order": [
     "core-invariants",
@@ -16,7 +16,9 @@
     "total_tasks": 7,
     "completed": 7,
     "in_progress": 0,
-    "pending": 0
+    "pending": 0,
+    "skipped": 0,
+    "blocked": 0
   },
   "tasks": [
     {
@@ -27,7 +29,7 @@
       "estimated_hours": 8,
       "status": "completed",
       "started_at": "2026-10-24T00:57:06.148128+00:00",
-      "completed_at": "2026-10-24T01:39:57.714368+00:00",
+      "completed_at": "2026-10-24T03:16:36Z",
       "assignee": "implementation-team",
       "commits": []
     },
@@ -81,7 +83,7 @@
       "estimated_hours": 10,
       "status": "completed",
       "started_at": "2026-10-24T00:57:06.148128+00:00",
-      "completed_at": "2026-10-24T01:39:57.714368+00:00",
+      "completed_at": "2026-10-24T03:16:36Z",
       "assignee": "implementation-team",
       "commits": []
     },
@@ -95,7 +97,7 @@
       "estimated_hours": 6,
       "status": "completed",
       "started_at": "2026-10-24T00:57:06.148128+00:00",
-      "completed_at": "2026-10-24T01:39:57.714368+00:00",
+      "completed_at": "2026-10-24T03:16:36Z",
       "assignee": "implementation-team",
       "commits": []
     },
@@ -110,7 +112,7 @@
       "estimated_hours": 8,
       "status": "completed",
       "started_at": "2026-10-24T00:57:06.148128+00:00",
-      "completed_at": "2026-10-24T01:39:57.714368+00:00",
+      "completed_at": "2026-10-24T03:16:36Z",
       "assignee": "implementation-team",
       "commits": []
     }
@@ -120,13 +122,20 @@
     "created_by": "code-forge",
     "version": "1.0",
     "verification": {
-      "default_suite": "1761 passed, 10 skipped, 34 warnings",
-      "final_service_boundary_suite": "171 passed",
-      "storage_and_dispatch_supplement": "43 passed",
+      "default_suite": "1824 passed, 11 skipped, 34 warnings",
+      "final_governance_and_invocation": "140 passed, 1 skipped",
+      "final_service_subset": "30 passed",
+      "new_core_coverage": "91.07%, 56 passed, 1 skipped",
+      "storage_supplement": "33 passed",
       "ruff": "passed",
-      "black": "276 files unchanged",
+      "black": "285 files unchanged",
       "pyright": "0 errors, 0 warnings",
-      "dependency_check": "No broken requirements found"
+      "imports": "132 modules, no circular imports",
+      "dependency_check": "No broken requirements found",
+      "deployment_boundary": "No live world, provider billing or PostgreSQL cluster acceptance performed",
+      "final_run_bridge_governance": "348 passed, 1 skipped",
+      "final_storage_and_execution_adjacent": "641 passed, 1 skipped",
+      "commit_hooks": "52 changed files, imports and Ruff passed"
     }
   }
 }

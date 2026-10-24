@@ -3,7 +3,7 @@
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from sqlalchemy import select, text, update
 from sqlalchemy.engine import CursorResult
@@ -23,6 +23,8 @@ from apflow.core.storage.sqlalchemy.models import (
 
 class BudgetExceededError(BusinessError):
     """A shared account has insufficient unencumbered tokens for this invocation."""
+
+    permanent_failure: ClassVar[bool] = True
 
 
 @dataclass(frozen=True)
@@ -198,6 +200,7 @@ class BudgetLedger:
         actual_tokens: int | None,
         *,
         reconciliation: dict[str, Any] | None = None,
+        commit: bool = True,
     ) -> None:
         """Settle exactly once, or keep an unknown charge held for later reconciliation."""
         _identifier(reservation_id, "reservation_id")
@@ -211,12 +214,14 @@ class BudgetLedger:
                         await self._record_reconciliation(
                             reservation_id, actual_tokens, reconciliation
                         )
-                    await self._db.commit()
+                    if commit:
+                        await self._db.commit()
                     return
             await self._verify_settlement(reservation_id, actual_tokens)
             if reconciliation is not None:
                 await self._record_reconciliation(reservation_id, actual_tokens, reconciliation)
-            await self._db.commit()
+            if commit:
+                await self._db.commit()
         except Exception:
             await self._db.rollback()
             raise
@@ -250,6 +255,44 @@ class BudgetLedger:
             )
             .on_conflict_do_nothing(index_elements=["scope", "key"])
         )
+
+    async def _correct_settlement(
+        self, reservation_id: str, actual_tokens: int, evidence: dict[str, Any]
+    ) -> None:
+        """Apply an evidenced consumption correction; callers persist the evidence atomically."""
+        _tokens(actual_tokens)
+        _validate_evidence(evidence)
+        result = await self._db.execute(
+            select(BudgetReservation)
+            .where(BudgetReservation.id == reservation_id)
+            .with_for_update()
+        )
+        reservation = result.scalar_one_or_none()
+        if (
+            reservation is None
+            or reservation.state != "settled"
+            or reservation.actual_tokens is None
+        ):
+            raise ValueError("Only settled reservations can be corrected")
+        previous = reservation.actual_tokens
+        changed = await self._db.execute(
+            update(BudgetReservation)
+            .where(
+                BudgetReservation.id == reservation_id,
+                BudgetReservation.actual_tokens == previous,
+            )
+            .values(actual_tokens=actual_tokens)
+            .execution_options(synchronize_session=False)
+        )
+        if isinstance(changed, CursorResult) and changed.rowcount == 1:
+            await self._db.execute(
+                update(BudgetAccount)
+                .where(BudgetAccount.scope_id == reservation.scope_id)
+                .values(
+                    spent_tokens=BudgetAccount.spent_tokens + actual_tokens - previous,
+                )
+                .execution_options(synchronize_session=False)
+            )
 
     async def _transition_reservation(
         self, reservation_id: str, source: str, actual_tokens: int | None

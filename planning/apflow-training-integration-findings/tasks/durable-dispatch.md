@@ -30,3 +30,11 @@ See plan.md § Design Decisions: Persistence, API, execution state, and cross-se
 
 ## Verification
 See [plan.md](../plan.md#final-verification) for named APF coverage, final commands, results, and deployment boundaries.
+
+## Approved Run Revision
+
+The accepted revision introduces a whole-graph Run lifecycle and removes generic
+`resume`. `test_run_lifecycle.py` covers definition snapshots, terminal rejection,
+lease fencing, pre-start dispatch recovery, unknown budget liability, archived
+nodes, and execution beneath a frozen completed root. `test_lease_manager.py`
+covers legacy expiry without resetting history or execution generations.

@@ -22,10 +22,18 @@ from apflow.core.storage.sqlalchemy.models import (
     TaskDispatch,
     TaskLease,
     TaskModel,
+    WorkflowRun,
 )
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+async def database_run_exists(session: Any, task_id: str) -> bool:
+    database = SqlalchemySessionProxy(session)
+    return (
+        await database.execute(select(WorkflowRun.id).where(WorkflowRun.id == task_id))
+    ).first() is not None
 
 
 async def accept_task(session: Any, task_id: str, context: Any) -> dict[str, Any]:
@@ -58,7 +66,20 @@ async def _validate_submission_root(database: Any, session: Any, task_id: str) -
     ).scalar_one_or_none()
     if task is None or task.parent_id is not None:
         raise ModuleError(code="INVALID_INPUT", message="Submit an existing root task")
-    if task.status != "pending" or task.origin_type in ("archive", "link"):
+    run = (
+        await database.execute(
+            select(WorkflowRun).where(WorkflowRun.id == task_id, WorkflowRun.status == "accepted")
+        )
+    ).scalar_one_or_none()
+    frozen_retry_root = (
+        run is not None
+        and task.status == "completed"
+        and task.origin_type == "link"
+        and task.result_snapshot_hash is not None
+    )
+    if not frozen_retry_root and (
+        task.status != "pending" or task.origin_type in ("archive", "link")
+    ):
         raise ModuleError(
             code="INVALID_INPUT", message="Only a pending executable root may be submitted"
         )
@@ -87,6 +108,11 @@ async def _accept_locked(database: Any, session: Any, task_id: str, context: Any
         await database.commit()
         return {"task_id": task_id, "state": existing.state}
     await _validate_submission_root(database, session, task_id)
+    from apflow.core.execution.runs import RunService
+
+    run = await RunService(session).ensure_run(task_id, commit=False)
+    if run.status != "accepted":
+        raise ModuleError(code="RUN_NOT_EXECUTABLE", message="Create a new run to retry")
     identity = getattr(context, "identity", None)
     principal = (
         None
@@ -143,7 +169,7 @@ class TaskDispatcher:
     async def _execute_task(self, task_id: str, session: Any, context: Any) -> dict[str, Any]:
         from apflow.core.execution.task_executor import TaskExecutor
 
-        return await TaskExecutor().execute_task_by_id(task_id, db_session=session, resume=True)
+        return await TaskExecutor().execute_task_by_id(task_id, db_session=session)
 
     async def start(self) -> None:
         if self._poll is not None:
@@ -197,16 +223,23 @@ class TaskDispatcher:
                 from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
 
                 tasks = await TaskRepository(database._session).get_all_tasks_in_tree(task)
-                uncertain = any(
+                invocation_started = (
+                    await database.execute(
+                        select(ExecutionAttempt.id)
+                        .where(ExecutionAttempt.task_id.in_([child.id for child in tasks]))
+                        .limit(1)
+                    )
+                ).first() is not None
+                uncertain = invocation_started or any(
                     child.status == "in_progress"
                     or (child.error_info or {}).get("delivery_state") == "unknown"
-                    or (child.status == "pending" and child.started_at is not None)
+                    or child.started_at is not None
                     for child in tasks
                 )
-                if not uncertain and task.status in ("completed", "failed", "cancelled"):
+                if all(child.status == "completed" for child in tasks):
                     state = "finished"
                 elif not uncertain and all(
-                    child.status in ("pending", "completed") for child in tasks
+                    child.status == "pending" or child.origin_type == "link" for child in tasks
                 ):
                     state = "accepted"
             changed = await database.execute(
@@ -225,6 +258,24 @@ class TaskDispatcher:
                 and task is not None
             ):
                 identifiers = [child.id for child in tasks]
+                from apflow.governance.ledger import BudgetLedger
+                from apflow.core.storage.sqlalchemy.models import BudgetReservation
+
+                reservations = (
+                    (
+                        await database.execute(
+                            select(BudgetReservation.id).where(
+                                BudgetReservation.task_id.in_(identifiers),
+                                BudgetReservation.state == "reserved",
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                ledger = BudgetLedger(database._session)
+                for reservation_id in reservations:
+                    await ledger.settle(reservation_id, None, commit=False)
                 await database.execute(
                     update(ExecutionAttempt)
                     .where(
@@ -233,6 +284,33 @@ class TaskDispatcher:
                     )
                     .values(status="unknown", completed_at=now)
                     .execution_options(synchronize_session=False)
+                )
+                await database.execute(
+                    update(WorkflowRun)
+                    .where(
+                        WorkflowRun.id == row.task_id,
+                        WorkflowRun.status.in_(["accepted", "running"]),
+                    )
+                    .values(status="reconciliation_required", completed_at=now)
+                )
+            elif cast(CursorResult, changed).rowcount and state == "accepted":
+                # A claimed run with no invocation may be admitted after a process crash.
+                await database.execute(
+                    update(WorkflowRun)
+                    .where(
+                        WorkflowRun.id == row.task_id,
+                        WorkflowRun.status == "running",
+                    )
+                    .values(status="accepted", started_at=None)
+                )
+            elif cast(CursorResult, changed).rowcount and state == "finished":
+                await database.execute(
+                    update(WorkflowRun)
+                    .where(
+                        WorkflowRun.id == row.task_id,
+                        WorkflowRun.status.in_(["accepted", "running"]),
+                    )
+                    .values(status="completed", completed_at=now)
                 )
         await database.commit()
 
@@ -348,6 +426,12 @@ class TaskDispatcher:
                         for task in rows
                     ):
                         state = "reconciliation_required"
+                    from apflow.core.execution.runs import RunService
+
+                    if await database_run_exists(session, task_id):
+                        final_status = await RunService(session).finish_from_tasks(task_id)
+                        if final_status == "reconciliation_required":
+                            state = "reconciliation_required"
                 finally:
                     execution_context.reset(context_token)
         except asyncio.CancelledError:

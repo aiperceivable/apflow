@@ -1,5 +1,7 @@
 """Explicit executor return formats and the canonical execution envelope."""
 
+import hashlib
+import json
 from copy import deepcopy
 from typing import Any, Literal, NotRequired, TypedDict
 
@@ -7,6 +9,12 @@ from apflow.core.execution.errors import ValidationError
 from apflow.core.execution.error_info import ERROR_INFO_SCHEMA, ErrorInfo, validate_error_info
 
 ResultFormat = Literal["legacy", "raw", "envelope"]
+
+
+def result_snapshot_hash(result: Any) -> str:
+    """Hash the exact JSON result, including explicit null and false values."""
+    encoded = json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 class ExecutorResult(TypedDict):

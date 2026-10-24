@@ -12,9 +12,12 @@ from sqlalchemy import (
     Numeric,
     ForeignKey,
     Index,
+    event,
+    inspect,
     text,
 )
 from sqlalchemy.sql import func
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from typing import Dict, Any, Optional, Self, TypeVar
 from enum import auto, StrEnum
@@ -110,6 +113,7 @@ class ExecutionAttempt(Base):
 
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     task_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    run_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     attempt_id: Mapped[int] = mapped_column(Integer, nullable=False)
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False)
@@ -118,6 +122,75 @@ class ExecutionAttempt(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WorkflowRun(Base):
+    """An immutable graph snapshot and lifecycle for one accepted execution."""
+
+    __tablename__ = "apflow_workflow_runs"
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    root_task_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="accepted")
+    definition_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    definition_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    retry_of_run_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize lifecycle timestamps consistently across protocol adapters."""
+        result = {column.name: getattr(self, column.name) for column in self.__table__.columns}
+        for name in ("created_at", "started_at", "completed_at"):
+            value = result[name]
+            result[name] = (
+                value.replace(tzinfo=value.tzinfo or timezone.utc).isoformat() if value else None
+            )
+        return result
+
+
+class UsageEvent(Base):
+    """Immutable consumption evidence and a transactional delivery marker."""
+
+    __tablename__ = "apflow_usage_events"
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    index: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    invocation_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    task_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    run_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    reported_usage: Mapped[dict[str, int]] = mapped_column(JSON, nullable=False)
+    token_usage: Mapped[dict[str, int]] = mapped_column(JSON, nullable=False)
+    evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+@event.listens_for(UsageEvent, "before_update")
+def _guard_usage_event_update(mapper: Any, connection: Connection, target: UsageEvent) -> None:
+    """Only a delivery acknowledgement may change an existing consumption row."""
+    state = inspect(target)
+    if any(
+        state.attrs[column.name].history.has_changes()
+        for column in UsageEvent.__table__.columns
+        if column.name != "delivered_at"
+    ):
+        raise ValueError("Usage consumption facts are immutable")
+
+
+@event.listens_for(UsageEvent, "before_delete")
+def _guard_usage_event_delete(mapper: Any, connection: Connection, target: UsageEvent) -> None:
+    raise ValueError("Usage consumption facts cannot be deleted")
 
 
 class TaskOriginType(StrEnum):
@@ -192,6 +265,9 @@ class TaskModel(Base):
     task_tree_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True, index=True
     )  # Task tree identifier (for grouping/querying across trees)
+    run_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    source_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    result_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # === User Identification (Optional, Multi-user Support) ===
     user_id: Mapped[str | None] = mapped_column(
@@ -343,6 +419,9 @@ class TaskModel(Base):
             # Task tree structure
             "parent_id": self.parent_id,
             "task_tree_id": self.task_tree_id,
+            "run_id": self.run_id,
+            "source_task_id": self.source_task_id,
+            "result_snapshot_hash": self.result_snapshot_hash,
             # User identification
             "user_id": self.user_id,
             # Task basic information
@@ -774,4 +853,4 @@ class TaskCheckpointModel(Base):
 
 
 # All supported ORM writers share the archive invariant.
-register_storage_invariants(TaskModel, TaskOriginType.archive)
+register_storage_invariants(TaskModel, TaskOriginType.archive, WorkflowRun)

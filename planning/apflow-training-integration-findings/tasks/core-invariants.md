@@ -30,3 +30,11 @@ See plan.md § Design Decisions: Persistence, API, execution state, and cross-se
 
 ## Verification
 See [plan.md](../plan.md#final-verification) for named APF coverage, final commands, results, and deployment boundaries.
+
+## Approved Run Revision
+
+The accepted revision derives a new Run with direct source lineage and immutable
+completed-result snapshots. Generic Copy resets execution and billing fields; Link
+has no inherited charges. `test_run_retry.py` covers unchanged original history,
+DAG scope, downstream invalidation, frozen results, ownership, concurrent idempotent
+retry, transaction rollback, and accepted/terminal ORM invariants.

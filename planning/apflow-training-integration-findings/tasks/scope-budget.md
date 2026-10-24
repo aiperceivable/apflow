@@ -30,3 +30,13 @@ See plan.md § Design Decisions: Persistence, API, execution state, and cross-se
 
 ## Verification
 See [plan.md](../plan.md#final-verification) for named APF coverage, final commands, results, and deployment boundaries.
+
+## Approved Run Revision
+
+The accepted revision uses the invocation ID as reservation identity and commits
+UsageEvent, task projection, reservation settlement and invocation finalization
+atomically. `test_usage_events.py` covers duplicate/conflicting facts, partial
+snapshots, late generations, rollback, corrections, migration 007, concurrent
+delivery, legacy baselines and event-time reporting. `test_invocation_accounting.py`
+and `test_usage_outbox.py` verify real manager integration and owner-scoped delivery.
+The monetary wallet belongs to the billing owner, which must deduplicate event IDs.

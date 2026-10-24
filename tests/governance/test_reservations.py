@@ -9,11 +9,16 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from apflow.core.execution.errors import ConfigurationError
-from apflow.core.storage.sqlalchemy.models import Base, SubmissionReceipt, TaskModel
+from apflow.core.storage.sqlalchemy.models import (
+    Base,
+    SubmissionReceipt,
+    TaskModel,
+    ExecutionAttempt,
+)
 from apflow.governance.budget import BudgetManager
 from apflow.governance.ledger import BudgetExceededError, BudgetLedger, scope_budget_key
 
@@ -169,6 +174,7 @@ async def test_exceeded_executor_bound_is_reported_without_hiding_spend(
             await manager.execute_with_reservation(task, invoke, token_bound=10)
         snapshot = await BudgetLedger(session).get_scope("experiment")
         assert snapshot.spent_tokens == 20 and snapshot.reserved_tokens == 0
+        assert session.scalars(select(ExecutionAttempt)).one().status == "failed"
 
 
 def test_concurrent_duplicate_settlement_does_not_double_charge(budget_engine: Engine) -> None:
@@ -238,3 +244,23 @@ async def test_reconciliation_audit_failure_rolls_back_balance(
         assert snapshot.spent_tokens == 0 and snapshot.unknown_tokens == 60
         reservation = await ledger.get_reservation("experiment", "attempt")
         assert reservation is not None and reservation["state"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_denied_reservation_does_not_leave_running_invocation(budget_engine: Engine) -> None:
+    from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
+
+    called = False
+
+    async def invoke() -> dict[str, Any]:
+        nonlocal called
+        called = True
+        return {"result": "unexpected"}
+
+    with Session(budget_engine) as session:
+        task = TaskModel(id="denied", name="Denied", budget_scope_id="experiment")
+        manager = BudgetManager(TaskRepository(session))
+        with pytest.raises(BudgetExceededError):
+            await manager.execute_with_reservation(task, invoke, token_bound=1000)
+        assert not called
+        assert session.scalars(select(ExecutionAttempt)).one().status == "failed"

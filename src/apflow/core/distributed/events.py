@@ -22,6 +22,7 @@ VALID_EVENT_TYPES = frozenset(
         "task_completed",
         "task_failed",
         "task_reassigned",
+        "task_reconciliation_required",
     }
 )
 

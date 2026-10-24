@@ -5,9 +5,9 @@ Token budget management for AI agent tasks.
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Awaitable, Callable, Dict, Optional, TypeVar
-from uuid import uuid4
 
 from apflow.core.execution.errors import ConfigurationError
+from apflow.core.execution.context import current_invocation_id
 from apflow.core.execution.result_protocol import ResultFormat, normalize_executor_result
 from apflow.core.storage.sqlalchemy.models import TaskModel
 from apflow.governance.ledger import BudgetLedger
@@ -93,33 +93,43 @@ class BudgetManager:
         *,
         result_format: ResultFormat = "envelope",
     ) -> ResultT:
-        """Reserve before an opted-in executor invocation, including every retry.
-
-        The registered executor must enforce its declared aggregate token bound.
-        A caller-provided estimate alone cannot establish this contract. Exceptions
-        or missing usage retain a liability until an authorized reconciliation.
-        """
+        """Reserve an executor-enforced bound; missing usage retains a liability."""
         scope_id = task.budget_scope_id
         if scope_id is None:
             return await execute_fn()
         if isinstance(token_bound, bool) or not isinstance(token_bound, int) or token_bound < 0:
             raise ConfigurationError("Shared budgets require an executor-enforced token bound")
-        ledger = BudgetLedger(self._repo.db.session)
-        reservation_id = await ledger.reserve(scope_id, str(task.id), uuid4().hex, token_bound)
+        from apflow.durability.attempts import AttemptRecorder
+
+        session = self._repo.db.session
+        recorder = AttemptRecorder(session)
+        invocation_id = current_invocation_id.get()
+        standalone = invocation_id is None
+        if invocation_id is None:
+            invocation_id = await recorder.start(str(task.id), task.attempt_id or 0, 0)
         try:
+            await BudgetLedger(session).reserve(scope_id, str(task.id), invocation_id, token_bound)
             result = await execute_fn()
             usage = normalize_executor_result(result, result_format).get("token_usage")
             if isinstance(result, dict) and result.get("token_usage") == {}:
                 usage = None
             actual_tokens = _reported_total(usage)
-            await ledger.settle(reservation_id, actual_tokens)
             if actual_tokens is not None and actual_tokens > token_bound:
                 raise ConfigurationError(
                     "Executor exceeded its declared token reservation bound", token_usage=usage
                 )
+            if standalone:
+                await recorder.finish(
+                    invocation_id,
+                    "failed" if isinstance(result, dict) and result.get("error") else "completed",
+                    token_usage=usage,
+                )
             return result
         except BaseException as exc:
-            await ledger.settle(reservation_id, _reported_total(getattr(exc, "token_usage", None)))
+            if standalone:
+                await recorder.finish(
+                    invocation_id, "failed", token_usage=getattr(exc, "token_usage", None)
+                )
             raise
 
     async def check_budget(self, task_id: str) -> BudgetCheckResult:

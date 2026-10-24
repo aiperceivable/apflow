@@ -20,8 +20,19 @@ from typing import Any
 from apcore import APCore, Registry
 
 from apflow.bridge.scanner_bridge import discover_executor_modules
-from apflow.bridge.governance_modules import BudgetScopeModule, BudgetReconcileModule
-from apflow.bridge.execution_modules import TaskSubmitModule, TaskReceiptModule, TaskReconcileModule
+from apflow.bridge.governance_modules import (
+    BudgetScopeModule,
+    BudgetReconcileModule,
+    UsageEventsModule,
+    UsageAcknowledgeModule,
+)
+from apflow.bridge.execution_modules import (
+    TaskSubmitModule,
+    TaskReceiptModule,
+    TaskReconcileModule,
+    RunGetModule,
+    RunRetryModule,
+)
 from apflow.bridge.schedule_modules import (
     ScheduleCompleteModule,
     ScheduleDueModule,
@@ -123,12 +134,16 @@ def create_apflow_registry(
     task_modules = {
         "budget.scope": BudgetScopeModule(task_repository),
         "budget.reconcile": BudgetReconcileModule(task_repository),
+        "usage.events": UsageEventsModule(task_repository),
+        "usage.ack": UsageAcknowledgeModule(task_repository),
         "task.create": TaskCreateModule(task_creator, task_repository),
         "task.create_tree": TaskCreateTreeModule(task_creator, task_repository),
         "task.execute": TaskExecuteModule(task_manager),
         "task.submit": TaskSubmitModule(task_repository),
         "task.receipt": TaskReceiptModule(task_repository),
         "task.reconcile": TaskReconcileModule(task_repository),
+        "run.get": RunGetModule(task_repository),
+        "run.retry": RunRetryModule(task_repository),
         "task.cancel": TaskCancelModule(task_manager),
         "task.get": TaskGetModule(task_repository),
         "task.update": TaskUpdateModule(task_repository),

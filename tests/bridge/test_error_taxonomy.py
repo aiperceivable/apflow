@@ -4,6 +4,8 @@ KeyError/ValueError produced (apcore wraps them into MODULE_EXECUTE_ERROR)."""
 
 from __future__ import annotations
 
+import pytest
+
 from apcore.errors import ModuleError
 
 from apflow.api.rest import _status_for_error
@@ -22,3 +24,16 @@ def test_invalid_input_error_maps_to_http_422() -> None:
     assert isinstance(err, ModuleError)
     assert err.code == "INVALID_INPUT"
     assert _status_for_error(err) == 422
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "RUN_NOT_EXECUTABLE",
+        "RUN_ROOT_REQUIRED",
+        "RECONCILIATION_REQUIRED",
+        "RUN_DEFINITION_CHANGED",
+    ],
+)
+def test_run_lifecycle_conflicts_have_client_status(code: str) -> None:
+    assert _status_for_error(ModuleError(code=code, message="Run operation rejected")) == 409

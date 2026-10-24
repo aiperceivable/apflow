@@ -567,9 +567,7 @@ def worker(db: str, node_id: Optional[str], scheduler: bool, log_level: Optional
         from apflow.core.storage.session import session_scope
 
         async with session_scope(app.session_factory) as session:
-            return await TaskExecutor().execute_task_by_id(
-                str(task.id), db_session=session, resume=True
-            )
+            return await TaskExecutor().execute_task_by_id(str(task.id), db_session=session)
 
     runtime = DistributedRuntime.from_session(app.session, config, task_executor=execute_one)
 

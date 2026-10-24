@@ -564,7 +564,8 @@ async def test_link_copy_materializes_modifiable_configuration(sync_db_session: 
     copied = await creator.from_copy(linked.task, _recursive=False)
     assert copied.task.params == source.params
     assert copied.task.inputs == source.inputs
-    assert copied.task.result == {"version": 1}
+    assert copied.task.result is None
+    assert copied.task.status == "pending"
     await repository.update_task(copied.task.id, result={"version": 2})
     assert source.result == {"version": 1}
 

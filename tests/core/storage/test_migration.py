@@ -62,6 +62,7 @@ class TestMigrationDiscovery:
             "004_add_durability_and_governance",
             "005_add_idempotency_key_unique_index",
             "006_add_service_execution_contracts",
+            "007_add_workflow_runs_usage_events",
         ], f"Migrations executing out of documented order: {migration_ids}"
 
     def test_add_task_tree_fields_migration_exists(self, migration_manager):

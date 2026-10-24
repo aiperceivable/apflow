@@ -42,6 +42,7 @@ from apflow.core.execution.errors import (
     ExecutorError,
     ValidationError,
 )
+from apflow.core.execution.context import current_invocation_id
 from apflow.core.execution.result_protocol import ExecutorResult, normalize_executor_result
 from apflow.core.execution.error_info import ErrorInfo, execution_error_info
 from apflow.logger import get_logger
@@ -61,41 +62,10 @@ def _preflight_failure_info(
 
 
 class TaskManager:
-    """
-    Unified task management service - handles orchestration, distribution, and execution
+    """Schedule pending run tasks and record each physical invocation independently.
 
-    Task Re-execution Support:
-    --------------------------
-    TaskManager supports re-executing failed tasks and their dependencies. When a task tree
-    is executed, the following re-execution logic applies:
-
-    1. **Task Status Handling**:
-       - `pending` tasks: Execute normally (not marked for re-execution)
-       - `failed` tasks: Always re-executed
-       - `completed` tasks: Only re-executed if marked for re-execution (when dependencies need re-execution)
-       - `in_progress` tasks: Skipped unless marked for re-execution
-
-    2. **Re-execution Marking**:
-       - Failed tasks are automatically marked for re-execution
-       - Completed tasks are marked for re-execution when their dependent tasks need re-execution
-       - This ensures that when a task fails, all tasks that depend on it (directly or transitively)
-         will also be re-executed to maintain consistency
-
-    3. **Dependency Resolution**:
-       - Dependencies are satisfied if the dependency task is `completed`, even if marked for re-execution
-       - This allows dependent tasks to use results from completed dependencies while still allowing
-         re-execution of the dependency if needed
-
-    4. **Use Cases**:
-       - Re-executing a failed task: The task and all its dependencies will be re-executed
-       - Re-executing a completed task: The task and all dependent tasks will be re-executed
-       - Partial re-execution: Only failed tasks and their dependencies are re-executed
-
-    Example:
-        # Re-execute a failed task
-        task_manager = TaskManager(db)
-        task_manager._tasks_to_reexecute = {failed_task_id}  # Set by TaskExecutor
-        await task_manager.distribute_task_tree(task_tree)
+    Managed retries create a new run. Completed nodes supply prior results while
+    their organizational descendants remain traversable.
     """
 
     def __init__(
@@ -221,7 +191,9 @@ class TaskManager:
             stopped = updated is not None
             if not stopped:
                 fields.pop("result", None)
-        usage = await self._record_cancellation_usage(task_id, response.get("token_usage"))
+        usage = await self._record_cancellation_usage(
+            task_id, attempt_id, response.get("token_usage")
+        )
         result = {
             "status": "cancelled" if stopped else "cancelling",
             "cancel_requested": True,
@@ -247,7 +219,7 @@ class TaskManager:
             return {}
 
     async def _record_cancellation_usage(
-        self, task_id: str, usage: Any
+        self, task_id: str, generation: int, usage: Any
     ) -> Optional[Dict[str, int]]:
         if not usage:
             return None
@@ -257,7 +229,9 @@ class TaskManager:
             )
             normalized_usage = normalized.get("token_usage")
             if normalized_usage:
-                await self._update_token_usage(task_id, normalized_usage)
+                from apflow.durability.attempts import AttemptRecorder
+
+                await AttemptRecorder(self.db).record_partial(task_id, generation, normalized_usage)
             return normalized_usage
         except ValidationError as exc:
             logger.warning("Task %s: invalid cancellation usage: %s", task_id, exc)
@@ -454,11 +428,8 @@ class TaskManager:
         """
         Execute task tree recursively with proper dependency checking
 
-        Implements re-execution logic:
-        - Failed tasks are always re-executed
-        - Completed tasks are re-executed if marked in `_tasks_to_reexecute`
-        - Pending tasks execute normally
-        - In-progress tasks are skipped unless marked for re-execution
+        Managed runs schedule pending nodes, traverse completed structural
+        ancestors, and retain prior failed or completed execution history.
 
         Process:
         1. Check streaming final status and task re-execution eligibility
@@ -493,6 +464,10 @@ class TaskManager:
                     logger.info(
                         f"Task {node_task_id} already {node.task.status}, skipping distribution"
                     )
+                    if node.task.run_id and node.task.status == "completed":
+                        groups = self._group_children_by_priority_for_execution(node)
+                        for priority in sorted(groups):
+                            await self._execute_priority_group(groups[priority], priority)
                     return
                 else:
                     logger.info(
@@ -612,6 +587,8 @@ class TaskManager:
                 priority_groups[priority].append(child_node)
                 # Recursively add descendants
                 self._add_children_to_priority_groups(child_node, priority_groups)
+            elif child_node.task.run_id and child_node.task.status == "completed":
+                self._add_children_to_priority_groups(child_node, priority_groups)
 
         return priority_groups
 
@@ -711,6 +688,8 @@ class TaskManager:
             elif child_node.task.status == "completed" and child_id in self._tasks_to_reexecute:
                 # Completed tasks marked for re-execution should be re-executed
                 priority_groups[priority].append(child_node)
+                self._add_children_to_priority_groups(child_node, priority_groups)
+            elif child_node.task.run_id and child_node.task.status == "completed":
                 self._add_children_to_priority_groups(child_node, priority_groups)
 
     def _get_safe_task_id(self, task: TaskModel) -> Optional[str]:
@@ -1797,23 +1776,6 @@ class TaskManager:
                 logger.error("Cannot inspect cancellation for task %s: %s", task_id, exc)
                 return
 
-    async def _record_attempt_usage(
-        self, task_id: str, attempt_id: int, usage: Dict[str, int], baseline: Dict[str, int]
-    ) -> None:
-        """Reconcile a cancellation's partial report with this attempt's final report."""
-        current = await self.task_repository.get_task_by_id(task_id)
-        if current is None or current.attempt_id != attempt_id:
-            return
-        normalized = normalize_executor_result({"result": None, "token_usage": usage}, "envelope")
-        reported = normalized.get("token_usage") or {}
-        recorded = current.token_usage or {}
-        delta = {
-            key: max(0, value - max(0, recorded.get(key, 0) - baseline.get(key, 0)))
-            for key, value in reported.items()
-        }
-        if any(delta.values()):
-            await self._update_token_usage(task_id, delta)
-
     async def _execute_attempt(self, task: TaskModel, inputs: Dict[str, Any]) -> ExecutorResult:
         """Record and account every invocation, including failed and cancelled work."""
         from apflow.durability.attempts import AttemptRecorder
@@ -1823,12 +1785,24 @@ class TaskManager:
         if current is None or current.attempt_id != expected:
             return {"result": None}
         task_id, attempt_id = str(task.id), task.attempt_id
-        baseline = dict(task.token_usage or {})
         number = self._attempt_numbers.get(task_id, 0) + 1
         self._attempt_numbers[task_id] = number
         recorder = AttemptRecorder(self.db)
         record_id = await recorder.start(task_id, attempt_id, number)
         self._attempt_records[task_id] = record_id
+        token = current_invocation_id.set(record_id)
+        try:
+            return await self._execute_recorded_invocation(task, inputs, record_id)
+        finally:
+            current_invocation_id.reset(token)
+
+    async def _execute_recorded_invocation(
+        self, task: TaskModel, inputs: Dict[str, Any], record_id: str
+    ) -> ExecutorResult:
+        from apflow.durability.attempts import AttemptRecorder
+
+        recorder = AttemptRecorder(self.db)
+        task_id, attempt_id = str(task.id), task.attempt_id
         try:
             result = await self._execute_task_with_schemas(task, inputs)
         except BaseException as exc:
@@ -1838,8 +1812,6 @@ class TaskManager:
             if isinstance(exc, asyncio.CancelledError):
                 status = "cancelled" if task.cancel_requested_at is not None else "unknown"
             await recorder.finish(record_id, status, error_info=info, token_usage=usage)
-            if usage:
-                await self._record_attempt_usage(task_id, attempt_id, usage, baseline)
             raise
         usage = result.get("token_usage")
         info = result.get("error_info")
@@ -1854,8 +1826,6 @@ class TaskManager:
         )
         status = "cancelled" if cancelled else "failed" if result.get("error") else "completed"
         await recorder.finish(record_id, status, error_info=info, token_usage=usage)
-        if usage:
-            await self._record_attempt_usage(task_id, attempt_id, usage, baseline)
         return result
 
     async def _execute_task_with_schemas(

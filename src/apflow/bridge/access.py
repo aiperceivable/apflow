@@ -89,7 +89,7 @@ async def _protect_dispatched_definition(
     from sqlalchemy import select, update
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy.orm import Session
-    from apflow.core.storage.sqlalchemy.models import TaskDispatch
+    from apflow.core.storage.sqlalchemy.models import TaskDispatch, WorkflowRun
 
     if not isinstance(getattr(repository.db, "_session", None), (Session, AsyncSession)):
         return
@@ -100,6 +100,15 @@ async def _protect_dispatched_definition(
     if task is None:
         return
     root = await repository.get_root_task(task)
+    run = (
+        await repository.db.execute(select(WorkflowRun).where(WorkflowRun.id == root.run_id))
+    ).scalar_one_or_none()
+    if run is not None and not (action == "task.execute" and run.status == "accepted"):
+        raise ModuleError(
+            code="TASK_DEFINITION_LOCKED",
+            message="Managed run history cannot be changed; derive a new run to retry",
+            user_fixable=True,
+        )
     model = repository.task_model_class
     # Acceptance acquires this same write lock before checking task state. The
     # lock stays held until the public mutation commits or its session rolls back.
@@ -146,7 +155,7 @@ async def authorize_task_inputs(
     scoped["user_id"] = owner
     requested_ids = inputs.get("task_ids")
     identifiers = list(requested_ids) if isinstance(requested_ids, list) else []
-    for field in ("task_id", "parent_id"):
+    for field in ("task_id", "parent_id", "run_id"):
         if inputs.get(field):
             identifiers.append(inputs[field])
     visited: set[str] = set()

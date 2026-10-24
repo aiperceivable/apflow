@@ -38,6 +38,9 @@ async def test_dispatch_executes_only_accepted_root_and_complete_tree(tmp_path: 
         task = session.get(TaskModel, task_id)
         assert task is not None
         task.status = "completed"
+        child = session.get(TaskModel, "child")
+        assert child is not None
+        child.status = "completed"
         session.commit()
         return {"status": "completed"}
 

@@ -4,6 +4,9 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+import hashlib
+import json
+
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
@@ -11,13 +14,21 @@ from sqlalchemy_session_proxy import SqlalchemySessionProxy
 
 from apflow.core.execution.error_info import ErrorInfo, validate_error_info
 from apflow.core.execution.result_protocol import normalize_executor_result
-from apflow.core.storage.sqlalchemy.models import ExecutionAttempt
+from apflow.core.storage.sqlalchemy.models import (
+    BudgetReservation,
+    ExecutionAttempt,
+    TaskModel,
+    UsageEvent,
+)
+from apflow.governance.ledger import BudgetLedger
+from apflow.governance.usage import UsageRecorder, normalized_usage
 
 
 class AttemptRecorder:
     """Write required execution diagnostics on the engine's live storage session."""
 
     def __init__(self, session: Session | AsyncSession) -> None:
+        self._session = session
         self._db = SqlalchemySessionProxy(session)
 
     async def start(self, task_id: str, attempt_id: int, attempt_number: int) -> str:
@@ -26,10 +37,16 @@ class AttemptRecorder:
         if min(attempt_id, attempt_number) < 0:
             raise ValueError("Attempt counters must be non-negative")
         record_id = uuid4().hex
+        task = (
+            await self._db.execute(select(TaskModel).where(TaskModel.id == task_id))
+        ).scalar_one_or_none()
+        if task is not None:
+            await UsageRecorder(self._session).preserve_legacy(task)
         self._db.add(
             ExecutionAttempt(
                 id=record_id,
                 task_id=task_id,
+                run_id=task.run_id if task else None,
                 attempt_id=attempt_id,
                 attempt_number=attempt_number,
                 status="running",
@@ -52,22 +69,109 @@ class AttemptRecorder:
             raise ValueError("Invalid execution attempt terminal status")
         info = dict(validate_error_info(error_info)) if error_info is not None else None
         usage = None
-        if token_usage is not None:
+        if token_usage:
             usage = normalize_executor_result(
                 {"result": None, "token_usage": token_usage}, "envelope"
             ).get("token_usage")
-        await self._db.execute(
-            update(ExecutionAttempt)
-            .where(ExecutionAttempt.id == record_id, ExecutionAttempt.status == "running")
-            .values(
-                status=status,
-                error_info=info,
-                token_usage=usage,
-                completed_at=datetime.now(timezone.utc),
+        try:
+            recorder = UsageRecorder(self._session)
+            invocation = await recorder._lock_invocation(record_id)
+            if invocation.status != "running":
+                await self._record_late_usage(invocation, usage)
+                return
+            if usage:
+                await recorder.record(
+                    record_id, record_id + ":final", usage, kind="snapshot", commit=False
+                )
+            total = await recorder.total(record_id)
+            await self._settle_reservation(record_id, total["total"] if usage is not None else None)
+            await self._db.execute(
+                update(ExecutionAttempt)
+                .where(ExecutionAttempt.id == record_id, ExecutionAttempt.status == "running")
+                .values(
+                    status=status,
+                    error_info=info,
+                    token_usage=usage,
+                    completed_at=datetime.now(timezone.utc),
+                )
+                .execution_options(synchronize_session=False)
             )
-            .execution_options(synchronize_session=False)
+            await self._commit()
+        except BaseException:
+            await self._db.rollback()
+            raise
+
+    async def _settle_reservation(self, record_id: str, actual_tokens: int | None) -> None:
+        reservation = (
+            await self._db.execute(
+                select(BudgetReservation.id).where(BudgetReservation.id == record_id)
+            )
+        ).scalar_one_or_none()
+        if reservation is not None:
+            await BudgetLedger(self._session).settle(record_id, actual_tokens, commit=False)
+
+    async def _record_late_usage(
+        self, invocation: ExecutionAttempt, usage: dict[str, int] | None
+    ) -> None:
+        if invocation.status == "unknown" and usage:
+            event_id = invocation.id + ":late-final"
+            previous = (
+                await self._db.execute(select(UsageEvent).where(UsageEvent.id == event_id))
+            ).scalar_one_or_none()
+            evidence = (
+                previous.evidence
+                if previous is not None
+                else {
+                    "evidence_ref": "executor:" + invocation.id + ":final",
+                    "actor": None,
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            assert evidence is not None
+            await UsageRecorder(self._session).reconcile(invocation.id, event_id, usage, evidence)
+        else:
+            await self._db.commit()
+
+    async def record_partial(self, task_id: str, generation: int, usage: dict[str, int]) -> None:
+        """Cancellation reports are cumulative snapshots, including repeated reports."""
+        if not usage:
+            return
+        result = await self._db.execute(
+            select(ExecutionAttempt)
+            .where(
+                ExecutionAttempt.task_id == task_id,
+                ExecutionAttempt.attempt_id == generation,
+            )
+            .order_by(ExecutionAttempt.started_at.desc(), ExecutionAttempt.id)
+            .limit(1)
         )
-        await self._commit()
+        invocation = result.scalar_one_or_none()
+        if invocation is None:
+            record_id = hashlib.sha256(
+                f"legacy-partial:{task_id}:{generation}".encode()
+            ).hexdigest()
+            task = (
+                await self._db.execute(select(TaskModel).where(TaskModel.id == task_id))
+            ).scalar_one_or_none()
+            if task is not None:
+                await UsageRecorder(self._session).preserve_legacy(task)
+            invocation = ExecutionAttempt(
+                id=record_id,
+                task_id=task_id,
+                run_id=task.run_id if task else None,
+                attempt_id=generation,
+                attempt_number=0,
+                status="running",
+                started_at=datetime.now(timezone.utc),
+            )
+            self._db.add(invocation)
+            await self._db.flush()
+        digest = hashlib.sha256(
+            json.dumps(normalized_usage(usage), sort_keys=True).encode()
+        ).hexdigest()
+        await UsageRecorder(self._session).record(
+            invocation.id, invocation.id + ":partial:" + digest, usage, kind="snapshot"
+        )
 
     async def schedule_retry(self, record_id: str, retry_at: datetime) -> None:
         if retry_at.tzinfo is None:
