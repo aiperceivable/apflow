@@ -168,3 +168,13 @@ class ApflowMCP(APCoreMCP):
         # Wrap after SDK initialization to preserve its ACL, approval, and middleware.
         # The configured executor is exposed read-only by the current SDK.
         self._executor = PublicExecutor(self.executor)
+
+    def _build_server_components(self) -> tuple[Any, Any, list[Any], Any, str]:
+        from apflow.bridge.output_schema import public_output_schema
+
+        components = super()._build_server_components()
+        for tool in components[2]:
+            if tool.outputSchema is not None:
+                # SDK handlers share these tools and read their current schema.
+                tool.outputSchema = public_output_schema(tool.outputSchema)
+        return components

@@ -40,6 +40,8 @@ dependencies = [
     "apcore-mcp>=0.23.1",
     "apcore-a2a>=0.8.4",
     "apcore-cli>=0.12.5",
+    # Resolve local schema references for redacted MCP output contracts.
+    "referencing>=0.37.0",
 ]
 
 [project.scripts]

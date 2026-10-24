@@ -158,6 +158,83 @@ async def test_direct_executor_rejects_invalid_input_and_output_before_redaction
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("trace", [False, True])
+async def test_mcp_sensitive_output_matches_public_schema_without_weakening_native_validation(
+    strict_output_app: ApflowApp, trace: bool
+) -> None:
+    from copy import deepcopy
+    from jsonschema import Draft202012Validator
+
+    module_id = "apflow.strict_output_probe"
+    definition = strict_output_app.registry.get_definition(module_id)
+    assert definition is not None
+    original = deepcopy(definition.output_schema)
+    async with _mcp_client(strict_output_app, trace=trace) as client:
+        tool = next(tool for tool in (await client.list_tools()).tools if tool.name == module_id)
+        result = await client.call_tool(module_id, {})
+        assert not result.isError, result.content
+        assert result.structuredContent == {
+            "token": "***REDACTED***",
+            "private": "***REDACTED***",
+            "receipt": "***REDACTED***",
+            "token_usage": {"total": 7},
+        }
+        assert tool.outputSchema is not None
+        Draft202012Validator(tool.outputSchema).validate(result.structuredContent)
+        assert json.loads(cast(TextContent, result.content[0]).text) == result.structuredContent
+        invalid = await client.call_tool(module_id, {"invalid": True})
+        assert invalid.isError and invalid.structuredContent is None
+    assert definition.output_schema == original
+    native = await Executor.from_registry(strict_output_app.registry).call_async(module_id, {})
+    assert native["token"] == {"expires_in": 30} and native["private"] == 123
+
+
+@pytest.mark.asyncio
+async def test_mcp_constrained_credential_text_remains_redacted_and_schema_valid(
+    sdk_app: ApflowApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from apcore import Context
+    from apflow.core.config_manager import get_config_manager
+
+    secret = "test-key"
+    monkeypatch.setenv("APFLOW_TEST_MCP_SCHEMA_SECRET", secret)
+    configuration = get_config_manager()
+    monkeypatch.setattr(configuration, "_data", dict(configuration._data))
+    configuration.set(
+        "security.credentials", [{"id": "test", "env_var": "APFLOW_TEST_MCP_SCHEMA_SECRET"}]
+    )
+
+    class ReceiptModule:
+        description = "Return a constrained upstream receipt"
+        input_schema = {"type": "object"}
+        output_schema = {
+            "type": "object",
+            "properties": {
+                "receipt": {"type": "string", "enum": ["prefix-" + secret], "maxLength": 15}
+            },
+            "required": ["receipt"],
+        }
+
+        async def execute(self, inputs: dict[str, Any], context: Context) -> dict[str, Any]:
+            return {"receipt": "prefix-" + secret}
+
+    module_id = "apflow.constrained_receipt"
+    sdk_app.registry.register(module_id, ReceiptModule())
+    try:
+        async with _mcp_client(sdk_app) as client:
+            tool = next(
+                tool for tool in (await client.list_tools()).tools if tool.name == module_id
+            )
+            result = await client.call_tool(module_id, {})
+            assert not result.isError, result.content
+            assert result.structuredContent == {"receipt": "prefix-***REDACTED***"}
+            assert secret not in json.dumps(tool.outputSchema)
+            assert secret not in json.dumps(result.model_dump())
+    finally:
+        sdk_app.registry.unregister(module_id)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("protocol", ["mcp", "mcp-trace", "mcp-stream", "a2a"])
 async def test_mcp_errors_redact_credentials_and_preserve_error_contract(
     sdk_app: ApflowApp,

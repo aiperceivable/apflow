@@ -206,6 +206,7 @@ dependencies = [
     { name = "pydantic", extra = ["email"] },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
+    { name = "referencing" },
     { name = "sqlalchemy" },
     { name = "sqlalchemy-session-proxy" },
 ]
@@ -282,6 +283,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
     { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "referencing", specifier = ">=0.37.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.1" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
     { name = "sqlalchemy-session-proxy", specifier = ">=0.1.0" },
