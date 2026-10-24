@@ -84,6 +84,12 @@ On error, the response body is `{"error": {"code": "...", "message": "..."}}` an
 status is mapped from the apcore error code (e.g. `MODULE_NOT_FOUND` → 404,
 `SCHEMA_VALIDATION_ERROR` → 422, `MODULE_TIMEOUT` → 504).
 
+Required-capability checks also gate `task.execute`, direct executor calls, and
+`schedule.trigger`. If a required module or configured schema version becomes
+unavailable, execution is rejected with `SERVICE_UNAVAILABLE` (HTTP 503), or an
+error event for SSE, before starting work. Inspection and cancellation remain
+available. `/readyz` additionally checks database availability.
+
 ```bash
 # discover capabilities
 curl localhost:8080/modules
@@ -193,6 +199,13 @@ Cancellation records intent and signals the actual execution runtime. It may
 remain `cancelling` while the executor is still stopping; a late result cannot
 overwrite an acknowledged cancellation. Previously incurred usage is retained.
 
+Distributed Workers also recover interrupted executions during shutdown. Work
+that never started can become dispatchable again; started invocations retain
+unknown delivery and consumption liabilities and require reconciliation. If
+recovery cannot commit, the durable lease remains available for later recovery
+and shutdown surfaces the error. A storage or reporting failure is not recorded
+as an executor failure. See [Run recovery](../architecture/task-orchestration.md#runs-retries-and-accounting).
+
 ## Service Identity and Secrets
 
 Under JWT authentication, JSON and SSE calls receive the verified apcore
@@ -207,6 +220,15 @@ calls. Authenticated task creation and reuse reject inline credentials, and
 public results are redacted. Credentials are resolved from environment variables
 into an execution copy, without modifying stored task inputs. Deployment
 configuration is described in [Configuration](../architecture/configuration.md#service-deployment-configuration).
+
+JSON results and SSE chunks honor declared sensitive output fields, including
+custom names, in addition to credential masking. Native results are validated
+before public redaction. Error responses, persisted failure diagnostics, and
+formatted logs mask configured credentials, including their Python and JSON
+escaped representations. Structured `error_info` stays within its schema bounds
+while preserving retry and delivery classifications and numeric accounting.
+For MCP discovery and result validation, see the separate
+[public output schema](apcore-bridge.md#public-output-schema).
 
 ---
 

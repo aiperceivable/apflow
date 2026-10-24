@@ -48,6 +48,7 @@
 - Accepted Runs start once. Use run.retry for new task IDs and frozen completed results; unknown remote outcomes require evidence before replay.
 - CLI exposes task, schedule, run, budget, and usage groups against local configured storage.
 - Embed MCP with ApflowMCP(app.registry) and A2A with PublicExecutor(Executor.from_registry(app.registry)) from apflow.bridge.protocol to retain public output protections and readable accounting counters.
+- MCP tools/list outputSchema describes redacted structuredContent. Native execution validates raw results against the original module output schema before redaction; configured SDK identity, ACL, approval, and middleware policies remain enforced.
 - A2A task IDs identify protocol invocations, not apflow Runs; task.submit completion confirms acceptance. Standalone protocol servers need a dispatcher for durable work.
 - A2A public cards omit approval-required skills; authenticated discovery follows policy. A2A accounting integers must stay within the IEEE-754 safe integer range.
 - Usage consumers deduplicate event IDs and commit business writes before usage.ack; prices, credits, and wallets remain application responsibilities.

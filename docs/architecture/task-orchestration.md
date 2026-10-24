@@ -202,6 +202,14 @@ historical tasks. There is no generic tree `resume` argument. Dispatch recovery 
 requeue accepted work that never started; interrupted started work requires
 reconciliation. Executor-specific checkpoints remain opt-in within the active run's
 retry policy and are not inherited by a new run.
+
+Distributed Worker shutdown uses the same recovery rule: only unstarted work
+can become dispatchable again. Started invocations become uncertain, with
+unsettled reservations retained as unknown liabilities. Recovery state and lease
+removal commit atomically. Failures before that commit preserve the durable
+lease; storage or reporting errors are surfaced instead of being recorded as
+executor failures.
+
 Admission and retry also inspect physical invocation history: a pending task row
 does not authorize replay of previously invoked work, and an unknown invocation
 requires evidence even if its task's error projection is missing.
@@ -325,8 +333,10 @@ New executors declare `result_format = "envelope"` and return an execution envel
 failure message (or `null`); a failure may include partial business output.
 `token_usage` is an optional object with non-negative integer `input`, `output`,
 and `total` counters; omitted `total` is calculated from input and output.
-Other outer keys are rejected: put business evidence and other outputs inside
-`result`. A successful envelope must include `result`, including when it is `null`.
+Optional `error_info` contains versioned, bounded failure classification and
+correlation metadata. Other outer keys are rejected: put business evidence and
+other outputs inside `result`. A successful envelope must include `result`,
+including when it is `null`.
 A failure may omit `result`; both runtime normalization and generated schemas
 accept that form. When a business output schema is declared, successful results
 must satisfy it, so successful `null` requires an explicitly nullable schema.
@@ -337,8 +347,11 @@ TaskManager interprets the declared outer envelope once, stores its business
 payload in `TaskModel.result`, records the error separately, and accumulates usage
 in `TaskModel.token_usage`, even without budget enforcement. Failed executions
 and explicit cancellation responses can also report usage. Exceptions without
-usage metadata are not assigned estimated consumption. Returned failure envelopes
-are not automatically retried; the existing exception retry policy is unchanged.
+usage metadata are not assigned estimated consumption. Classified transient
+failure envelopes and exceptions can be retried under the configured policy;
+unclassified failures are not automatically replayed by the task engine. Unknown
+delivery requires reconciliation. See the
+[retry and failure contract](../features/durable-execution.md#retry-and-failure-contract).
 
 `get_output_schema()` describes the actual return from `execute()`. Envelope
 schemas contain the business schema inside `properties.result`. Built-in

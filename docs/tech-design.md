@@ -1401,7 +1401,10 @@ cli()
 ```
 
 The public protocol adapters preserve accounting integers and redact credentials
-without replacing the SDK's authorization pipeline. Embedded and standalone
+without replacing the SDK's authorization pipeline. MCP advertises a
+[public output schema](features/apcore-bridge.md#public-output-schema) for
+redacted results; native execution validates the original result against the
+unchanged module schema before redaction. Embedded and standalone
 servers need a dispatcher against the same database for durable submissions.
 See [MCP and A2A operations](features/apcore-bridge.md#mcp-and-a2a-operations)
 for discovery, invocation, approval policy, and A2A number constraints.
@@ -3005,11 +3008,15 @@ When exposed via apcore-mcp, each module becomes an MCP tool:
 - Tool name: Module name (e.g., `apflow.rest_executor`)
 - Tool description: Module's `description` property
 - Tool input: Module's `input_schema` (JSON Schema)
-- Tool output: Module's `output_schema` (JSON Schema)
+- Tool output: Public projection of the module's `output_schema`, advertised
+  as MCP `outputSchema` for redacted `structuredContent`
 
 The MCP tool call flow is `MCP client -> apcore-mcp -> PublicExecutor -> apcore Executor -> module.execute(inputs, context)`.
-The configured SDK execution pipeline applies validation, identity, ACL, approval,
-and middleware; `PublicExecutor` sanitizes the returned module result.
+The configured SDK execution pipeline preserves validation, identity, ACL,
+approval, and middleware. Native execution validates the original result against
+the module's unchanged output schema before `PublicExecutor` redacts it. MCP
+server and client validation then use the advertised public output schema for
+the redacted result.
 
 ### A2A Skill Mapping
 

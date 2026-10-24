@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Validate native executor results before schema-aware public redaction on REST
+  JSON/SSE and protocol adapters. Preserve SDK identity, ACL, approval, and
+  middleware behavior.
+- Advertise an MCP public output schema that accepts redacted values, including
+  sensitive integers, enums, and objects. Align discovery and SDK server/client
+  validation while retaining the original module schema for native validation.
+  Preserve local reference scopes, recursive definitions, and legacy tuple shapes.
+- Sanitize configured credentials in public errors, persisted failure diagnostics,
+  and formatted logs, including Python and JSON escaped representations. Keep
+  structured failure metadata within schema bounds without changing retry,
+  delivery, or accounting classifications.
+- Gate task execution, direct executor calls, and scheduled triggers when required
+  capabilities are unavailable; keep inspection and cancellation available.
+- Recover interrupted distributed Worker executions during shutdown without
+  blindly replaying external effects. Preserve leases on failures before recovery
+  commits, surface recovery errors, and sanitize background diagnostics.
+
 ## [0.24.0] - 2026-10-24
 
 ### Breaking

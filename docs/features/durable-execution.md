@@ -51,6 +51,11 @@ context. Task storage preserves this object separately from business results.
 Invocation history records each attempt's status, reported usage, structured
 failure, and next retry time; task retrieval returns a bounded history.
 
+Failure metadata is validated before credential redaction. Bounded text fields
+are masked, bounded again, and revalidated before persistence or publication;
+enum, boolean, and numeric classifications retain their validated values. This
+keeps diagnostic cleanup from disrupting retry decisions or usage settlement.
+
 Checkpoints restore executor state only. They cannot establish whether an
 external operation completed after a lost response. Such operations need a
 stable business operation key and remote receipt lookup before replay. Trace

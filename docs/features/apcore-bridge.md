@@ -13,7 +13,7 @@ description: Feature specification for exposing apflow capabilities as apcore mo
 
 ## Purpose
 
-Register apflow's capabilities as apcore Modules so that apcore-mcp, apcore-a2a, and apcore-cli automatically expose them without any protocol-specific code in apflow. Uses the existing AST extension scanner for zero-configuration discovery of executors.
+Register apflow's capabilities as apcore Modules so that apcore-mcp, apcore-a2a, and apcore-cli expose them through the SDK protocol servers and apflow's public boundary adapters. Uses the existing AST extension scanner for zero-configuration discovery of executors.
 
 ---
 
@@ -111,6 +111,13 @@ accounting counters that have already passed schema and credential redaction.
 Declared sensitive fields and credentials remain redacted. The standalone and
 unified server entry points both use these adapters.
 
+**`src/apflow/bridge/output_schema.py`**
+
+`public_output_schema()` derives the MCP public output contract from a module's
+native schema. `ApflowMCP` installs this contract on the SDK's tool definitions
+so discovery and server/client validation describe the same redacted result.
+The registry's native schema remains unchanged.
+
 ### Test Files
 
 ```
@@ -119,6 +126,8 @@ tests/bridge/test_module_adapter.py
 tests/bridge/test_scanner_bridge.py
 tests/bridge/test_task_modules.py
 tests/bridge/test_registry_setup.py
+tests/bridge/test_mcp_output_schema.py
+tests/integration/test_sdk_compatibility.py
 ```
 
 ---
@@ -161,6 +170,30 @@ Read the new `run_id` from the tool's structured result, then call
 `apflow.task.submit` with `{"task_id":"NEW_RUN_ID"}`. MCP clients handle the
 transport initialization and HTTP session headers; this JSON is a protocol
 message, not a standalone unauthenticated HTTP request.
+
+#### Public Output Schema
+
+Native execution validates the original result against the module's original
+output schema before public redaction. An invalid native result still fails;
+redaction does not bypass validation, identity, ACL, approval, or middleware.
+
+MCP `tools/list` advertises a separate `outputSchema` for the redacted
+`structuredContent`. A sensitive integer, enum, or complete object can become
+`"***REDACTED***"`, and credentials inside otherwise ordinary strings can be
+masked. The public schema therefore accepts the marker at each value position,
+preserves types, required properties, object/array structure, numeric bounds,
+and container sizes, and relaxes constraints whose truth can change during
+redaction: enum/const values, string patterns, lengths and formats, uniqueness,
+containment, and conditional predicates. Exclusive alternatives become
+non-exclusive alternatives. These original constraints remain enforced by
+native execution.
+
+Local references, anchors, resource scopes, and recursive schemas are projected
+into a finite definition graph without remote retrieval. Legacy tuple schemas
+are represented with Draft 2020-12 array keywords. Dynamic reference assertions
+are omitted from the public projection; native validation remains authoritative.
+Consumers should use the advertised schema for public results and the native
+module schema for executor development.
 
 ### A2A
 
