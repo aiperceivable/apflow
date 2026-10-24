@@ -110,6 +110,17 @@ class UsageRecorder:
             raise
 
     async def _lock_invocation(self, invocation_id: str) -> ExecutionAttempt:
+        # Recovery locks the task before its invocations; accounting must use the same order.
+        task_id = (
+            select(ExecutionAttempt.task_id)
+            .where(ExecutionAttempt.id == invocation_id)
+            .scalar_subquery()
+        )
+        await self._db.execute(
+            update(TaskModel)
+            .where(TaskModel.id == task_id)
+            .values(id=TaskModel.id, updated_at=TaskModel.updated_at)
+        )
         # A write lock also serializes SQLite writers before snapshot delta calculation.
         await self._db.execute(
             update(ExecutionAttempt)

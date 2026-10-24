@@ -509,3 +509,196 @@ def test_postgres_concurrent_retry_request_creates_only_one_new_run(
         assert len(session.scalars(select(WorkflowRun)).all()) == 2
         assert len(session.scalars(select(TaskModel)).all()) == 2
         assert session.scalars(select(UsageEvent)).all() == []
+
+
+@pytest.mark.asyncio
+async def test_postgres_run_admission_fences_cached_definition_update(
+    postgres_database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from apflow.core.execution.errors import ValidationError
+
+    with postgres_session(postgres_database_url) as session:
+        repository = TaskRepository(session)
+        root = await repository.create_task(name="Original", inputs={"value": "original"})
+        fence = repository._execution_fence
+
+        async def admit_before_lock(task_id: str, *, allow_external_cancel: bool = False) -> Any:
+            with Session(bind=session.get_bind(), expire_on_commit=False) as admission:
+                await RunService(admission).ensure_run(root.id)
+            return await fence(task_id, allow_external_cancel=allow_external_cancel)
+
+        monkeypatch.setattr(repository, "_execution_fence", admit_before_lock)
+        with pytest.raises(ValidationError, match="definition is immutable"):
+            await repository.update_task(root.id, inputs={"value": "changed"})
+        session.expire_all()
+        persisted = await repository.get_task_by_id(root.id)
+        assert persisted is not None and persisted.inputs == {"value": "original"}
+        run = session.get(WorkflowRun, root.id)
+        assert run is not None
+        assert run.definition_snapshot["tasks"][0]["inputs"] == persisted.inputs
+
+
+@pytest.mark.parametrize("mutation", ["definition", "grandchild"])
+def test_postgres_run_enrollment_snapshots_concurrent_descendant_orm_writes(
+    postgres_database_url: str, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    with postgres_session(postgres_database_url) as session:
+        session.add_all(
+            [
+                TaskModel.create({"id": "root", "name": "Root"}),
+                TaskModel.create(
+                    {
+                        "id": "child",
+                        "name": "Child",
+                        "parent_id": "root",
+                        "schemas": {"method": "before"},
+                    }
+                ),
+            ]
+        )
+        session.commit()
+        engine = session.get_bind()
+        tree_read = Barrier(2, timeout=5)
+        writer_committed = Barrier(2, timeout=5)
+
+        def accept() -> dict[str, Any]:
+            with Session(engine, expire_on_commit=False) as admission:
+                service = RunService(admission)
+                read_tree = service.repository.get_all_tasks_in_tree
+                first_read = True
+
+                async def pause_after_initial_read(root: TaskModel) -> list[TaskModel]:
+                    nonlocal first_read
+                    tasks = await read_tree(root)
+                    if first_read:
+                        first_read = False
+                        tree_read.wait()
+                        writer_committed.wait()
+                    return tasks
+
+                monkeypatch.setattr(
+                    service.repository, "get_all_tasks_in_tree", pause_after_initial_read
+                )
+                run = asyncio.run(service.ensure_run("root"))
+                return run.definition_snapshot
+
+        def mutate() -> None:
+            tree_read.wait()
+            with Session(engine) as writer:
+                child = writer.get(TaskModel, "child")
+                assert child is not None and child.run_id is None
+                if mutation == "definition":
+                    child.schemas = {"method": "after"}
+                else:
+                    writer.add(
+                        TaskModel.create(
+                            {"id": "grandchild", "name": "Grandchild", "parent_id": "child"}
+                        )
+                    )
+                writer.commit()
+            writer_committed.wait()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            accepted = pool.submit(accept)
+            changed = pool.submit(mutate)
+            changed.result(timeout=10)
+            snapshot = accepted.result(timeout=10)
+
+        session.expire_all()
+        rows = session.scalars(select(TaskModel)).all()
+        definitions = {row["id"]: row for row in snapshot["tasks"]}
+        assert set(definitions) == {row.id for row in rows}
+        assert all(row.run_id == "root" for row in rows)
+        for row in rows:
+            assert definitions[row.id]["schemas"] == row.schemas
+        run = asyncio.run(RunService(session).start_run("root"))
+        assert run.status == "running"
+
+
+@pytest.mark.parametrize("descendant", [False, True])
+def test_postgres_lease_recovery_and_final_receipt_share_lock_order(
+    postgres_database_url: str, monkeypatch: pytest.MonkeyPatch, descendant: bool
+) -> None:
+    from datetime import datetime, timedelta, timezone
+    from threading import Event
+    from sqlalchemy.orm import sessionmaker
+    from apflow.core.distributed.config import DistributedConfig
+    from apflow.core.distributed.lease_manager import LeaseManager
+    from apflow.core.storage.sqlalchemy.models import DistributedNode, TaskLease
+
+    with postgres_session(postgres_database_url) as session:
+        repository = TaskRepository(session)
+        root = asyncio.run(repository.create_task(name="Interrupted root"))
+        member = (
+            asyncio.run(repository.create_task(name="Interrupted child", parent_id=root.id))
+            if descendant
+            else root
+        )
+        run = asyncio.run(RunService(session).ensure_run(root.id))
+        run.status = "running"
+        member.status = "in_progress"
+        member_id = member.id
+        now = datetime.now(timezone.utc)
+        session.add(
+            DistributedNode(node_id="old", executor_types=[], status="healthy", heartbeat_at=now)
+        )
+        session.flush()
+        session.add(
+            TaskLease(
+                task_id=root.id,
+                node_id="old",
+                lease_token="expired-lease",
+                expires_at=now - timedelta(seconds=10),
+            )
+        )
+        session.commit()
+        invocation = asyncio.run(AttemptRecorder(session).start(member_id, 0, 1))
+        ledger = BudgetLedger(session)
+        asyncio.run(ledger.configure_scope("scope", 100))
+        asyncio.run(ledger.reserve("scope", member_id, invocation, 10))
+        factory = sessionmaker(session.get_bind())
+        recovery_locked, release_recovery, invocation_locked = Event(), Event(), Event()
+        reconcile = LeaseManager._reconcile_run
+        lock_invocation = UsageRecorder._lock_invocation
+
+        def pause_recovery(self: Any, *args: Any) -> bool:
+            recovery_locked.set()
+            assert release_recovery.wait(timeout=5)
+            return reconcile(self, *args)
+
+        async def observe_invocation_lock(self: Any, invocation_id: str) -> ExecutionAttempt:
+            result = await lock_invocation(self, invocation_id)
+            invocation_locked.set()
+            return result
+
+        monkeypatch.setattr(LeaseManager, "_reconcile_run", pause_recovery)
+        monkeypatch.setattr(UsageRecorder, "_lock_invocation", observe_invocation_lock)
+
+        def finish() -> None:
+            with factory() as worker:
+                asyncio.run(
+                    AttemptRecorder(worker).finish(
+                        invocation, "completed", token_usage={"total": 5}
+                    )
+                )
+
+        manager = LeaseManager(factory, DistributedConfig())
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            recovering = pool.submit(manager.cleanup_expired_leases)
+            assert recovery_locked.wait(timeout=5)
+            finishing = pool.submit(finish)
+            try:
+                # Before the fix this succeeds while recovery holds the task,
+                # exposing the invocation -> task / task -> invocation cycle.
+                invocation_locked.wait(timeout=1)
+            finally:
+                release_recovery.set()
+            recovering.result(timeout=10)
+            finishing.result(timeout=10)
+        session.expire_all()
+        assert sum(row.token_usage["total"] for row in session.scalars(select(UsageEvent))) == 5
+        restored = session.get(TaskModel, member_id)
+        assert restored is not None and restored.token_usage["total"] == 5
+        balance = asyncio.run(ledger.get_scope("scope"))
+        assert balance.spent_tokens == 5
+        assert balance.reserved_tokens == balance.unknown_tokens == 0

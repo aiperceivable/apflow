@@ -133,8 +133,9 @@ async def test_cancel_facade_notifies_actual_executor_and_event(sync_db_session:
     task = await TaskRepository(sync_db_session).create_task(name="Running", status="in_progress")
     executor = AsyncMock()
     executor.cancel.return_value = {"status": "cancelled", "partial_result": {"done": 1}}
-    facade._executor_instances[task.id] = executor
-    event = facade._cancellation_events.setdefault(task.id, asyncio.Event())
+    execution_state = facade._execution_state(sync_db_session)
+    execution_state.executor_instances[task.id] = executor
+    event = execution_state.cancellation_events.setdefault(task.id, asyncio.Event())
     response = await facade.cancel_task(task.id, db_session=sync_db_session)
     assert response["stop_confirmed"] is True
     assert event.is_set()
@@ -142,7 +143,7 @@ async def test_cancel_facade_notifies_actual_executor_and_event(sync_db_session:
     sync_db_session.refresh(task)
     assert task.status == "cancelled"
     assert task.result == {"done": 1}
-    facade._cancellation_events.pop(task.id, None)
+    execution_state.cancellation_events.pop(task.id, None)
 
 
 @pytest.mark.asyncio
@@ -250,8 +251,9 @@ async def test_actual_executor_stops_from_independent_cancel_request(
         if not run.done():
             await asyncio.wait_for(run, 3)
         registry.unregister(BlockingExecutor.id)
-        facade._cancellation_events.pop(task_id, None)
-        facade._executor_instances.pop(task_id, None)
+        execution_state = facade._execution_state(sync_db_session)
+        execution_state.cancellation_events.pop(task_id, None)
+        execution_state.executor_instances.pop(task_id, None)
 
 
 @pytest.mark.asyncio

@@ -103,7 +103,8 @@ async def test_cancel_module_notifies_runtime_executor(sync_db_session: Session)
     task = await repository.create_task(name="running", status="in_progress")
     executor = RunningExecutor()
     runtime = TaskExecutor()
-    runtime._executor_instances[task.id] = executor
+    execution_state = runtime._execution_state(sync_db_session)
+    execution_state.executor_instances[task.id] = executor
     try:
         output = await TaskCancelModule(TaskManager(sync_db_session)).execute(
             {"task_ids": [task.id]}
@@ -111,7 +112,7 @@ async def test_cancel_module_notifies_runtime_executor(sync_db_session: Session)
         assert executor.called
         assert output["results"][0]["stop_confirmed"]
     finally:
-        runtime._executor_instances.pop(task.id, None)
+        execution_state.executor_instances.pop(task.id, None)
 
 
 def test_yaml_preserves_security_policy_maps(tmp_path: Path) -> None:

@@ -6,6 +6,8 @@ import copy
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from apflow.bridge.errors import invalid_input_error
+from apflow.core.execution.errors import ValidationError
 from apflow.core.storage.session import session_scope
 
 
@@ -48,9 +50,12 @@ class SessionBoundModule:
 
         self._check_admission()
         async with session_scope(self._factory) as session:
-            return redact_public_data(
-                await self._bind(session).execute(inputs, self._context(context))
-            )
+            try:
+                return redact_public_data(
+                    await self._bind(session).execute(inputs, self._context(context))
+                )
+            except ValidationError as error:
+                raise invalid_input_error(str(redact_public_data(str(error)))) from error
 
     def _check_admission(self) -> None:
         """Stop new service work if a required capability becomes unavailable."""
@@ -82,8 +87,11 @@ class SessionBoundModule:
         async with session_scope(self._factory) as session:
             module = self._bind(session)
             context = self._context(context)
-            if hasattr(module, "stream"):
-                async for event in module.stream(inputs, context):
-                    yield redact_public_data(event)
-            else:
-                yield redact_public_data(await module.execute(inputs, context))
+            try:
+                if hasattr(module, "stream"):
+                    async for event in module.stream(inputs, context):
+                        yield redact_public_data(event)
+                else:
+                    yield redact_public_data(await module.execute(inputs, context))
+            except ValidationError as error:
+                raise invalid_input_error(str(redact_public_data(str(error)))) from error

@@ -139,7 +139,7 @@ def test_token_usage_rejects_invalid_counters(key: str, counter: Any) -> None:
 @pytest.mark.parametrize(
     "usage,expected",
     [
-        ({}, {"total": 0}),
+        ({}, {}),
         ({"input": 3}, {"input": 3, "total": 3}),
         ({"output": 2}, {"output": 2, "total": 2}),
         ({"input": 3, "output": 2}, {"input": 3, "output": 2, "total": 5}),

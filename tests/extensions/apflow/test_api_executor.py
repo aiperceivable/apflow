@@ -500,3 +500,113 @@ class TestApFlowApiExecutor:
         assert "params" in schema["required"]
         assert "wait_for_completion" in schema["properties"]
         assert "poll_interval" in schema["properties"]
+
+    @pytest.mark.asyncio
+    async def test_remote_execution_failure_is_not_a_successful_http_call(self) -> None:
+        payload = {"task_id": "root", "status": "failed", "run_id": "run"}
+        client = AsyncMock()
+        client.post.return_value = httpx.Response(200, json=payload)
+        with patch("httpx.AsyncClient") as constructor:
+            constructor.return_value.__aenter__.return_value = client
+            result = await ApFlowApiExecutor().execute(
+                {"base_url": "https://remote.example", "method": "tasks.execute", "params": {}}
+            )
+        assert result["result"]["success"] is False
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["failed", "cancelled", "reconciliation_required"])
+    async def test_remote_polling_prefers_run_outcome_over_completed_root(self, state: str) -> None:
+        client = AsyncMock()
+        client.post.side_effect = [
+            httpx.Response(200, json={"task_id": "root", "status": "started"}),
+            httpx.Response(
+                200, json={"id": "root", "status": "completed", "run": {"state": state}}
+            ),
+        ]
+        with patch("httpx.AsyncClient") as constructor:
+            constructor.return_value.__aenter__.return_value = client
+            result = await ApFlowApiExecutor().execute(
+                {
+                    "base_url": "https://remote.example",
+                    "method": "tasks.execute",
+                    "params": {},
+                    "wait_for_completion": True,
+                    "poll_interval": 0,
+                }
+            )
+        assert result["result"]["success"] is False
+        assert result["result"]["status"] == state
+        assert "error" in result
+        assert result["error_info"]["retryable"] is False
+        assert result["error_info"]["delivery_state"] == (
+            "unknown" if state == "reconciliation_required" else "responded"
+        )
+
+    @pytest.mark.asyncio
+    async def test_remote_polling_waits_for_whole_run_after_root_completed(self) -> None:
+        client = AsyncMock()
+        client.post.side_effect = [
+            httpx.Response(200, json={"task_id": "root", "status": "started"}),
+            httpx.Response(
+                200, json={"id": "root", "status": "completed", "run": {"state": "running"}}
+            ),
+            httpx.Response(
+                200, json={"id": "root", "status": "completed", "run": {"state": "completed"}}
+            ),
+        ]
+        with patch("httpx.AsyncClient") as constructor:
+            constructor.return_value.__aenter__.return_value = client
+            result = await ApFlowApiExecutor().execute(
+                {
+                    "base_url": "https://remote.example",
+                    "method": "tasks.execute",
+                    "params": {},
+                    "wait_for_completion": True,
+                    "poll_interval": 0,
+                }
+            )
+        assert result["result"]["success"] is True
+        assert client.post.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_remote_custom_namespace_polls_matching_run_module(self) -> None:
+        client = AsyncMock()
+        client.post.side_effect = [
+            httpx.Response(200, json={"task_id": "root", "status": "started"}),
+            httpx.Response(
+                200, json={"id": "root", "status": "completed", "run": {"state": "completed"}}
+            ),
+        ]
+        with patch("httpx.AsyncClient") as constructor:
+            constructor.return_value.__aenter__.return_value = client
+            result = await ApFlowApiExecutor().execute(
+                {
+                    "base_url": "https://remote.example",
+                    "method": "training.task.execute",
+                    "params": {},
+                    "wait_for_completion": True,
+                }
+            )
+        assert result["result"]["success"] is True
+        assert result["result"]["method"] == "training.task.execute"
+        assert [call.args[0] for call in client.post.await_args_list] == [
+            "https://remote.example/modules/training.task.execute",
+            "https://remote.example/modules/training.task.get",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_remote_read_of_failed_run_remains_successful(self) -> None:
+        client = AsyncMock()
+        client.post.return_value = httpx.Response(200, json={"status": "failed"})
+        with patch("httpx.AsyncClient") as constructor:
+            constructor.return_value.__aenter__.return_value = client
+            result = await ApFlowApiExecutor().execute(
+                {
+                    "base_url": "https://remote.example",
+                    "method": "tasks.get",
+                    "params": {"task_id": "root"},
+                }
+            )
+        assert result["result"]["success"] is True
+        assert "error" not in result

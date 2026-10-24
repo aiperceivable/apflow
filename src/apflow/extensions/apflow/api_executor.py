@@ -361,8 +361,13 @@ class ApFlowApiExecutor(BaseTask):
 
                 result_data = response.json()
 
-                # Handle tasks.execute with wait_for_completion
-                if module_id == "apflow.task.execute" and wait_for_completion:
+                is_execution = module_id.endswith(".task.execute")
+                if is_execution and isinstance(result_data, dict):
+                    terminal = self._remote_run_outcome(result_data, base_url, method)
+                    if terminal is not None:
+                        return terminal
+
+                if is_execution and wait_for_completion:
                     task_id = result_data.get("task_id") or result_data.get("root_task_id")
                     if task_id:
                         logger.info(f"Waiting for task {task_id} to complete...")
@@ -374,7 +379,9 @@ class ApFlowApiExecutor(BaseTask):
                             timeout=timeout,
                             headers=headers,
                             profile_id=inputs.get("connection_profile"),
+                            get_module_id=module_id.removesuffix("execute") + "get",
                         )
+                        final_result["method"] = method
                         return final_result
 
                 return {
@@ -413,6 +420,40 @@ class ApFlowApiExecutor(BaseTask):
             }
 
     @staticmethod
+    def _remote_run_status(payload: Dict[str, Any]) -> str | None:
+        run = payload.get("run")
+        status = run.get("state") if isinstance(run, dict) else payload.get("status")
+        return status if isinstance(status, str) else None
+
+    @classmethod
+    def _remote_run_outcome(
+        cls, payload: Dict[str, Any], base_url: str, method: str
+    ) -> Dict[str, Any] | None:
+        """Treat the whole run outcome as authoritative, including frozen roots."""
+        status = cls._remote_run_status(payload)
+        if status not in {"completed", "failed", "cancelled", "reconciliation_required"}:
+            return None
+        outcome: Dict[str, Any] = {
+            "success": status == "completed",
+            "status": status,
+            "result": payload,
+            "base_url": base_url,
+            "method": method,
+        }
+        if status != "completed":
+            message = f"Remote run finished with status: {status}"
+            info = execution_error_info(RuntimeError(message), phase="remote_run")
+            info.update(
+                code=f"REMOTE_RUN_{status.upper()}",
+                retryable=False,
+                delivery_state="unknown" if status == "reconciliation_required" else "responded",
+                category="cancelled" if status == "cancelled" else "unknown",
+                origin="apflow",
+            )
+            outcome.update(error=message, error_info=info)
+        return outcome
+
+    @staticmethod
     def _remote_transport_error(error: httpx.RequestError, replay_safe: bool) -> Dict[str, Any]:
         info = execution_error_info(error, phase="remote_request")
         not_sent = isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout))
@@ -435,6 +476,7 @@ class ApFlowApiExecutor(BaseTask):
         timeout: float,
         headers: Optional[Dict[str, Any]],
         profile_id: str | None = None,
+        get_module_id: str = "apflow.task.get",
     ) -> Dict[str, Any]:
         """
         Wait for task completion by polling task status with production-grade retry logic
@@ -462,7 +504,7 @@ class ApFlowApiExecutor(BaseTask):
         if auth_token:
             request_headers["Authorization"] = f"Bearer {auth_token}"
 
-        api_url = f"{base_url.rstrip('/')}/modules/apflow.task.get"
+        api_url = f"{base_url.rstrip('/')}/modules/{quote(get_module_id, safe='.')}"
         # Validated once here, not per poll iteration — base_url is fixed for
         # the lifetime of this polling loop, so re-resolving DNS on every poll
         # would be wasted work.
@@ -524,7 +566,7 @@ class ApFlowApiExecutor(BaseTask):
                         json_response = response.json()
                         if isinstance(json_response, dict) and "status" in json_response:
                             task = json_response
-                            status = task.get("status")
+                            status = self._remote_run_status(task)
 
                             # Successful poll - reset failure counters
                             if consecutive_failures > 0:
@@ -535,20 +577,19 @@ class ApFlowApiExecutor(BaseTask):
                             consecutive_failures = 0
                             poll_success = True
 
-                            if status in ("completed", "failed", "cancelled"):
+                            outcome = self._remote_run_outcome(task, base_url, get_module_id)
+                            if outcome is not None:
                                 logger.info(
                                     f"Task {task_id} finished with status: {status} "
                                     f"(polls: {poll_count}, failures: {total_failures})"
                                 )
-                                return {
-                                    "success": status == "completed",
-                                    "task_id": task_id,
-                                    "status": status,
-                                    "task": task,
-                                    "base_url": base_url,
-                                    "poll_count": poll_count,
-                                    "total_failures": total_failures,
-                                }
+                                outcome.update(
+                                    task_id=task_id,
+                                    task=task,
+                                    poll_count=poll_count,
+                                    total_failures=total_failures,
+                                )
+                                return outcome
 
                             logger.debug(f"Task {task_id} status: {status}, waiting...")
                         else:

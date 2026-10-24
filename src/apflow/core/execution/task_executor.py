@@ -6,7 +6,10 @@ import uuid
 import asyncio
 import copy
 import threading
+from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Union, Sequence
+from weakref import WeakKeyDictionary
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -29,6 +32,15 @@ from apflow.logger import get_logger
 # Extensions will be automatically registered when get_registry().get_executor() is called.
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class _ExecutionState:
+    """Process-local handles for one application's storage engine."""
+
+    executor_instances: Dict[str, Any] = field(default_factory=dict)
+    cancellation_events: Dict[str, asyncio.Event] = field(default_factory=dict)
+    running_tasks: set[str] = field(default_factory=set)
 
 
 class TaskExecutor:
@@ -66,10 +78,9 @@ class TaskExecutor:
                 self.task_model_class = get_task_model_class()
                 self.pre_hooks = get_pre_hooks()
                 self.post_hooks = get_post_hooks()
-                # Store executor instances for cancellation (task_id -> executor)
-                # This allows cancel_task() to access executors created during execution
-                self._executor_instances: Dict[str, Any] = {}
-                self._cancellation_events: Dict[str, asyncio.Event] = {}
+                self._execution_states: WeakKeyDictionary[Engine, _ExecutionState] = (
+                    WeakKeyDictionary()
+                )
 
                 # Distributed cluster support
                 from apflow.core.distributed.config import DistributedConfig
@@ -107,6 +118,12 @@ class TaskExecutor:
     def set_distributed_runtime(self, runtime: Any) -> None:
         """Attach the DistributedRuntime (called by the API server at startup)."""
         self.distributed_runtime = runtime
+
+    def _execution_state(self, db_session: Union[Session, AsyncSession]) -> _ExecutionState:
+        """Share handles across sessions of the same engine, including async engines."""
+        engine = db_session.get_bind().engine
+        with self._lock:
+            return self._execution_states.setdefault(engine, _ExecutionState())
 
     def _build_execution_components(
         self, db_session: Union[Session, AsyncSession]
@@ -302,7 +319,7 @@ class TaskExecutor:
         # Check if task tree is already running (prevent concurrent execution of same task tree)
         # This check is done inside execute_task_tree to prevent race conditions
         # that could occur if only checked at API layer
-        if self.is_task_running(root_task_id):
+        if self.is_task_running(root_task_id, db_session):
             logger.warning(
                 f"Task tree {root_task_id} is already running, rejecting concurrent execution"
             )
@@ -314,7 +331,8 @@ class TaskExecutor:
             }
 
         # Start task tracking
-        await self.start_task_tracking(root_task_id)
+        await self.start_task_tracking(root_task_id, db_session)
+        execution_state = self._execution_state(db_session)
         from sqlalchemy_session_proxy import SqlalchemySessionProxy
 
         task_database = SqlalchemySessionProxy(db_session)
@@ -367,8 +385,8 @@ class TaskExecutor:
                 root_task_id=execution_task_id or root_task_id,
                 pre_hooks=self.pre_hooks,
                 post_hooks=self.post_hooks,
-                executor_instances=self._executor_instances,  # Pass shared executor instances
-                cancellation_events=self._cancellation_events,
+                executor_instances=execution_state.executor_instances,
+                cancellation_events=execution_state.cancellation_events,
                 use_demo=use_demo,  # Pass use_demo flag
                 # Durability (F-003) + governance (F-004): wired once here so every
                 # execution path (module/REST/MCP/A2A/scheduler) is consistently governed.
@@ -432,31 +450,56 @@ class TaskExecutor:
         finally:
             if run_context_token is not None:
                 execution_context.reset(run_context_token)
-            await self.stop_task_tracking(root_task_id)
+            await self.stop_task_tracking(root_task_id, db_session)
 
-    async def start_task_tracking(self, context_id: str) -> None:
+    async def start_task_tracking(
+        self, context_id: str, db_session: Optional[Union[Session, AsyncSession]] = None
+    ) -> None:
         """Start tracking a task"""
-        await self.task_tracker.start_task_tracking(context_id)
+        if db_session is None:
+            await self.task_tracker.start_task_tracking(context_id)
+        else:
+            self._execution_state(db_session).running_tasks.add(context_id)
 
-    async def stop_task_tracking(self, context_id: str) -> None:
+    async def stop_task_tracking(
+        self, context_id: str, db_session: Optional[Union[Session, AsyncSession]] = None
+    ) -> None:
         """Stop tracking a task"""
-        await self.task_tracker.stop_task_tracking(context_id)
+        if db_session is None:
+            await self.task_tracker.stop_task_tracking(context_id)
+        else:
+            self._execution_state(db_session).running_tasks.discard(context_id)
 
     def get_task_status(self, context_id: str) -> Dict[str, Any]:
         """Get task status by context_id"""
+        if self.is_task_running(context_id):
+            return {"context_id": context_id, "status": "existent", "message": "Task is running"}
         return self.task_tracker.get_task_status(context_id)
 
     def get_all_running_tasks(self) -> List[str]:
         """Get all running task context_ids"""
-        return self.task_tracker.get_all_running_tasks()
+        identifiers = set(self.task_tracker.get_all_running_tasks())
+        with self._lock:
+            for state in self._execution_states.values():
+                identifiers.update(state.running_tasks)
+        return list(identifiers)
 
     def get_running_tasks_count(self) -> int:
         """Get count of running tasks"""
-        return self.task_tracker.get_running_tasks_count()
+        with self._lock:
+            return self.task_tracker.get_running_tasks_count() + sum(
+                len(state.running_tasks) for state in self._execution_states.values()
+            )
 
-    def is_task_running(self, context_id: str) -> bool:
+    def is_task_running(
+        self, context_id: str, db_session: Optional[Union[Session, AsyncSession]] = None
+    ) -> bool:
         """Check if a task is running"""
-        return self.task_tracker.is_task_running(context_id)
+        if self.task_tracker.is_task_running(context_id):
+            return True
+        if db_session is not None:
+            return context_id in self._execution_state(db_session).running_tasks
+        return context_id in self.get_all_running_tasks()
 
     async def cancel_task(
         self,
@@ -486,15 +529,14 @@ class TaskExecutor:
                     task_id=task_id, error_message=error_message, db_session=session
                 )
 
-        # Create TaskManager instance with shared executor_instances
-        # This allows cancel_task() to access executors created during execution
+        execution_state = self._execution_state(db_session)
         task_manager = TaskManager(
             db_session,
             root_task_id=task_id,
             pre_hooks=self.pre_hooks,
             post_hooks=self.post_hooks,
-            executor_instances=self._executor_instances,  # Pass shared executor instances
-            cancellation_events=self._cancellation_events,
+            executor_instances=execution_state.executor_instances,
+            cancellation_events=execution_state.cancellation_events,
         )
 
         # Call TaskManager.cancel_task()

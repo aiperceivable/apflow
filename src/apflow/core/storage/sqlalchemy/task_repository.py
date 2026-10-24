@@ -631,6 +631,11 @@ class TaskRepository(Generic[TaskModelType]):
             if task is None:
                 raise ValueError(f"Task with id {task_id} not found")
             fields = {key: value for key, value in fields.items() if hasattr(task, key)}
+            if not fields:
+                return task
+            fence = await self._execution_fence(task_id)
+            # Admission may have enrolled a cached task while this writer waited for its root.
+            await self.db.refresh(task)
             if "parent_id" in fields and fields["parent_id"] != task.parent_id:
                 await self._validate_parent_mutation(task.parent_id)
                 await self._validate_parent_mutation(fields["parent_id"])
@@ -639,11 +644,7 @@ class TaskRepository(Generic[TaskModelType]):
                 await self.assert_mutable(task, protected)
             if "status" in fields and fields["status"] in {"completed", "failed", "cancelled"}:
                 fields.setdefault("completed_at", datetime.now(timezone.utc))
-            if not fields:
-                return task
-            stmt = update(self.task_model_class).where(
-                self.task_model_class.id == task_id, await self._execution_fence(task_id)
-            )
+            stmt = update(self.task_model_class).where(self.task_model_class.id == task_id, fence)
             if protected:
                 stmt = stmt.where(
                     or_(

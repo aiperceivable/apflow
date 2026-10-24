@@ -91,7 +91,8 @@ def _validate_token_usage(value: Any) -> dict[str, int]:
     ):
         raise ValidationError("token_usage counters must be non-negative integers")
     usage = dict(value)
-    usage.setdefault("total", usage.get("input", 0) + usage.get("output", 0))
+    if usage:
+        usage.setdefault("total", usage.get("input", 0) + usage.get("output", 0))
     return usage
 
 

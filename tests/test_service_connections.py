@@ -1,6 +1,11 @@
 """Service connection policies keep credentials out of task definitions."""
 
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
+
+from apflow.app import ApflowApp
+from starlette.testclient import TestClient
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -301,3 +306,156 @@ def test_rest_preserves_inbound_trace_and_verified_identity(streaming: bool) -> 
     else:
         payload = response.json()
     assert payload == {"trace_id": trace_id, "owner": "alice"}
+
+
+CredentialService = tuple[ApflowApp, TestClient, dict[str, str]]
+
+
+@pytest.fixture
+def credential_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, connection_config: None
+) -> Iterator[CredentialService]:
+    import jwt
+    from apflow.api.auth import apply_rest_auth, build_mcp_authenticator
+    from apflow.api.rest import build_rest_app
+    from apflow.app import create_app
+
+    manager = get_config_manager()
+    manager.set("security.require_identity", False)
+    secret = "synthetic-credential-roundtrip-auth-key"
+    manager.set("api.jwt_secret", secret)
+    application = create_app(connection_string=f"sqlite:///{tmp_path / 'credential-service.db'}")
+    monkeypatch.setattr("apflow.app.create_app", lambda: application)
+    server = apply_rest_auth(build_rest_app(application.registry), build_mcp_authenticator(manager))
+    headers = {"Authorization": "Bearer " + jwt.encode({"sub": "alice"}, secret, algorithm="HS256")}
+    try:
+        with TestClient(server) as client:
+            yield application, client, headers
+    finally:
+        application.session.close()
+        application.session.get_bind().engine.dispose()
+
+
+def _execute_credential_profile(service: CredentialService) -> str:
+    import httpx
+
+    _, client, headers = service
+    inputs = {"connection_profile": "world", "method": "POST"}
+    created = client.post(
+        "/modules/apflow.task.create",
+        headers=headers,
+        json={
+            "name": "Credential roundtrip",
+            "inputs": inputs,
+            "params": {"executor_id": "rest_executor"},
+        },
+    )
+    assert created.status_code == 200, created.text
+    identifier = created.json()["id"]
+    transport = AsyncMock()
+    transport.request.return_value = httpx.Response(
+        200,
+        json={"echo": "synthetic-credential"},
+        request=httpx.Request("POST", "http://127.0.0.1:4000/api/"),
+    )
+    with patch("httpx.AsyncClient") as constructor:
+        constructor.return_value.__aenter__.return_value = transport
+        executed = client.post(
+            "/modules/apflow.task.execute", headers=headers, json={"task_id": identifier}
+        )
+    assert executed.status_code == 200 and executed.json()["status"] == "completed", executed.text
+    assert (
+        transport.request.call_args.kwargs["headers"]["Authorization"]
+        == "Bearer synthetic-credential"
+    )
+    assert "synthetic-credential" not in executed.text
+    return str(identifier)
+
+
+def _assert_credential_public_reads(service: CredentialService, task_id: str) -> None:
+    from click.testing import CliRunner
+    from apflow.cli import _build_cli
+
+    _, client, headers = service
+    public = client.post("/modules/apflow.task.get", headers=headers, json={"task_id": task_id})
+    assert public.status_code == 200
+    assert public.json()["inputs"] == {"connection_profile": "world", "method": "POST"}
+    assert "synthetic-credential" not in public.text
+    cli = CliRunner().invoke(_build_cli(), ["task", "get", "--task-id", task_id])
+    assert cli.exit_code == 0, cli.output
+    assert task_id in cli.output and "synthetic-credential" not in cli.output
+
+
+def test_service_credentials_stay_out_of_storage_rest_cli_copy_and_archive(
+    credential_service: CredentialService,
+) -> None:
+    import json
+    from sqlalchemy import select
+    from apflow.core.storage.sqlalchemy.models import TaskModel, WorkflowRun
+
+    application, client, headers = credential_service
+    inputs = {"connection_profile": "world", "method": "POST"}
+    identifier = _execute_credential_profile(credential_service)
+    _assert_credential_public_reads(credential_service, identifier)
+    copied = client.post("/modules/apflow.task.copy", headers=headers, json={"task_id": identifier})
+    assert copied.status_code == 200, copied.text
+    copy_id = copied.json()["root_task_id"]
+    _assert_credential_public_reads(credential_service, copy_id)
+    completed = client.post(
+        "/modules/apflow.task.update",
+        headers=headers,
+        json={"task_id": copy_id, "status": "completed"},
+    )
+    assert completed.status_code == 200, completed.text
+    archived = client.post(
+        "/modules/apflow.task.archive", headers=headers, json={"task_id": copy_id}
+    )
+    assert archived.status_code == 200, archived.text
+    _assert_credential_public_reads(credential_service, archived.json()["root_task_id"])
+    with application.session_factory() as persisted:
+        tasks = persisted.scalars(select(TaskModel)).all()
+        assert len(tasks) == 2
+        assert all(task.inputs == inputs for task in tasks)
+        raw_rows = persisted.execute(select(TaskModel.__table__)).mappings().all()
+        assert "synthetic-credential" not in json.dumps(
+            [dict(row) for row in raw_rows], default=str
+        )
+        run = persisted.get(WorkflowRun, identifier)
+        assert run is not None and "synthetic-credential" not in json.dumps(run.definition_snapshot)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("operation", ["create", "create_tree", "update", "copy"])
+def test_authenticated_service_rejects_inline_credentials_before_persistence(
+    credential_service: CredentialService,
+    operation: str,
+    streaming: bool,
+) -> None:
+    from sqlalchemy import select
+    from apflow.core.storage.sqlalchemy.models import TaskModel
+
+    application, client, headers = credential_service
+    created = client.post(
+        "/modules/apflow.task.create", headers=headers, json={"name": "Clean definition"}
+    )
+    assert created.status_code == 200
+    identifier = created.json()["id"]
+    sensitive = {"headers": {"Authorization": "Bearer synthetic-credential"}}
+    requests = {
+        "create": {"name": "Unsafe definition", "inputs": sensitive},
+        "create_tree": {"tasks": [{"name": "Unsafe definition", "inputs": sensitive}]},
+        "update": {"task_id": identifier, "inputs": sensitive},
+        "copy": {"task_id": identifier, "overrides": {"inputs": sensitive}},
+    }
+    request_headers = {**headers, **({"Accept": "text/event-stream"} if streaming else {})}
+    rejected = client.post(
+        f"/modules/apflow.task.{operation}", headers=request_headers, json=requests[operation]
+    )
+    assert rejected.status_code == (200 if streaming else 422), rejected.text
+    assert '"code": "INVALID_INPUT"' in rejected.text or '"code":"INVALID_INPUT"' in rejected.text
+    if streaming:
+        assert "event: error" in rejected.text and "event: done" in rejected.text
+    assert "synthetic-credential" not in rejected.text
+    with application.session_factory() as persisted:
+        tasks = persisted.scalars(select(TaskModel)).all()
+        assert len(tasks) == 1 and tasks[0].id == identifier and not tasks[0].inputs

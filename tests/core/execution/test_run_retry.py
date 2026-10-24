@@ -601,3 +601,30 @@ async def test_retry_checks_unknown_physical_invocation_without_task_error_proje
     invocation = sync_db_session.get(ExecutionAttempt, "legacy-unknown")
     assert root.status == "failed" and root.error_info is None
     assert invocation is not None and invocation.status == invocation_status
+
+
+@pytest.mark.asyncio
+async def test_run_admission_between_read_and_update_preserves_definition(
+    sync_db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from apflow.core.execution.errors import ValidationError
+    from apflow.core.storage.sqlalchemy.models import WorkflowRun
+
+    repository = TaskRepository(sync_db_session)
+    root = await repository.create_task(name="Accepted definition", inputs={"value": "original"})
+    fence = repository._execution_fence
+
+    async def admit_before_lock(task_id: str, *, allow_external_cancel: bool = False) -> Any:
+        with Session(bind=sync_db_session.get_bind(), expire_on_commit=False) as admission:
+            await RunService(admission).ensure_run(root.id)
+        return await fence(task_id, allow_external_cancel=allow_external_cancel)
+
+    monkeypatch.setattr(repository, "_execution_fence", admit_before_lock)
+    with pytest.raises(ValidationError, match="definition is immutable"):
+        await repository.update_task(root.id, inputs={"value": "changed"})
+    sync_db_session.expire_all()
+    persisted = await repository.get_task_by_id(root.id)
+    assert persisted is not None and persisted.inputs == {"value": "original"}
+    run = sync_db_session.get(WorkflowRun, root.id)
+    assert run is not None
+    assert run.definition_snapshot["tasks"][0]["inputs"] == persisted.inputs

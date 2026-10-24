@@ -7,8 +7,86 @@ import pytest
 from sqlalchemy.orm import Session
 
 from apflow.core.execution.task_manager import TaskManager
-from apflow.core.execution.result_protocol import ExecutorResult
+from apflow.core.execution.result_protocol import ExecutorResult, ResultFormat
+from apflow.core.base import BaseTask
+from apflow.core.extensions import get_registry
 from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
+
+
+class UsageEvidenceProbe(BaseTask):
+    id = "usage_evidence_probe"
+    name = "Usage evidence probe"
+    description = "Return the supplied usage evidence through the actual execution path."
+    result_format = "envelope"
+
+    async def execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        return {"result": "done", "token_usage": inputs["usage"]}
+
+    def token_reservation_bound(self, inputs: dict[str, Any]) -> int:
+        return 10
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shared_budget", [False, True])
+@pytest.mark.parametrize(
+    "result_format,usage,known",
+    [
+        ("envelope", {}, False),
+        ("legacy", {}, False),
+        ("raw", {}, False),
+        ("envelope", {"total": 0}, True),
+        ("legacy", {"total": 0}, True),
+    ],
+)
+async def test_engine_preserves_unknown_usage_and_explicit_zero(
+    sync_db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    shared_budget: bool,
+    result_format: ResultFormat,
+    usage: dict[str, int],
+    known: bool,
+) -> None:
+    from sqlalchemy import select
+    from apflow.core.storage.sqlalchemy.models import ExecutionAttempt, UsageEvent
+    from apflow.durability.attempts import AttemptRecorder
+    from apflow.governance.ledger import BudgetLedger
+    from apflow.governance.reporter import UsageReporter
+
+    monkeypatch.setattr(UsageEvidenceProbe, "result_format", result_format)
+    registry = get_registry()
+    registry.register(UsageEvidenceProbe(), executor_class=UsageEvidenceProbe, override=True)
+    try:
+        repository = TaskRepository(sync_db_session)
+        task = await repository.create_task(
+            name="Usage evidence",
+            params={"executor_id": UsageEvidenceProbe.id},
+            inputs={"usage": usage},
+            budget_scope_id="scope" if shared_budget else None,
+        )
+        ledger = BudgetLedger(sync_db_session)
+        if shared_budget:
+            await ledger.configure_scope("scope", 100)
+        await TaskManager(sync_db_session)._execute_single_task(task)
+        sync_db_session.refresh(task)
+        invocation = sync_db_session.scalars(select(ExecutionAttempt)).one()
+        assert task.status == "completed"
+        assert invocation.token_usage == ({"total": 0} if known else None)
+        assert len(sync_db_session.scalars(select(UsageEvent)).all()) == int(known)
+        report = await UsageReporter(repository).get_task_usage(task.id)
+        assert report.unknown_usage_task_count == int(not known)
+        if shared_budget:
+            assert (await ledger.get_scope("scope")).unknown_tokens == (0 if known else 10)
+        if not known:
+            await AttemptRecorder(sync_db_session).finish(
+                invocation.id, "completed", token_usage={"total": 5}
+            )
+            report = await UsageReporter(repository).get_task_usage(task.id)
+            assert report.total_tokens == 5 and report.unknown_usage_task_count == 0
+            if shared_budget:
+                balance = await ledger.get_scope("scope")
+                assert balance.spent_tokens == 5 and balance.unknown_tokens == 0
+    finally:
+        registry.unregister(UsageEvidenceProbe.id)
 
 
 @pytest.mark.asyncio

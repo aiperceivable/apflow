@@ -1,7 +1,7 @@
 {
   "feature": "apflow-training-integration-findings",
   "created": "2026-10-24T00:57:06.148128+00:00",
-  "updated": "2026-10-24T05:24:53.547857+00:00",
+  "updated": "2026-10-24T06:10:42.403257+00:00",
   "status": "completed",
   "execution_order": [
     "core-invariants",
@@ -189,6 +189,61 @@
         "d881ac40",
         "e9d91d5b"
       ]
+    },
+    "holistic_review": {
+      "source_commits": {
+        "apflow": "3aa55ea",
+        "world": "e9d91d5b"
+      },
+      "status": "passed",
+      "verified_defects_fixed": 8,
+      "design_verdict": "Approved Run/invocation/immutable-event design retained; World alone owns monetary billing",
+      "fixes": [
+        "remote_whole_run_outcome",
+        "empty_usage_unknown",
+        "engine_scoped_runtime_handles",
+        "admission_update_serialization",
+        "locked_enrollment_snapshot",
+        "task_before_invocation_lock_order",
+        "durable_partial_counter_pricing",
+        "typed_public_validation_errors"
+      ],
+      "verification": {
+        "default_suite": "1892 passed, 27 skipped, 34 warnings; final fresh monolithic run after credential bridge fix",
+        "native_postgres": "19 passed",
+        "storage_supplement": "33 passed",
+        "core_coverage": "91.75%, 68 passed, 1 skipped",
+        "world_joint": "3 passed",
+        "world_native_wallet": "85 passed across 6 files",
+        "apflow_static": "Ruff, Black (288 unchanged), Pyright, import graph, dependency check passed",
+        "world_static": "TypeScript, zero-warning changed-file ESLint and joint Python Ruff/Black/Pyright passed",
+        "first_full_suite": "1883 passed, 27 skipped, 34 warnings before credential acceptance supplement"
+      },
+      "cross_module_review": "No additional verified findings",
+      "acceptance_gate": {
+        "status": "passed",
+        "required_total": 27,
+        "covered": 27,
+        "uncovered_p0": 0,
+        "uncovered_p1": 0,
+        "credential_supplement": "55 passed; actual raw SQL/Run/REST/CLI/Copy/Archive and 8 JSON/SSE rejection cases",
+        "tests_failed": 0,
+        "verification": "Final full 1892 passed; PostgreSQL 19 passed; World joint 3 passed including 85 native wallet cases"
+      },
+      "operational_boundary": "Synthetic usage and disposable native PostgreSQL; no real providers/customer wallets or failover cluster. World consumer/query callable; authenticated transport, polling and pending monitoring remain integration responsibilities.",
+      "world_commit": "5109b6fd",
+      "acceptance_regressions": {
+        "remote_run": "test_remote_polling_prefers_run_outcome_over_completed_root",
+        "unknown_usage": "test_engine_preserves_unknown_usage_and_explicit_zero",
+        "storage_isolation": "test_same_task_id_executes_independently_and_cancels_within_its_database",
+        "admission_update": "test_postgres_run_admission_fences_cached_definition_update",
+        "enrollment_snapshot": "test_postgres_run_enrollment_snapshots_concurrent_descendant_orm_writes",
+        "recovery_receipt": "test_postgres_lease_recovery_and_final_receipt_share_lock_order",
+        "partial_pricing": "test_postgres_world_wallet_resolves_partial_counter_liability",
+        "credential_surfaces": "test_service_credentials_stay_out_of_storage_rest_cli_copy_and_archive",
+        "public_validation": "test_authenticated_service_rejects_inline_credentials_before_persistence"
+      },
+      "completed_at": "2026-10-24T06:10:42.403257+00:00"
     }
   }
 }

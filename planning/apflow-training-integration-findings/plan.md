@@ -299,3 +299,69 @@ consumer contract and does not enable a background billing service.
 
 World commits on `codex/apflow-wallet-acceptance`: `d881ac40` (wallet and
 joint acceptance), `e9d91d5b` (the two existing test-only corrections).
+
+
+### Holistic Design and Code Review
+
+The follow-up review keeps the approved Run, invocation and immutable-event design.
+It introduces no new task model, monetary responsibility in apflow, dependency or
+background billing service. Eight reproduced implementation defects were repaired:
+
+1. Remote execution now observes the whole Run outcome, including failed,
+   cancelled and reconciliation-required Runs beneath a completed structural root.
+   Polling preserves custom module namespaces; read-only queries retain their
+   successful transport semantics. Remote failure does not authorize tree replay.
+2. An empty usage envelope remains unknown; explicitly reported zero remains known.
+   Actual engine regressions cover raw/legacy/envelope formats, shared budgets,
+   late final usage and unknown-liability settlement.
+3. Live executor handles, cancellation events and running membership are scoped by
+   the bound storage engine. Same-ID tasks in separate databases cannot cancel or
+   suppress one another; sessions of one engine still share cancellation routing.
+4. Repository updates acquire their execution fence and refresh persisted markers
+   before checking mutability, closing admission between the initial read and write.
+5. Run enrollment locks current nodes and reloads definitions/membership before
+   snapshotting. Concurrent descendant ORM edits and newly inserted grandchildren
+   cannot leave an accepted Run with a stale or incomplete definition.
+6. Accounting locks the owning task before its physical invocation, matching lease
+   recovery. Real PostgreSQL reproduced the previous deadlock and receipt rollback;
+   regressions now preserve usage and budget for root and descendant invocations.
+7. World durably records incomplete counter facts as explicit pending receipts.
+   Complementary facts, in either order, settle cumulative pricing minus actual
+   prior charges; evidenced corrections append refunds. Replaying an older pending
+   receipt returns the current settlement state without another charge. A read-only
+   invocation query exposes unresolved liability after restart. This supersedes
+   the earlier consumer behavior that rejected every individually incomplete event.
+8. Public validation failures now translate the core ValidationError into the existing
+   typed INVALID_INPUT response instead of a server error. JSON and SSE have matching
+   codes and rollback behavior. A complete authenticated credential round-trip checks
+   actual execution-only injection, raw persisted task rows and Run snapshots, real
+   REST/CLI reads, Copy/Archive and four rejected write operations in both transports.
+   The coverage gap first exposed four 500-versus-422 failures; the resulting service
+   and SDK regression set passed **55 tests** after the fix. Named evidence is
+   `test_service_credentials_stay_out_of_storage_rest_cli_copy_and_archive` and
+   `test_authenticated_service_rejects_inline_credentials_before_persistence`.
+
+Fresh verification after the production source freeze:
+
+- Default apflow suite: **1892 passed, 27 skipped, 34 warnings**, 284.83 seconds.
+  The 19 opt-in PostgreSQL skips were separately enabled: **19 passed**.
+- Isolated migration/custom-model supplement: **33 passed**.
+- Run/retry/usage core coverage: **91.75%**, **68 passed, 1 skipped**.
+- World joint acceptance: **3 passed**, including the actual apflow partial-counter
+  event sequence and a native PostgreSQL wallet runner: **85 passed across 6 files**.
+- Ruff, Black (288 files unchanged), Pyright (zero errors/warnings), import graph
+  (132 modules, no cycles), dependency consistency and whitespace checks passed.
+- World TypeScript and changed-file ESLint passed; both joint-test Python files
+  passed Pyright with explicit source roots. Changed joint-test source passed Black and Ruff.
+- Independent cross-module and second-order review emitted no additional verified
+  issue. Acceptance reconciliation checks the 14 original findings plus the approved
+  Run/accounting invariants and review regressions against fresh passing tests.
+  All **27 required behaviors** are covered; no P0/P1 behavior remains uncovered.
+
+Remaining boundaries are explicit: optional unavailable integrations and distributed
+cluster scheduling were skipped; native PostgreSQL is a single local server.
+Financial acceptance uses synthetic usage and isolated test users, not real provider
+side effects or customer wallets. World provides a callable consumer and pending
+query; authenticated delivery, polling and pending-liability monitoring still need
+application/deployment integration. Unknown external outcomes still require remote
+receipt evidence or a stable business idempotency key before replay.

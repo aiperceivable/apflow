@@ -150,7 +150,7 @@ class RunService:
         root = await self.repository.get_task_by_id(root_task_id)
         if root is None or root.parent_id is not None:
             raise ModuleError(code="INVALID_INPUT", message="A run requires an existing root task")
-        tasks = await self.repository.get_all_tasks_in_tree(root)
+        tasks = await self._lock_run_tasks(root)
         run = new_run_record(root, tasks, retry_of_run_id=retry_of_run_id)
         if run.status == "accepted" and await self._has_invocations(tasks):
             run.status = "reconciliation_required"
@@ -167,6 +167,20 @@ class RunService:
         if commit:
             await self.database.commit()
         return run
+
+    async def _lock_run_tasks(self, root: TaskModel) -> list[TaskModel]:
+        """Freeze descendants and include nodes added while acquiring their locks."""
+        locked: set[str] = set()
+        tasks = await self.repository.get_all_tasks_in_tree(root)
+        while True:
+            identifiers = {task.id for task in tasks}
+            await self.repository.lock_tasks(sorted(identifiers - locked))
+            locked.update(identifiers)
+            for task in tasks:
+                await self.database.refresh(task)
+            tasks = await self.repository.get_all_tasks_in_tree(root)
+            if all(task.id in locked for task in tasks):
+                return tasks
 
     async def _has_invocations(self, tasks: list[TaskModel]) -> bool:
         identifier = (
