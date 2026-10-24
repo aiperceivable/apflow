@@ -30,6 +30,15 @@ Structured Error Format:
     - context: Additional context (dict with relevant details)
 """
 
+from typing import Any, ClassVar
+
+from apflow.core.execution.error_info import (
+    ErrorInfo,
+    execution_error_info as execution_error_info,
+    http_error_info as http_error_info,
+    validate_error_info,
+)
+
 
 class ApflowError(RuntimeError):
     """
@@ -52,8 +61,10 @@ class ApflowError(RuntimeError):
         what: str | None = None,
         why: str | None = None,
         how_to_fix: str | None = None,
-        context: dict | None = None,
-    ):
+        context: dict[str, Any] | None = None,
+        error_info: ErrorInfo | None = None,
+        token_usage: dict[str, int] | None = None,
+    ) -> None:
         """
         Initialize error with optional structured information.
 
@@ -68,6 +79,8 @@ class ApflowError(RuntimeError):
         self.why = why
         self.how_to_fix = how_to_fix
         self.context = context or {}
+        self.error_info = validate_error_info(error_info) if error_info is not None else None
+        self.token_usage = token_usage
 
         # Build formatted message
         if what:
@@ -106,7 +119,7 @@ class BusinessError(ApflowError):
         >>>     raise ConfigurationError("API key is required")
     """
 
-    pass
+    permanent_failure: ClassVar[bool] = True
 
 
 class ValidationError(BusinessError):
@@ -156,7 +169,7 @@ class NetworkError(BusinessError):
         >>> )
     """
 
-    pass
+    permanent_failure: ClassVar[bool] = False
 
 
 class AuthenticationError(BusinessError):

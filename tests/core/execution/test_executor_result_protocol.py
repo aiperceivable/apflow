@@ -527,7 +527,9 @@ async def test_apcore_task_execution_accepts_null_and_scalar_business_output(
     )
 
     class SessionExecutor:
-        async def execute_task_by_id(self, task_id: str) -> dict[str, Any]:
+        async def execute_task_by_id(
+            self, task_id: str, *, db_session: Any = None
+        ) -> dict[str, Any]:
             return await TaskExecutor().execute_task_by_id(task_id, db_session=sync_db_session)
 
     module = TaskExecuteModule(manager)

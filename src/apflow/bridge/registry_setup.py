@@ -20,6 +20,8 @@ from typing import Any
 from apcore import APCore, Registry
 
 from apflow.bridge.scanner_bridge import discover_executor_modules
+from apflow.bridge.governance_modules import BudgetScopeModule, BudgetReconcileModule
+from apflow.bridge.execution_modules import TaskSubmitModule, TaskReceiptModule, TaskReconcileModule
 from apflow.bridge.schedule_modules import (
     ScheduleCompleteModule,
     ScheduleDueModule,
@@ -51,11 +53,33 @@ from apflow.logger import get_logger
 logger = get_logger(__name__)
 
 
+def validate_required_modules(
+    registry: Registry,
+    required_modules: list[str] | None = None,
+    required_schema_versions: dict[str, str] | None = None,
+) -> None:
+    """Refuse readiness when a required capability is missing or degraded."""
+    versions = required_schema_versions or {}
+    required = set(required_modules or []) | set(versions)
+    for module_id in sorted(required):
+        if not registry.has(module_id):
+            raise RuntimeError(f"Required module is unavailable: {module_id}")
+        definition = registry.get_definition(module_id)
+        metadata = getattr(definition, "metadata", {}) or {}
+        if metadata.get("schema_fallback"):
+            raise RuntimeError(f"Required module has a fallback schema: {module_id}")
+        if module_id in versions and metadata.get("schema_version") != versions[module_id]:
+            raise RuntimeError(f"Required module schema version mismatch: {module_id}")
+
+
 def create_apflow_registry(
     task_manager: Any,
     task_creator: Any,
     task_repository: Any,
     namespace: str = "apflow",
+    *,
+    required_modules: list[str] | None = None,
+    required_schema_versions: dict[str, str] | None = None,
 ) -> Registry:
     """Create and populate an apcore Registry with all apflow modules.
 
@@ -88,6 +112,7 @@ def create_apflow_registry(
     executor_adapters = discover_executor_modules()
     for adapter in executor_adapters:
         module_id = f"{namespace}.{adapter.executor_id}"
+        adapter.module_id = module_id
         try:
             client.register(module_id, adapter)
             logger.debug(f"Registered executor module: {module_id}")
@@ -96,9 +121,14 @@ def create_apflow_registry(
 
     # 2. Register task management modules
     task_modules = {
+        "budget.scope": BudgetScopeModule(task_repository),
+        "budget.reconcile": BudgetReconcileModule(task_repository),
         "task.create": TaskCreateModule(task_creator, task_repository),
         "task.create_tree": TaskCreateTreeModule(task_creator, task_repository),
         "task.execute": TaskExecuteModule(task_manager),
+        "task.submit": TaskSubmitModule(task_repository),
+        "task.receipt": TaskReceiptModule(task_repository),
+        "task.reconcile": TaskReconcileModule(task_repository),
         "task.cancel": TaskCancelModule(task_manager),
         "task.get": TaskGetModule(task_repository),
         "task.update": TaskUpdateModule(task_repository),
@@ -117,10 +147,11 @@ def create_apflow_registry(
         "schedule.trigger": ScheduleTriggerModule(task_repository),
         "schedule.complete": ScheduleCompleteModule(task_repository),
         "schedule.history": ScheduleHistoryModule(task_repository),
-        "schedule.export_ical": ScheduleExportICalModule(),
+        "schedule.export_ical": ScheduleExportICalModule(task_repository),
     }
     for action, module in task_modules.items():
         module_id = f"{namespace}.{action}"
+        setattr(module, "module_id", module_id)
         try:
             client.register(module_id, module)
             logger.debug(f"Registered task module: {module_id}")
@@ -133,6 +164,7 @@ def create_apflow_registry(
             # disappears from the registry with no signal to the operator.
             raise RuntimeError(f"Failed to register built-in module '{module_id}': {e}") from e
 
+    validate_required_modules(registry, required_modules, required_schema_versions)
     total = len(list(registry.list()))
     logger.info(f"apcore Registry populated with {total} modules (namespace: {namespace})")
 

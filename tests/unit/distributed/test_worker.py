@@ -43,6 +43,7 @@ def _make_task_model(
     task.attempt_id = attempt_id
     task.placement_constraints = None
     task.inputs = None
+    task.cancel_requested_at = None
     return task
 
 
@@ -69,10 +70,13 @@ def _make_worker(
 ) -> WorkerRuntime:
     """Create a WorkerRuntime with mock dependencies."""
     cfg = config or _make_config()
+    if session_factory is None:
+        session_factory = MagicMock()
+        session_factory.return_value.__enter__.return_value.get.return_value = _make_task_model()
     return WorkerRuntime(
         node_id=cfg.node_id or "test-worker",
         config=cfg,
-        session_factory=session_factory or MagicMock(),
+        session_factory=session_factory,
         node_registry=node_registry or MagicMock(),
         lease_manager=lease_manager or MagicMock(),
         idempotency_manager=idempotency_manager or MagicMock(),
@@ -479,6 +483,7 @@ class TestResultReporting:
         session = MagicMock()
         session.__enter__ = MagicMock(return_value=session)
         session.__exit__ = MagicMock(return_value=False)
+        session.get.return_value = _make_task_model()
 
         executor = AsyncMock(side_effect=RuntimeError("boom"))
         worker = _make_worker(

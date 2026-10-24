@@ -25,7 +25,7 @@ from apflow.core.config_manager import ConfigManager, get_config_manager
 
 # Public REST paths that must stay reachable without a token: service metadata,
 # liveness probe, and the self-documenting OpenAPI / Swagger surface.
-REST_EXEMPT_PATHS: set[str] = {"/", "/healthz", "/docs", "/openapi.json"}
+REST_EXEMPT_PATHS: set[str] = {"/", "/healthz", "/readyz", "/docs", "/openapi.json"}
 # The inbound webhook authenticates standalone via HMAC, so it bypasses JWT to
 # avoid forcing external schedulers to carry both credentials.
 REST_EXEMPT_PREFIXES: set[str] = {"/webhook"}

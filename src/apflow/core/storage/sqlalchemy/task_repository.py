@@ -5,11 +5,12 @@ This module provides a TaskRepository class that encapsulates all database opera
 for tasks. TaskManager should use TaskRepository instead of directly operating on db session.
 """
 
-from datetime import datetime
+from copy import deepcopy
+from datetime import datetime, timezone
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
-from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, update, text
+from sqlalchemy import select, delete, update, text, or_, exists, and_
 from typing import (
     List,
     Dict,
@@ -138,7 +139,11 @@ class TaskRepository(Generic[TaskModelType]):
             TaskModel instance (or custom TaskModel subclass) or None if not found
         """
         try:
-            stmt = select(self.task_model_class).where(self.task_model_class.id == task_id)
+            stmt = (
+                select(self.task_model_class)
+                .where(self.task_model_class.id == task_id)
+                .execution_options(populate_existing=True)
+            )
             result = await self.db.execute(stmt)
             return result.scalar_one_or_none()
         except Exception as e:
@@ -402,41 +407,260 @@ class TaskRepository(Generic[TaskModelType]):
 
         return task_node
 
-    async def update_task(self, task_id: str, **fields: Any) -> TaskModelType:
-        """
-        Update arbitrary fields of a task.
+    async def _execution_fence(self, task_id: str, *, allow_external_cancel: bool = False) -> Any:
+        """Fence inner DAG writes with the active dispatch or worker root lease."""
+        from apflow.core.execution.context import execution_context
+        from apflow.core.storage.sqlalchemy.models import TaskDispatch, TaskLease
 
-        TODO: check dependencies and validate for task tree if dependencies exist
+        context = execution_context.get()
+        data = getattr(context, "data", None)
+        if not isinstance(data, dict):
+            data = {}
+        if not data.get("dispatch_token") and not data.get("worker_token"):
+            if allow_external_cancel:
+                return True
+            return await self._unowned_execution_fence(task_id)
+        clauses = []
+        if data.get("dispatch_token"):
+            clauses.append(
+                exists(
+                    select(TaskDispatch.task_id).where(
+                        TaskDispatch.task_id == data.get("dispatch_task_id"),
+                        TaskDispatch.owner_token == data["dispatch_token"],
+                        TaskDispatch.state.in_(["running", "cancel_requested"]),
+                        TaskDispatch.lease_expires_at > datetime.now(timezone.utc),
+                    )
+                )
+            )
+        if data.get("worker_token"):
+            clauses.append(
+                exists(
+                    select(TaskLease.task_id).where(
+                        TaskLease.task_id == data.get("worker_root_id"),
+                        TaskLease.lease_token == data["worker_token"],
+                        TaskLease.expires_at > datetime.now(timezone.utc),
+                    )
+                )
+            )
+            clauses.append(
+                ~exists(
+                    select(TaskDispatch.task_id).where(
+                        TaskDispatch.task_id == data.get("worker_root_id")
+                    )
+                )
+            )
+        return and_(*clauses) if clauses else True
 
-        Args:
-            task_id: Task ID
-            **fields: Fields to update (e.g., status="completed", inputs={...})
+    async def _unowned_execution_fence(self, task_id: str) -> Any:
+        """Serialize local claims with admission and refuse another runtime's root."""
+        from apflow.core.storage.sqlalchemy.models import TaskDispatch, TaskLease
 
-        Returns:
-            True if successful, False if task not found
-        """
+        task = await self.get_task_by_id(task_id)
+        if task is None:
+            return False
+        root = await self.get_root_task(task)
+        await self.lock_tasks([str(root.id)])
+        return and_(
+            ~exists(
+                select(TaskDispatch.task_id).where(
+                    TaskDispatch.task_id == root.id,
+                    TaskDispatch.state.in_(
+                        ["accepted", "running", "cancel_requested", "reconciliation_required"]
+                    ),
+                )
+            ),
+            ~exists(
+                select(TaskLease.task_id).where(
+                    TaskLease.task_id == root.id,
+                    TaskLease.expires_at > datetime.now(timezone.utc),
+                )
+            ),
+        )
+
+    @staticmethod
+    def assert_mutable(task: TaskModelType) -> None:
+        """Reject supported mutations of frozen task content."""
+        if task.origin_type == TaskOriginType.archive:
+            raise ValidationError(f"Archived task {task.id} is immutable; copy it before editing")
+
+    async def resolve_effective_task(
+        self, task: TaskModelType, max_depth: int = 64
+    ) -> TaskModelType:
+        """Resolve a completed same-owner Link without changing its identity."""
+        owner = task.user_id
+        seen: Set[str] = set()
+        for _ in range(max_depth):
+            if task.origin_type != TaskOriginType.link:
+                return task
+            if str(task.id) in seen:
+                raise ValidationError(f"Link cycle detected while resolving task {task.id}")
+            seen.add(str(task.id))
+            if not task.original_task_id:
+                raise ValidationError(f"Link {task.id} has no original task")
+            original = await self.get_task_by_id(str(task.original_task_id))
+            if original is None:
+                raise ValidationError(f"Original task not found for id {task.original_task_id}")
+            if owner is not None and original.user_id != owner:
+                raise ValidationError("Link reference belongs to a different user")
+            if original.status != "completed":
+                raise ValidationError(f"Original task {original.id} is not completed")
+            task = original
+        raise ValidationError("Link reference depth exceeds the supported limit")
+
+    async def lock_tasks(self, task_ids: List[str]) -> None:
+        """Serialize a frozen snapshot with supported writes to its existing nodes."""
+        identifiers = sorted(set(task_ids))
+        if not identifiers:
+            return
+        if is_postgresql(self.db.session):
+            result = await self.db.execute(
+                select(self.task_model_class.id)
+                .where(self.task_model_class.id.in_(identifiers))
+                .order_by(self.task_model_class.id)
+                .with_for_update()
+            )
+            count = len(result.scalars().all())
+        else:
+            result = await self.db.execute(
+                update(self.task_model_class)
+                .where(self.task_model_class.id.in_(identifiers))
+                .values(updated_at=self.task_model_class.updated_at)
+                .execution_options(synchronize_session=False)
+            )
+            count = cast(CursorResult[Any], result).rowcount
+        if count != len(identifiers):
+            raise ValidationError("Archive source changed or was deleted")
+
+    async def _validate_parent_mutation(self, parent_id: Optional[str]) -> None:
+        if parent_id is None:
+            return
+        if not is_postgresql(self.db.session):
+            await self.db.execute(
+                update(self.task_model_class)
+                .where(self.task_model_class.id == parent_id)
+                .values(updated_at=self.task_model_class.updated_at)
+                .execution_options(synchronize_session=False)
+            )
+        result = await self.db.execute(
+            select(self.task_model_class.origin_type)
+            .where(self.task_model_class.id == parent_id)
+            .with_for_update()
+        )
+        if result.scalar_one_or_none() == TaskOriginType.archive:
+            raise ValidationError(f"Archived task {parent_id} cannot change children")
+
+    async def archive_tasks(self, task_ids: List[str]) -> None:
+        """Freeze a completed set in one transaction, preserving existing IDs."""
+        if not task_ids:
+            return
         try:
-            task = await self.get_task_by_id(task_id)
-            if not task:
-                raise ValueError(f"Task with id {task_id} not found")
-
-            task.update_from_dict(fields)
-
-            for key, _ in fields.items():
-                if hasattr(task, key):
-                    # Mark JSON fields as modified for SQLAlchemy change detection
-                    if task.is_json_field(key):
-                        flag_modified(task, key)
-
+            stmt = (
+                update(self.task_model_class)
+                .where(
+                    self.task_model_class.id.in_(task_ids),
+                    self.task_model_class.status == "completed",
+                    self.task_model_class.cancel_requested_at.is_(None),
+                )
+                .values(origin_type=TaskOriginType.archive)
+                .execution_options(synchronize_session=False)
+            )
+            result = await self.db.execute(stmt)
+            if cast(CursorResult[Any], result).rowcount != len(set(task_ids)):
+                raise ValidationError("Only fully completed tasks can be archived")
             await self.db.commit()
-            await self.db.refresh(task)
-            logger.info(f"Updated task {task_id} fields: {list(fields.keys())}")
-            return task
-
-        except Exception as e:
-            logger.error(f"Error updating task {task_id}: {str(e)}")
+        except Exception:
             await self.db.rollback()
             raise
+
+    async def update_task(self, task_id: str, **fields: Any) -> TaskModelType:
+        """Update supported fields while atomically preserving frozen archives."""
+        try:
+            task = await self.get_task_by_id(task_id)
+            if task is None:
+                raise ValueError(f"Task with id {task_id} not found")
+            fields = {key: value for key, value in fields.items() if hasattr(task, key)}
+            if "parent_id" in fields and fields["parent_id"] != task.parent_id:
+                await self._validate_parent_mutation(task.parent_id)
+                await self._validate_parent_mutation(fields["parent_id"])
+            protected = set(fields) - {"has_references"}
+            if protected:
+                self.assert_mutable(task)
+            if "status" in fields and fields["status"] in {"completed", "failed", "cancelled"}:
+                fields.setdefault("completed_at", datetime.now(timezone.utc))
+            if not fields:
+                return task
+            stmt = update(self.task_model_class).where(
+                self.task_model_class.id == task_id, await self._execution_fence(task_id)
+            )
+            if protected:
+                stmt = stmt.where(
+                    or_(
+                        self.task_model_class.origin_type.is_(None),
+                        self.task_model_class.origin_type != TaskOriginType.archive,
+                    )
+                )
+            result = await self.db.execute(
+                stmt.values(**fields).execution_options(synchronize_session=False)
+            )
+            if cast(CursorResult[Any], result).rowcount != 1:
+                raise ValidationError(f"Task {task_id} is archived or its execution lease was lost")
+            await self.db.commit()
+            await self.db.refresh(task)
+            logger.info("Updated task %s fields: %s", task_id, list(fields))
+            return task
+        except Exception:
+            await self.db.rollback()
+            raise
+
+    async def transition_task(
+        self,
+        task_id: str,
+        *,
+        expected_statuses: List[str],
+        expected_attempt_id: Optional[int] = None,
+        allow_cancel_requested: bool = False,
+        **fields: Any,
+    ) -> Optional[TaskModelType]:
+        """Apply a state transition only to the current non-archived attempt."""
+        stmt = update(self.task_model_class).where(
+            self.task_model_class.id == task_id,
+            self.task_model_class.status.in_(expected_statuses),
+            await self._execution_fence(task_id, allow_external_cancel=allow_cancel_requested),
+            or_(
+                self.task_model_class.origin_type.is_(None),
+                self.task_model_class.origin_type != TaskOriginType.archive,
+            ),
+        )
+        if expected_attempt_id is not None:
+            stmt = stmt.where(self.task_model_class.attempt_id == expected_attempt_id)
+        if not allow_cancel_requested:
+            stmt = stmt.where(self.task_model_class.cancel_requested_at.is_(None))
+        result = await self.db.execute(
+            stmt.values(**fields).execution_options(synchronize_session=False)
+        )
+        await self.db.commit()
+        if cast(CursorResult[Any], result).rowcount != 1:
+            return None
+        return await self.get_task_by_id(task_id)
+
+    async def request_cancellation(self, task_id: str) -> Optional[TaskModelType]:
+        """Persist a request before notifying a process-local or remote executor."""
+        stmt = (
+            update(self.task_model_class)
+            .where(
+                self.task_model_class.id == task_id,
+                self.task_model_class.status.in_(["pending", "in_progress"]),
+                or_(
+                    self.task_model_class.origin_type.is_(None),
+                    self.task_model_class.origin_type != TaskOriginType.archive,
+                ),
+                self.task_model_class.cancel_requested_at.is_(None),
+            )
+            .values(cancel_requested_at=datetime.now(timezone.utc))
+        )
+        await self.db.execute(stmt.execution_options(synchronize_session=False))
+        await self.db.commit()
+        return await self.get_task_by_id(task_id)
 
     async def try_claim_for_execution(
         self, task_id: str, allowed_statuses: Optional[List[str]] = None
@@ -469,13 +693,26 @@ class TaskRepository(Generic[TaskModelType]):
                 .where(
                     self.task_model_class.id == task_id,
                     self.task_model_class.status.in_(allowed_statuses),
+                    await self._execution_fence(task_id),
+                    or_(
+                        self.task_model_class.origin_type.is_(None),
+                        self.task_model_class.origin_type.notin_(
+                            [TaskOriginType.archive, TaskOriginType.link]
+                        ),
+                    ),
+                    self.task_model_class.cancel_requested_at.is_(None),
                 )
-                .values(status="in_progress", started_at=now, error=None)
+                .values(
+                    status="in_progress",
+                    started_at=now,
+                    error=None,
+                    attempt_id=self.task_model_class.attempt_id + 1,
+                )
             )
             result = await self.db.execute(stmt)
             await self.db.commit()
 
-            rows_affected = result.rowcount  # type: ignore[union-attr]
+            rows_affected = cast(CursorResult[Any], result).rowcount  # type: ignore[union-attr]
             if rows_affected == 0:
                 logger.info(
                     f"Task {task_id} claim failed: status not in {allowed_statuses} "
@@ -553,7 +790,7 @@ class TaskRepository(Generic[TaskModelType]):
                             to_jsonb(COALESCE((token_usage::jsonb->>'total')::bigint, 0) + :total_delta)
                         )
                     )::json
-                    WHERE id = :task_id
+                    WHERE id = :task_id AND (origin_type IS NULL OR origin_type != 'archive')
                     """)
             else:
                 # A never-set JSON column is stored as the text 'null' (see
@@ -569,13 +806,13 @@ class TaskRepository(Generic[TaskModelType]):
                         '$.output', COALESCE(json_extract(token_usage, '$.output'), 0) + :output_delta,
                         '$.total', COALESCE(json_extract(token_usage, '$.total'), 0) + :total_delta
                     )
-                    WHERE id = :task_id
+                    WHERE id = :task_id AND (origin_type IS NULL OR origin_type != 'archive')
                     """)
 
             result = await self.db.execute(stmt, params)
             await self.db.commit()
 
-            if result.rowcount == 0:  # type: ignore[union-attr]
+            if cast(CursorResult[Any], result).rowcount == 0:  # type: ignore[union-attr]
                 return None
 
             task = await self.get_task_by_id(task_id)
@@ -842,7 +1079,10 @@ class TaskRepository(Generic[TaskModelType]):
             reset_count = 0
             for task in all_tasks:
                 # Skip the root task — it is handled by mark_scheduled_task_running
-                if str(task.id) == str(root_task_id):
+                if str(task.id) == str(root_task_id) or task.origin_type in {
+                    TaskOriginType.archive,
+                    TaskOriginType.link,
+                }:
                     continue
 
                 task.status = "pending"
@@ -1035,6 +1275,7 @@ class TaskRepository(Generic[TaskModelType]):
             task = await self.get_task_by_id(task_id)
             if not task:
                 return None
+            self.assert_mutable(task)
 
             # Guard: skip if task is still running to avoid double-execution
             if task.status == "in_progress":
@@ -1110,6 +1351,7 @@ class TaskRepository(Generic[TaskModelType]):
             task = await self.get_task_by_id(task_id)
             if not task:
                 return None
+            self.assert_mutable(task)
 
             from datetime import timezone as tz
 
@@ -1197,6 +1439,7 @@ class TaskRepository(Generic[TaskModelType]):
             task = await self.get_task_by_id(task_id)
             if not task:
                 return None
+            self.assert_mutable(task)
 
             if not task.schedule_type or not task.schedule_expression:
                 logger.warning(f"Task {task_id} missing schedule_type or schedule_expression")
@@ -1346,9 +1589,17 @@ class TaskRepository(Generic[TaskModelType]):
             task = await self.get_task_by_id(task_id)
             if not task:
                 return False
+            self.assert_mutable(task)
+            await self._validate_parent_mutation(task.parent_id)
 
-                # For async session, use delete statement
-            stmt = delete(self.task_model_class).where(self.task_model_class.id == task_id)
+            # For async session, use delete statement
+            stmt = delete(self.task_model_class).where(
+                self.task_model_class.id == task_id,
+                or_(
+                    self.task_model_class.origin_type.is_(None),
+                    self.task_model_class.origin_type != TaskOriginType.archive,
+                ),
+            )
             await self.db.execute(stmt)
             await self.db.commit()
 
@@ -1398,22 +1649,6 @@ class TaskRepository(Generic[TaskModelType]):
         else:
             keep_fields = default_keep_fields
 
-        async def resolve_task(task: TaskModelType) -> TaskModelType:
-            # Recursively resolve link, guarding against a link cycle (A -> B -> A)
-            # that would otherwise loop forever.
-            seen_link_ids: Set[str] = set()
-            while task.origin_type == TaskOriginType.link and task.original_task_id:
-                current_id = str(task.id)
-                if current_id in seen_link_ids:
-                    raise ValidationError(f"Link cycle detected while resolving task {task.id}")
-                seen_link_ids.add(current_id)
-                original_task = await self.get_task_by_id(task.original_task_id)
-                if not original_task:
-                    logger.error(f"Original task not found for id {task.original_task_id}")
-                    raise ValidationError(f"Original task not found for id {task.original_task_id}")
-                task = original_task
-            return task
-
         def merge_task(link_task: TaskModelType, original_task: TaskModelType) -> TaskModelType:
             # Use TaskModel.copy for safe copying and merging
             override = {
@@ -1421,7 +1656,7 @@ class TaskRepository(Generic[TaskModelType]):
                 for field in keep_fields
                 if hasattr(link_task, field)
             }
-            return original_task.copy(override=override)
+            return original_task.copy(override=deepcopy({**original_task.to_dict(), **override}))
 
         # Bulk-load the tree's rows once and index children by parent_id, so the
         # per-node child fetch is an in-memory lookup instead of an N+1 query per
@@ -1439,7 +1674,7 @@ class TaskRepository(Generic[TaskModelType]):
             if getattr(task, "origin_type", None) == TaskOriginType.link and getattr(
                 task, "original_task_id", None
             ):
-                original_task = await resolve_task(task)
+                original_task = await self.resolve_effective_task(task)
                 merged_task = merge_task(task, original_task)
             else:
                 merged_task = task

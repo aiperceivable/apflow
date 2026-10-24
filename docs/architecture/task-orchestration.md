@@ -64,15 +64,19 @@ Validates uniqueness, resolves name→ID references, detects circular dependenci
 ### 2. Link — Reference a completed workflow (read-only pointer)
 
 ```python
-tree = await task_creator.from_link(original_task, user_id="new_user")
+tree = await task_creator.from_link(original_task)
 ```
 
 - Creates new tasks that **point to** the originals via `original_task_id`
 - Result/params/inputs/schemas are cleared (the link reads from the original)
 - Requires entire source tree to be `completed`
 - Does not duplicate data — minimal storage cost
+- Source and Link must have the same owner; linking does not grant cross-user access.
+- Tree queries and dependency injection share bounded effective-result resolution.
+  Missing originals, ownership violations, and reference cycles raise explicit errors;
+  a legitimate `null` result remains valid. Each consumer receives an isolated copy.
 
-**Use case:** Multiple users referencing the same completed analysis.
+**Use case:** Multiple workflows owned by the same user reference one completed analysis.
 
 ### 3. Copy — Clone a workflow (modifiable)
 

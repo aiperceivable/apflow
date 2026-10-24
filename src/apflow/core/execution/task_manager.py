@@ -43,9 +43,21 @@ from apflow.core.execution.errors import (
     ValidationError,
 )
 from apflow.core.execution.result_protocol import ExecutorResult, normalize_executor_result
+from apflow.core.execution.error_info import ErrorInfo, execution_error_info
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _preflight_failure_info(
+    task: TaskModel, code: str, phase: str, category: str = "permanent"
+) -> ErrorInfo:
+    """Describe an admission failure whose executor was never invoked."""
+    info = execution_error_info(
+        ValidationError(code), task_id=str(task.id), attempt_id=task.attempt_id or 0, phase=phase
+    )
+    info["code"], info["category"] = code, category
+    return info
 
 
 class TaskManager:
@@ -93,6 +105,7 @@ class TaskManager:
         pre_hooks: Optional[List[TaskPreHook]] = None,
         post_hooks: Optional[List[TaskPostHook]] = None,
         executor_instances: Optional[Dict[str, Any]] = None,
+        cancellation_events: Optional[Dict[str, asyncio.Event]] = None,
         use_demo: bool = False,
         checkpoint_manager: Optional["CheckpointManager"] = None,
         retry_manager: Optional["RetryManager"] = None,
@@ -153,9 +166,13 @@ class TaskManager:
         )
         # Lock to protect concurrent access to _executor_instances from parallel tasks
         self._executor_lock = asyncio.Lock()
+        self._cancellation_events = cancellation_events if cancellation_events is not None else {}
         # Track tasks that should be re-executed (even if they are completed or failed)
         # This allows re-executing failed tasks and ensures dependencies are also re-executed
         self._tasks_to_reexecute: set[str] = set()
+        self._execution_attempt_ids: Dict[str, int] = {}
+        self._attempt_numbers: Dict[str, int] = {}
+        self._attempt_records: Dict[str, str] = {}
         self._executable_task_ids: Optional[set[str]] = None
         # Demo mode flag - if True, executors return demo data instead of executing
         self.use_demo = use_demo
@@ -170,143 +187,101 @@ class TaskManager:
     async def cancel_task(
         self, task_id: str, error_message: Optional[str] = None
     ) -> Dict[str, Any]:
-        """
-        Cancel a task execution (called by external sources like CLI/API)
-
-        This method:
-        1. Checks if task is running
-        2. If executor supports cancellation, calls executor.cancel() to get cancellation result
-        3. Updates database with cancelled status and token_usage from cancellation result
-
-        Args:
-            task_id: Task ID to cancel
-            error_message: Optional error message for cancellation
-
-        Returns:
-            Dictionary with cancellation result:
-            {
-                "status": "cancelled" | "failed",
-                "message": str,
-                "token_usage": Dict,  # Optional token usage from executor
-            }
-        """
-        try:
-            # Get task from database
-            task = await self.task_repository.get_task_by_id(task_id)
-            if not task:
-                return {
-                    "status": "failed",
-                    "message": f"Task {task_id} not found",
-                    "error": "Task not found",
-                }
-
-            # Check if task can be cancelled
-            if task.status in ["completed", "failed", "cancelled"]:
-                return {
-                    "status": "failed",
-                    "message": f"Task {task_id} is already {task.status}, cannot cancel",
-                    "current_status": task.status,
-                }
-
-            logger.info(f"Cancelling task {task_id} (current status: {task.status})")
-
-            # If task is in_progress and executor supports cancellation, call executor.cancel()
-            cancel_result = None
-            token_usage = None
-            result_data = None
-
-            if task.status == "in_progress":
-                async with self._executor_lock:
-                    executor = self._executor_instances.get(task_id)
-                if executor and hasattr(executor, "cancel"):
-                    try:
-                        logger.info(f"Calling executor.cancel() for task {task_id}")
-                        cancel_result = await executor.cancel()
-                        logger.info(
-                            f"Executor {executor.__class__.__name__} cancel() returned: {cancel_result}"
-                        )
-
-                        if cancel_result and cancel_result.get("status") == "cancelled":
-                            token_usage = cancel_result.get("token_usage")
-                            # Use result if available, otherwise use partial_result
-                            result_data = (
-                                cancel_result["result"]
-                                if "result" in cancel_result
-                                else cancel_result.get("partial_result")
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to call executor.cancel() for task {task_id}: {str(e)}"
-                        )
-                        cancel_result = {
-                            "status": "failed",
-                            "message": f"Failed to cancel executor: {str(e)}",
-                            "error": str(e),
-                        }
-
-            # Update database with cancelled status
-            error_msg = error_message or (
-                cancel_result.get("message") if cancel_result else "Cancelled by user"
-            )
-
-            # Prepare update data - merge all fields in one update
-            update_data = {
-                "status": "cancelled",
-                "error": error_msg,
-                "completed_at": datetime.now(timezone.utc),
-            }
-
-            if cancel_result and ("result" in cancel_result or "partial_result" in cancel_result):
-                update_data["result"] = deepcopy(result_data)
-            if token_usage:
-                try:
-                    normalized = normalize_executor_result(
-                        {"result": None, "token_usage": token_usage}, "envelope"
-                    )
-                    token_usage = normalized.get("token_usage")
-                except ValidationError as exc:
-                    logger.warning("Task %s: invalid cancellation usage: %s", task_id, exc)
-                    token_usage = None
-
-            # Update task status in one call (combines status, error, result, token_usage)
-            await self.task_repository.update_task(task_id=task_id, **update_data)
-            if token_usage:
-                try:
-                    await self._update_token_usage(task_id, token_usage)
-                except Exception as exc:
-                    logger.warning(
-                        "Task %s: failed to persist cancellation usage: %s", task_id, exc
-                    )
-
-            # Clear executor reference and task context to prevent memory leaks
-            async with self._executor_lock:
-                executor = self._executor_instances.pop(task_id, None)
-            if executor and hasattr(executor, "clear_task_context"):
-                executor.clear_task_context()
-                logger.debug(f"Cleared task context for task {task_id} during cancellation")
-
-            # Build return result
-            result = {
-                "status": "cancelled",
-                "message": error_msg,
-            }
-
-            if token_usage:
-                result["token_usage"] = token_usage
-
-            if cancel_result and ("result" in cancel_result or "partial_result" in cancel_result):
-                result["result"] = result_data
-
-            logger.info(f"Task {task_id} cancelled successfully")
-            return result
-
-        except Exception as e:
-            logger.error(f"Error cancelling task {task_id}: {str(e)}", exc_info=True)
+        """Persist cancellation first and report whether executor stop is confirmed."""
+        task = await self.task_repository.request_cancellation(task_id)
+        if task is None:
+            return {"status": "failed", "message": f"Task {task_id} not found"}
+        if task.status in {"completed", "failed", "cancelled"}:
             return {
-                "status": "failed",
-                "message": f"Failed to cancel task {task_id}",
-                "error": str(e),
+                "status": "cancelled" if task.status == "cancelled" else "failed",
+                "current_status": task.status,
+                "cancel_requested": task.cancel_requested_at is not None,
+                "stop_confirmed": task.status == "cancelled",
+                "message": f"Task {task_id} is already {task.status}",
             }
+        event = self._cancellation_events.setdefault(task_id, asyncio.Event())
+        event.set()
+        stopped = task.status == "pending"
+        attempt_id = task.attempt_id
+        response = await self._notify_cancellation(task_id)
+        stopped = stopped or response.get("status") == "cancelled"
+        message = error_message or response.get("message") or "Cancellation requested"
+        fields: Dict[str, Any] = {"error": message}
+        if stopped:
+            fields.update(status="cancelled", completed_at=datetime.now(timezone.utc))
+            if "result" in response or "partial_result" in response:
+                fields["result"] = deepcopy(response.get("result", response.get("partial_result")))
+            updated = await self.task_repository.transition_task(
+                task_id,
+                expected_statuses=["pending", "in_progress"],
+                expected_attempt_id=attempt_id,
+                allow_cancel_requested=True,
+                **fields,
+            )
+            stopped = updated is not None
+            if not stopped:
+                fields.pop("result", None)
+        usage = await self._record_cancellation_usage(task_id, response.get("token_usage"))
+        result = {
+            "status": "cancelled" if stopped else "cancelling",
+            "cancel_requested": True,
+            "stop_confirmed": stopped,
+            "message": message,
+        }
+        if "result" in fields:
+            result["result"] = fields["result"]
+        if usage:
+            result["token_usage"] = usage
+        return result
+
+    async def _notify_cancellation(self, task_id: str) -> Dict[str, Any]:
+        """Notify a local executor without treating a missing handle as confirmed stop."""
+        async with self._executor_lock:
+            executor = self._executor_instances.get(task_id)
+        if executor is None or not hasattr(executor, "cancel"):
+            return {}
+        try:
+            return await executor.cancel() or {}
+        except Exception as exc:
+            logger.warning("Executor cancellation failed for task %s: %s", task_id, exc)
+            return {}
+
+    async def _record_cancellation_usage(
+        self, task_id: str, usage: Any
+    ) -> Optional[Dict[str, int]]:
+        if not usage:
+            return None
+        try:
+            normalized = normalize_executor_result(
+                {"result": None, "token_usage": usage}, "envelope"
+            )
+            normalized_usage = normalized.get("token_usage")
+            if normalized_usage:
+                await self._update_token_usage(task_id, normalized_usage)
+            return normalized_usage
+        except ValidationError as exc:
+            logger.warning("Task %s: invalid cancellation usage: %s", task_id, exc)
+            return None
+
+    async def _confirm_requested_cancellation(
+        self, task: TaskModel, expected_attempt_id: Optional[int] = None
+    ) -> bool:
+        """A finished local attempt confirms stop without accepting its late output."""
+        if expected_attempt_id is not None and task.attempt_id != expected_attempt_id:
+            return True
+        if task.status == "cancelled":
+            return True
+        if task.cancel_requested_at is None:
+            return False
+        await self.task_repository.transition_task(
+            str(task.id),
+            expected_statuses=["pending", "in_progress"],
+            expected_attempt_id=task.attempt_id,
+            allow_cancel_requested=True,
+            status="cancelled",
+            completed_at=datetime.now(timezone.utc),
+        )
+        return True
 
     def _get_execution_tree(self, task_tree: TaskTreeNode) -> TaskTreeNode:
         """Build a summary of selected tasks while retaining the distribution tree."""
@@ -369,7 +344,8 @@ class TaskManager:
                 return task_tree
             except Exception as e:
                 # Call on_tree_failed hook
-                await self._call_task_tree_hooks("on_tree_failed", root_task, str(e))
+                if root_task is not None:
+                    await self._call_task_tree_hooks("on_tree_failed", root_task, str(e))
                 raise
         finally:
             # Clear hook context
@@ -465,7 +441,8 @@ class TaskManager:
                     task_tree_root_id = root_task_id
                 self.streaming_callbacks.task_failed(task_tree_root_id, str(e))
                 # Call on_tree_failed hook
-                await self._call_task_tree_hooks("on_tree_failed", root_task, str(e))
+                if root_task is not None:
+                    await self._call_task_tree_hooks("on_tree_failed", root_task, str(e))
                 raise
         finally:
             # Clear hook context
@@ -529,9 +506,7 @@ class TaskManager:
 
             # If no children, check if current task should execute based on dependencies
             if not priority_groups:
-                deps_satisfied = await are_dependencies_satisfied(
-                    node.task, self.task_repository, self._tasks_to_reexecute
-                )
+                deps_satisfied = await self._are_dependencies_satisfied(node.task)
                 if deps_satisfied and node.task.status != "completed":
                     logger.debug(
                         f"All dependencies for task {node_task_id} are satisfied, executing task"
@@ -553,9 +528,7 @@ class TaskManager:
                 await self._execute_priority_group(priority_groups[priority], priority)
 
             # After processing all children, check if current task should execute
-            deps_satisfied = await are_dependencies_satisfied(
-                node.task, self.task_repository, self._tasks_to_reexecute
-            )
+            deps_satisfied = await self._are_dependencies_satisfied(node.task)
             if deps_satisfied and node.task.status != "completed":
                 logger.debug(
                     f"All dependencies for task {node_task_id} are satisfied, executing task"
@@ -578,10 +551,18 @@ class TaskManager:
             # Update task status if possible
             try:
                 if node_task_id:
-                    await self.task_repository.update_task(
+                    await self.task_repository.transition_task(
                         task_id=node_task_id,
+                        expected_statuses=["pending", "in_progress"],
+                        expected_attempt_id=node.task.attempt_id,
                         status="failed",
                         error=str(e),
+                        error_info=execution_error_info(
+                            e,
+                            task_id=node_task_id,
+                            attempt_id=node.task.attempt_id,
+                            phase="orchestration",
+                        ),
                         completed_at=datetime.now(timezone.utc),
                     )
             except Exception as db_error:
@@ -788,6 +769,8 @@ class TaskManager:
             return False
 
         # Skip completed/cancelled tasks unless marked for re-execution
+        if task.origin_type in {"archive", "link"}:
+            return False
         if task.status in ["completed", "cancelled"]:
             if task_id not in self._tasks_to_reexecute:
                 logger.info(f"Task {task_id} already {task.status}, skipping execution")
@@ -840,7 +823,8 @@ class TaskManager:
         if not task:
             raise ValueError(f"Task {task_id} not found")
 
-        if task.status == "cancelled":
+        if task.status == "cancelled" or task.cancel_requested_at is not None:
+            await self._confirm_requested_cancellation(task)
             logger.info(f"Task {task_id} was cancelled {stage}, stopping execution")
             return None
 
@@ -860,7 +844,14 @@ class TaskManager:
             Resolved task inputs
         """
         # Resolve dependencies first (merge dependency results into inputs)
-        resolved_inputs = await self.resolve_task_dependencies(task)
+        try:
+            resolved_inputs = await self.resolve_task_dependencies(task)
+        except Exception as exc:
+            if not getattr(exc, "error_info", None):
+                exc.error_info = _preflight_failure_info(  # type: ignore[attr-defined]
+                    task, "DEPENDENCY_RESOLUTION_FAILED", "dependency", "dependency"
+                )
+            raise
 
         # Check cancellation before proceeding
         refreshed_task = await self._check_cancellation_and_refresh_task(
@@ -938,7 +929,13 @@ class TaskManager:
         await manager.update_usage(task_id, usage)
 
     async def _handle_task_execution_result(
-        self, task: TaskModel, task_id: str, task_result: ExecutorResult
+        self,
+        task: TaskModel,
+        task_id: str,
+        task_result: ExecutorResult,
+        *,
+        usage_recorded: bool = False,
+        expected_attempt_id: Optional[int] = None,
     ) -> None:
         """
         Handle task execution result: update status, clear executor, call post-hooks
@@ -948,6 +945,8 @@ class TaskManager:
             task_id: Task ID string
             task_result: Result from executor
         """
+        attempt_id = task.attempt_id if expected_attempt_id is None else expected_attempt_id
+        token_usage = task_result.get("token_usage")
         # Check if task was cancelled during execution
         # Refresh session state before query to ensure we see latest database state
         # This prevents blocking in sync sessions when there are uncommitted transactions
@@ -957,7 +956,7 @@ class TaskManager:
         if refreshed_task is None:
             raise ValueError(f"Task {task_id} not found after execution")
         task = refreshed_task
-        if task.status == "cancelled":
+        if await self._confirm_requested_cancellation(task, attempt_id):
             logger.info(f"Task {task_id} was cancelled during execution, stopping")
             # Clear executor reference
             async with self._executor_lock:
@@ -974,6 +973,8 @@ class TaskManager:
                     self.streaming_callbacks.task_failed(task_id, "Task was cancelled")
             return
 
+        if token_usage and not usage_recorded:
+            await self._update_token_usage(task_id, token_usage)
         # Clear executor reference after successful execution
         async with self._executor_lock:
             executor = self._executor_instances.pop(task_id, None)
@@ -981,40 +982,52 @@ class TaskManager:
             executor.clear_task_context()
             logger.debug(f"Cleared task context for task {task_id} after successful execution")
 
-        # --- Governance: Update token usage post-execution ---
-        token_usage = task_result.get("token_usage") if isinstance(task_result, dict) else None
-        if token_usage:
-            await self._update_token_usage(task_id, token_usage)
-
         # Check if the result indicates an error (e.g., executor creation failed).
         # Require a truthy error value: a successful payload that merely carries an
         # "error": None / "" field must not be misclassified as a failure.
         error_message = task_result.get("error")
         if error_message:
             # Task failed - update status to failed
-            await self.task_repository.update_task(
+            updated = await self.task_repository.transition_task(
                 task_id=task_id,
+                expected_statuses=(
+                    ["in_progress"] if usage_recorded else ["pending", "in_progress", "completed"]
+                ),
+                expected_attempt_id=attempt_id,
                 status="failed",
                 progress=0.0,
                 result=task_result["result"],
                 error=error_message,
+                error_info=task_result.get("error_info")
+                or execution_error_info(
+                    ExecutorError(error_message), task_id=task_id, attempt_id=attempt_id
+                ),
                 completed_at=datetime.now(timezone.utc),
             )
 
+            if updated is None:
+                return
             # Notify streaming callback
             if self.stream:
                 self.streaming_callbacks.task_failed(task_id, error_message)
         else:
             # Task completed successfully
-            await self.task_repository.update_task(
+            updated = await self.task_repository.transition_task(
                 task_id=task_id,
+                expected_statuses=(
+                    ["in_progress"] if usage_recorded else ["pending", "in_progress", "completed"]
+                ),
+                expected_attempt_id=attempt_id,
                 status="completed",
                 progress=1.0,
                 result=task_result["result"],
                 error=None,
+                error_info=None,
                 completed_at=datetime.now(timezone.utc),
             )
 
+            if updated is None:
+                return
             # --- Durability: Record success, clean up checkpoints ---
             if self._circuit_breaker_registry:
                 executor_id = self._get_executor_id(task)
@@ -1072,9 +1085,31 @@ class TaskManager:
         Returns:
             True if all dependencies are satisfied, False otherwise
         """
-        return await are_dependencies_satisfied(
-            task, self.task_repository, self._tasks_to_reexecute
+        try:
+            return await are_dependencies_satisfied(
+                task, self.task_repository, self._tasks_to_reexecute
+            )
+        except Exception as exc:
+            if not getattr(exc, "error_info", None):
+                exc.error_info = _preflight_failure_info(  # type: ignore[attr-defined]
+                    task, "DEPENDENCY_CHECK_FAILED", "dependency", "dependency"
+                )
+            raise
+
+    async def _fail_before_execution(self, task: TaskModel, message: str, info: ErrorInfo) -> None:
+        """Persist a fenced admission failure before any provider invocation."""
+        task_id = str(task.id)
+        updated = await self.task_repository.transition_task(
+            task_id=task_id,
+            expected_statuses=["in_progress"],
+            expected_attempt_id=task.attempt_id,
+            status="failed",
+            error=message,
+            error_info=info,
+            completed_at=datetime.now(timezone.utc),
         )
+        if self.stream and updated is not None:
+            self.streaming_callbacks.task_failed(task_id, message)
 
     async def _apply_budget_policy(self, task: "TaskModel", inputs: Dict[str, Any]) -> bool:
         """Apply configured thresholds before execution; return whether to proceed."""
@@ -1087,6 +1122,7 @@ class TaskManager:
         if budget.utilization < 0:
             return True
         error = "Token budget exhausted and no cost policy configured."
+        error_code = "BUDGET_EXHAUSTED"
         if self._policy_engine and task.cost_policy:
             try:
                 evaluation = self._policy_engine.evaluate(
@@ -1095,7 +1131,10 @@ class TaskManager:
                     current_model_index=(task.params or {}).get("_downgrade_model_index", 0),
                 )
             except KeyError as exc:
-                raise ConfigurationError(str(exc)) from exc
+                raise ConfigurationError(
+                    str(exc),
+                    error_info=_preflight_failure_info(task, "COST_POLICY_NOT_FOUND", "governance"),
+                ) from exc
             if evaluation.action == PolicyAction.DOWNGRADE and evaluation.model_override:
                 inputs["model"] = evaluation.model_override
                 params = dict(task.params or {})
@@ -1107,16 +1146,12 @@ class TaskManager:
             if evaluation.action != PolicyAction.BLOCK:
                 return True
             error = f"Budget policy blocked execution: {evaluation.message}"
+            error_code = "BUDGET_POLICY_BLOCKED"
         elif budget.allowed:
             return True
-        await self.task_repository.update_task(
-            task_id=task_id,
-            status="failed",
-            error=error,
-            completed_at=datetime.now(timezone.utc),
+        await self._fail_before_execution(
+            task, error, _preflight_failure_info(task, error_code, "governance")
         )
-        if self.stream:
-            self.streaming_callbacks.task_failed(task_id, error)
         return False
 
     async def _execute_single_task(self, task: TaskModel, use_callback: bool = True):
@@ -1143,6 +1178,7 @@ class TaskManager:
         if self._executable_task_ids is not None and task_id not in self._executable_task_ids:
             return
 
+        execution_attempt_id = task.attempt_id
         try:
             # Check pre-execution conditions (streaming final, basic status)
             if not await self._check_task_execution_preconditions(task, task_id):
@@ -1166,6 +1202,8 @@ class TaskManager:
                 logger.info(f"Task {task_id} already claimed by another caller, skipping")
                 return
             task = claimed_task
+            execution_attempt_id = task.attempt_id
+            self._execution_attempt_ids[task_id] = execution_attempt_id
 
             # Emit task_start only after successful claim to avoid false events
             if self.stream:
@@ -1204,14 +1242,11 @@ class TaskManager:
                 if cb and not cb.can_execute():
                     error_msg = f"Circuit breaker OPEN for executor '{executor_id}'"
                     logger.warning(f"Task {task_id}: {error_msg}")
-                    await self.task_repository.update_task(
-                        task_id=task_id,
-                        status="failed",
-                        error=error_msg,
-                        completed_at=datetime.now(timezone.utc),
+                    await self._fail_before_execution(
+                        task,
+                        error_msg,
+                        _preflight_failure_info(task, "CIRCUIT_OPEN", "admission", "transient"),
                     )
-                    if self.stream:
-                        self.streaming_callbacks.task_failed(task_id, error_msg)
                     return
 
             if not await self._apply_budget_policy(task, final_inputs):
@@ -1234,6 +1269,7 @@ class TaskManager:
                     max_attempts=task.max_attempts,
                     backoff_strategy=BackoffStrategy(task.backoff_strategy or "exponential"),
                     backoff_base_seconds=float(task.backoff_base_seconds or 1.0),
+                    retry_unknown_errors=False,
                 )
 
                 async def _execute_fn() -> ExecutorResult:
@@ -1242,7 +1278,7 @@ class TaskManager:
                         checkpoint = await self._checkpoint_manager.load_checkpoint(task_id)
                         if checkpoint is not None:
                             attempt_inputs["_checkpoint"] = checkpoint
-                    return await self._execute_task_with_schemas(task, attempt_inputs)
+                    return await self._execute_attempt(task, attempt_inputs)
 
                 async def _on_retry(tid: str, attempt: int, exc: Exception):
                     logger.warning(f"Task {tid} retry {attempt + 1}: {exc}")
@@ -1254,10 +1290,24 @@ class TaskManager:
                             cp_data = executor.get_checkpoint()
                             if cp_data:
                                 await self._checkpoint_manager.save_checkpoint(tid, cp_data)
+                    retry_at = getattr(exc, "next_retry_at", None)
+                    record_id = self._attempt_records.get(tid)
+                    if record_id and isinstance(retry_at, datetime):
+                        from apflow.durability.attempts import AttemptRecorder
+
+                        await AttemptRecorder(self.db).schedule_retry(record_id, retry_at)
                     # Update attempt count
                     await self.task_repository.update_task(
                         task_id=tid,
                         attempt_count=attempt + 1,
+                    )
+
+                async def cancellation_check() -> bool:
+                    return (
+                        await self._check_cancellation_and_refresh_task(
+                            task_id, "during retry backoff"
+                        )
+                        is None
                     )
 
                 task_result = await self._retry_manager.execute_with_retry(
@@ -1265,13 +1315,26 @@ class TaskManager:
                     policy,
                     _execute_fn,
                     _on_retry,
+                    cancellation_check=cancellation_check,
                 )
             else:
-                task_result = await self._execute_task_with_schemas(task, final_inputs)
+                task_result = await self._execute_attempt(task, final_inputs)
 
             # Handle execution result
-            await self._handle_task_execution_result(task, task_id, task_result)
+            await self._handle_task_execution_result(
+                task,
+                task_id,
+                task_result,
+                usage_recorded=True,
+                expected_attempt_id=execution_attempt_id,
+            )
 
+        except asyncio.CancelledError:
+            current = await self.task_repository.get_task_by_id(task_id)
+            if current is None or not await self._confirm_requested_cancellation(
+                current, execution_attempt_id
+            ):
+                raise
         except Exception as e:
             # Log business errors without stack trace, unexpected errors with stack trace
             if isinstance(e, BusinessError):
@@ -1293,12 +1356,21 @@ class TaskManager:
             # Update task status
             if task_id:
                 try:
-                    await self.task_repository.update_task(
-                        task_id=task_id,
-                        status="failed",
-                        error=str(e),
-                        completed_at=datetime.now(timezone.utc),
-                    )
+                    current = await self.task_repository.get_task_by_id(task_id)
+                    if current is not None and not await self._confirm_requested_cancellation(
+                        current, execution_attempt_id
+                    ):
+                        await self.task_repository.transition_task(
+                            task_id=task_id,
+                            expected_statuses=["in_progress"],
+                            expected_attempt_id=execution_attempt_id,
+                            status="failed",
+                            error=str(e),
+                            error_info=execution_error_info(
+                                e, task_id=task_id, attempt_id=task.attempt_id
+                            ),
+                            completed_at=datetime.now(timezone.utc),
+                        )
                 except Exception as update_error:
                     logger.warning(f"Failed to update task status for {task_id}: {update_error}")
 
@@ -1310,6 +1382,14 @@ class TaskManager:
                     logger.warning(
                         f"Failed to call task_failed callback for {task_id}: {callback_error}"
                     )
+        finally:
+            if self._execution_attempt_ids.get(task_id) == execution_attempt_id:
+                self._execution_attempt_ids.pop(task_id, None)
+                self._cancellation_events.pop(task_id, None)
+                async with self._executor_lock:
+                    executor = self._executor_instances.pop(task_id, None)
+                if executor is not None and hasattr(executor, "clear_task_context"):
+                    executor.clear_task_context()
 
     async def _execute_pre_hooks(self, task: TaskModel) -> None:
         """
@@ -1561,9 +1641,7 @@ class TaskManager:
             triggered_tasks = []
             for task in waiting_tasks:
                 logger.debug(f"Checking dependencies for task {task.id} (name: {task.name})")
-                deps_satisfied = await are_dependencies_satisfied(
-                    task, self.task_repository, self._tasks_to_reexecute
-                )
+                deps_satisfied = await self._are_dependencies_satisfied(task)
 
                 if deps_satisfied:
                     logger.info(
@@ -1584,8 +1662,18 @@ class TaskManager:
                                 exc_info=True,
                             )
                         # Update task status using repository
-                        await self.task_repository.update_task(
-                            task_id=task.id, status="failed", error=str(e)
+                        await self.task_repository.transition_task(
+                            task_id=task.id,
+                            expected_statuses=["pending", "in_progress"],
+                            expected_attempt_id=task.attempt_id,
+                            status="failed",
+                            error=str(e),
+                            error_info=execution_error_info(
+                                e,
+                                task_id=str(task.id),
+                                attempt_id=task.attempt_id,
+                                phase="dependency_trigger",
+                            ),
                         )
                 else:
                     logger.debug(
@@ -1628,7 +1716,7 @@ class TaskManager:
         schemas = task.schemas or {}
         return params.get("executor_id") or schemas.get("method")
 
-    def _load_executor(self, task: TaskModel) -> Extension:
+    def _load_executor(self, task: TaskModel, inputs: Optional[Dict[str, Any]] = None) -> Extension:
         """
         Load executor instance for the task and store in _executor_instances
 
@@ -1639,6 +1727,15 @@ class TaskManager:
         executor_id = self._get_executor_id(task)
         if not executor_id:
             raise ExecutorError(f"Executor ID not specified for task {task.id}")
+
+        from apflow.bridge.access import authorize_capability, execution_context
+
+        context = execution_context.get()
+        attributes = getattr(getattr(context, "identity", None), "attrs", {})
+        namespace = getattr(context, "data", {}).get(
+            "apflow_namespace", attributes.get("apflow_namespace", "apflow")
+        )
+        authorize_capability(f"{namespace}.{executor_id}", context, inputs=inputs)
 
         # Check permission BEFORE loading executor to avoid unnecessary work
         # and provide clearer error messages
@@ -1669,6 +1766,98 @@ class TaskManager:
 
         return extension
 
+    async def _watch_cancellation(
+        self, task_id: str, event: asyncio.Event, attempt_id: int
+    ) -> None:
+        """Observe persisted requests using an independent session on this database."""
+
+        async def inspect_request(session: Union[Session, AsyncSession]) -> None:
+            repository = TaskRepository(session)
+            task = await repository.get_task_by_id(task_id)
+            if task is None or task.attempt_id != attempt_id:
+                return
+            if task.cancel_requested_at is not None and not event.is_set():
+                manager = TaskManager(
+                    session,
+                    executor_instances=self._executor_instances,
+                    cancellation_events=self._cancellation_events,
+                )
+                await manager.cancel_task(task_id)
+
+        while not event.is_set():
+            await asyncio.sleep(0.1)
+            try:
+                if isinstance(self.db, AsyncSession):
+                    async with AsyncSession(bind=self.db.bind) as session:
+                        await inspect_request(session)
+                else:
+                    with Session(bind=self.db.get_bind()) as session:
+                        await inspect_request(session)
+            except Exception as exc:
+                logger.error("Cannot inspect cancellation for task %s: %s", task_id, exc)
+                return
+
+    async def _record_attempt_usage(
+        self, task_id: str, attempt_id: int, usage: Dict[str, int], baseline: Dict[str, int]
+    ) -> None:
+        """Reconcile a cancellation's partial report with this attempt's final report."""
+        current = await self.task_repository.get_task_by_id(task_id)
+        if current is None or current.attempt_id != attempt_id:
+            return
+        normalized = normalize_executor_result({"result": None, "token_usage": usage}, "envelope")
+        reported = normalized.get("token_usage") or {}
+        recorded = current.token_usage or {}
+        delta = {
+            key: max(0, value - max(0, recorded.get(key, 0) - baseline.get(key, 0)))
+            for key, value in reported.items()
+        }
+        if any(delta.values()):
+            await self._update_token_usage(task_id, delta)
+
+    async def _execute_attempt(self, task: TaskModel, inputs: Dict[str, Any]) -> ExecutorResult:
+        """Record and account every invocation, including failed and cancelled work."""
+        from apflow.durability.attempts import AttemptRecorder
+
+        expected = self._execution_attempt_ids.get(str(task.id), task.attempt_id)
+        current = await self._check_cancellation_and_refresh_task(str(task.id), "before attempt")
+        if current is None or current.attempt_id != expected:
+            return {"result": None}
+        task_id, attempt_id = str(task.id), task.attempt_id
+        baseline = dict(task.token_usage or {})
+        number = self._attempt_numbers.get(task_id, 0) + 1
+        self._attempt_numbers[task_id] = number
+        recorder = AttemptRecorder(self.db)
+        record_id = await recorder.start(task_id, attempt_id, number)
+        self._attempt_records[task_id] = record_id
+        try:
+            result = await self._execute_task_with_schemas(task, inputs)
+        except BaseException as exc:
+            usage = getattr(exc, "token_usage", None)
+            info = execution_error_info(exc, task_id=task_id, attempt_id=attempt_id)
+            status = "unknown" if info["delivery_state"] == "unknown" else "failed"
+            if isinstance(exc, asyncio.CancelledError):
+                status = "cancelled" if task.cancel_requested_at is not None else "unknown"
+            await recorder.finish(record_id, status, error_info=info, token_usage=usage)
+            if usage:
+                await self._record_attempt_usage(task_id, attempt_id, usage, baseline)
+            raise
+        usage = result.get("token_usage")
+        info = result.get("error_info")
+        if result.get("error") and info is None:
+            info = execution_error_info(
+                ExecutorError(str(result.get("error"))), task_id=task_id, attempt_id=attempt_id
+            )
+            result["error_info"] = info
+        latest = await self.task_repository.get_task_by_id(task_id)
+        cancelled = latest is not None and (
+            latest.status == "cancelled" or latest.cancel_requested_at is not None
+        )
+        status = "cancelled" if cancelled else "failed" if result.get("error") else "completed"
+        await recorder.finish(record_id, status, error_info=info, token_usage=usage)
+        if usage:
+            await self._record_attempt_usage(task_id, attempt_id, usage, baseline)
+        return result
+
     async def _execute_task_with_schemas(
         self, task: TaskModel, inputs: Dict[str, Any]
     ) -> ExecutorResult:
@@ -1696,7 +1885,7 @@ class TaskManager:
         # 1. load extension based on executor_id in params (highest priority)
         # ============================================================
         try:
-            extension = self._load_executor(task)
+            extension = self._load_executor(task, inputs)
             executor_id = extension.id
             # Log after we have executor_id info
             logger.info(
@@ -1723,7 +1912,13 @@ class TaskManager:
                 allowed = get_allowed_executor_ids()
                 if allowed is not None:
                     result["allowed_executors"] = list(allowed)
-            return {"result": result, "error": error_msg}
+            return {
+                "result": result,
+                "error": error_msg,
+                "error_info": _preflight_failure_info(
+                    task, "EXECUTOR_UNAVAILABLE", "configuration"
+                ),
+            }
 
         # ============================================================
         # 2. extract executor initialization parameters from params
@@ -1746,10 +1941,12 @@ class TaskManager:
         # 3. create executor instance
         # ============================================================
         # Create cancellation checker
-        cached_cancelled = task.status == "cancelled"
+        cancellation_event = self._cancellation_events.setdefault(str(task.id), asyncio.Event())
+        if task.status == "cancelled" or task.cancel_requested_at is not None:
+            cancellation_event.set()
 
         def cancellation_checker() -> bool:
-            return cached_cancelled
+            return cancellation_event.is_set()
 
         # Create executor: inputs as inputs parameter, other as **kwargs
         # Note: Input validation is now handled by executor itself (in BaseTask or executor.execute)
@@ -1776,7 +1973,13 @@ class TaskManager:
         if executor is None:
             error_msg = f"Failed to create executor instance '{executor_id}'"
             logger.error(error_msg)
-            return {"result": None, "error": error_msg}
+            return {
+                "result": None,
+                "error": error_msg,
+                "error_info": _preflight_failure_info(
+                    task, "EXECUTOR_INITIALIZATION_FAILED", "configuration"
+                ),
+            }
 
         # Store executor for cancellation support
         if hasattr(executor, "cancel"):
@@ -1891,7 +2094,34 @@ class TaskManager:
             return normalize_executor_result(hook_result, executor.result_format)
 
         try:
-            result = await executor.execute(inputs)
+            current = await self.task_repository.get_task_by_id(str(task.id))
+            if current is not None and current.cancel_requested_at is not None:
+                cancellation_event.set()
+            if cancellation_event.is_set():
+                return {"result": None}
+
+            async def invoke_executor() -> Any:
+                watcher = asyncio.create_task(
+                    self._watch_cancellation(str(task.id), cancellation_event, task.attempt_id)
+                )
+                try:
+                    return await executor.execute(inputs)
+                finally:
+                    watcher.cancel()
+                    await asyncio.gather(watcher, return_exceptions=True)
+
+            if task.budget_scope_id:
+                from apflow.governance.budget import BudgetManager
+
+                budget_manager = self._budget_manager or BudgetManager(self.task_repository)
+                bound_method = getattr(executor, "token_reservation_bound", None)
+                raw_bound = bound_method(inputs) if callable(bound_method) else None
+                bound = raw_bound if isinstance(raw_bound, int) else None
+                result = await budget_manager.execute_with_reservation(
+                    task, invoke_executor, token_bound=bound, result_format=executor.result_format
+                )
+            else:
+                result = await invoke_executor()
 
             # Call executor-specific post_hook if available
             if hasattr(executor_class, "_executor_hooks"):
@@ -1963,7 +2193,8 @@ class TaskManager:
                     )
                 inputs.pop(dep_id, None)
                 continue
-            inputs[dep_id] = deepcopy(source.result)
+            effective = await self.task_repository.resolve_effective_task(source)
+            inputs[dep_id] = deepcopy(effective.result)
         return inputs
 
 

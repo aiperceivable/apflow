@@ -23,6 +23,9 @@ import uuid
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
+from copy import deepcopy
+
+from apflow.core.storage.sqlalchemy.invariants import register_storage_invariants
 
 
 class Base(DeclarativeBase):
@@ -41,6 +44,80 @@ if not _re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", TASK_TABLE_NAME):
         f"Invalid APFLOW_TASK_TABLE_NAME: '{TASK_TABLE_NAME}'. "
         f"Must be a valid SQL identifier (letters, digits, underscores)."
     )
+
+
+class SubmissionReceipt(Base):
+    """Atomic, subject-scoped receipt for an idempotent task submission."""
+
+    __tablename__ = "apflow_submission_receipts"
+
+    scope: Mapped[str] = mapped_column(String(255), primary_key=True)
+    key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    receipt: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class TaskDispatch(Base):
+    """Persistent acceptance and lease state, separate from task definitions."""
+
+    __tablename__ = "apflow_task_dispatch"
+
+    task_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    state: Mapped[str] = mapped_column(String(50), default="accepted", nullable=False)
+    attempt_id: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    owner_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    identity: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class BudgetAccount(Base):
+    """Shared token balance; unknown liabilities remain held until reconciliation."""
+
+    __tablename__ = "apflow_budget_accounts"
+
+    scope_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    limit_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    spent_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reserved_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    unknown_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class BudgetReservation(Base):
+    """One invocation's reservation and idempotent settlement record."""
+
+    __tablename__ = "apflow_budget_reservations"
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    scope_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    task_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    state: Mapped[str] = mapped_column(String(20), default="reserved", nullable=False)
+    reserved_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    actual_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExecutionAttempt(Base):
+    """One engine invocation with bounded failure metadata and independently reported usage."""
+
+    __tablename__ = "apflow_execution_attempts"
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    attempt_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    error_info: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    token_usage: Mapped[dict[str, int] | None] = mapped_column(JSON, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class TaskOriginType(StrEnum):
@@ -120,6 +197,7 @@ class TaskModel(Base):
     user_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True, index=True
     )  # User ID (optional, for multi-user scenarios)
+    execution_identity: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     # === Task Basic Information ===
     name: Mapped[str] = mapped_column(
@@ -150,6 +228,7 @@ class TaskModel(Base):
     error: Mapped[str | None] = mapped_column(
         Text, nullable=True
     )  # Execution failure message, separate from business output
+    error_info: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     schemas: Mapped[Any] = mapped_column(
         JSON, nullable=True
     )  # Validation schemas (input_schema, output_schema)
@@ -171,6 +250,9 @@ class TaskModel(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # === Auxiliary Fields ===
     has_children: Mapped[bool] = mapped_column(
@@ -246,6 +328,7 @@ class TaskModel(Base):
     # === Cost Governance Fields (F-004) ===
     token_usage: Mapped[Any] = mapped_column(JSON, nullable=True)
     token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    budget_scope_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     estimated_cost_usd: Mapped[Decimal | float | None] = mapped_column(
         Numeric(12, 6), nullable=True
     )
@@ -273,6 +356,7 @@ class TaskModel(Base):
             "params": self.params,
             "result": self.result,  # Latest execution result
             "error": self.error,
+            "error_info": self.error_info,
             "schemas": self.schemas,
             # Task progress
             "progress": float(self.progress) if self.progress is not None else 0.0,
@@ -281,6 +365,7 @@ class TaskModel(Base):
             "started_at": self.started_at,
             "updated_at": self.updated_at,
             "completed_at": self.completed_at,
+            "cancel_requested_at": self.cancel_requested_at,
             # Auxiliary fields
             "has_children": self.has_children,
             # Task origin/reference fields
@@ -327,6 +412,7 @@ class TaskModel(Base):
             # Cost governance fields
             "token_usage": self.token_usage,
             "token_budget": self.token_budget,
+            "budget_scope_id": self.budget_scope_id,
             "estimated_cost_usd": (
                 float(self.estimated_cost_usd) if self.estimated_cost_usd is not None else None
             ),
@@ -343,6 +429,9 @@ class TaskModel(Base):
         data["started_at"] = self.started_at.isoformat() if self.started_at else None
         data["updated_at"] = self.updated_at.isoformat() if self.updated_at else None
         data["completed_at"] = self.completed_at.isoformat() if self.completed_at else None
+        data["cancel_requested_at"] = (
+            self.cancel_requested_at.isoformat() if self.cancel_requested_at else None
+        )
         # Schedule datetime fields
         data["schedule_start_at"] = (
             self.schedule_start_at.isoformat() if self.schedule_start_at else None
@@ -357,8 +446,11 @@ class TaskModel(Base):
         Return a new instance of this TaskModel (or subclass), optionally overriding fields.
         """
         data = self.to_dict()
+        data["execution_identity"] = deepcopy(self.execution_identity)
         if override:
             data.update(override)
+        if data.get("user_id") != self.user_id:
+            data["execution_identity"] = None
         return self.__class__(**data)
 
     def update_from_dict(self, data: Dict[str, Any]) -> Self:
@@ -383,6 +475,7 @@ class TaskModel(Base):
         """
         return {
             "user_id": None,
+            "execution_identity": None,
             "parent_id": None,
             "priority": 1,
             "dependencies": [],
@@ -392,6 +485,8 @@ class TaskModel(Base):
             "status": "pending",
             "progress": 0.0,
             "has_children": False,
+            "cancel_requested_at": None,
+            "error_info": None,
             "original_task_id": None,
             "origin_type": TaskOriginType.create,
             "task_tree_id": None,
@@ -423,6 +518,7 @@ class TaskModel(Base):
             # Cost governance defaults
             "token_usage": None,
             "token_budget": None,
+            "budget_scope_id": None,
             "estimated_cost_usd": None,
             "actual_cost_usd": None,
             "cost_policy": None,
@@ -675,3 +771,7 @@ class TaskCheckpointModel(Base):
 
     def __repr__(self) -> str:
         return f"<TaskCheckpoint(id='{self.id}', task_id='{self.task_id}')>"
+
+
+# All supported ORM writers share the archive invariant.
+register_storage_invariants(TaskModel, TaskOriginType.archive)

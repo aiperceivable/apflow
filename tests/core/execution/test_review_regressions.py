@@ -98,7 +98,21 @@ async def test_task_manager_retries_with_latest_checkpoint(
             observed.append(("execute", self.step))
             self.step += 1
             if (checkpointing and self.step == 1) or (not checkpointing and attempts == 1):
-                raise RuntimeError("Connection failed after the first step")
+                from apflow.core.execution.errors import NetworkError
+
+                raise NetworkError(
+                    "Connection failed after the first step",
+                    error_info={
+                        "version": 1,
+                        "code": "TRANSIENT_TEST_FAILURE",
+                        "category": "transient",
+                        "retryable": True,
+                        "delivery_state": "not_sent",
+                        "origin": "test",
+                        "phase": "execution",
+                        "observed_at": "2026-10-24T00:00:00+00:00",
+                    },
+                )
             return {"step": self.step}
 
     registry = get_registry()

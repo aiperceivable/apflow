@@ -88,8 +88,9 @@ def _create_adapter_from_metadata(
         logger.warning(f"Cannot import executor {executor_id} ({metadata.module_path}): {e}")
         return None
 
-    input_schema = _extract_schema(executor_class, "get_input_schema")
-    output_schema = _extract_schema(executor_class, "get_output_schema")
+    fallback_status: list[bool] = []
+    input_schema = _extract_schema(executor_class, "get_input_schema", fallback_status)
+    output_schema = _extract_schema(executor_class, "get_output_schema", fallback_status)
 
     return ExecutableTaskModuleAdapter(
         executor_class=executor_class,
@@ -103,10 +104,14 @@ def _create_adapter_from_metadata(
         always_available=(
             metadata.always_available if hasattr(metadata, "always_available") else True
         ),
+        schema_fallback=any(fallback_status),
+        schema_version=getattr(executor_class, "schema_version", None),
     )
 
 
-def _extract_schema(executor_class: type, method_name: str) -> Dict[str, Any]:
+def _extract_schema(
+    executor_class: type, method_name: str, fallback_status: list[bool] | None = None
+) -> Dict[str, Any]:
     """Try to extract JSON schema from an executor class.
 
     Attempts to instantiate the class to call the schema method.
@@ -137,6 +142,8 @@ def _extract_schema(executor_class: type, method_name: str) -> Dict[str, Any]:
 
     import copy
 
+    if fallback_status is not None:
+        fallback_status.append(True)
     return copy.deepcopy(_FALLBACK_SCHEMA)
 
 
@@ -148,8 +155,9 @@ def _create_adapter_from_class(
     Used for runtime-registered function executors.
     """
     try:
-        input_schema = _extract_schema(executor_class, "get_input_schema")
-        output_schema = _extract_schema(executor_class, "get_output_schema")
+        fallback_status: list[bool] = []
+        input_schema = _extract_schema(executor_class, "get_input_schema", fallback_status)
+        output_schema = _extract_schema(executor_class, "get_output_schema", fallback_status)
 
         return ExecutableTaskModuleAdapter(
             executor_class=executor_class,
@@ -159,6 +167,8 @@ def _create_adapter_from_class(
             input_schema=input_schema,
             output_schema=output_schema,
             tags=getattr(executor_class, "tags", []),
+            schema_fallback=any(fallback_status),
+            schema_version=getattr(executor_class, "schema_version", None),
         )
     except Exception as e:
         logger.warning(f"Cannot create adapter for function executor {executor_id}: {e}")

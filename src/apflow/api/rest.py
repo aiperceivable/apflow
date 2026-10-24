@@ -25,6 +25,8 @@ registry-driven REST face over the v2 apcore Registry.
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
+from apcore import Context
 from collections.abc import AsyncIterator
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
@@ -58,6 +60,10 @@ _HTTP_STATUS_BY_CODE: dict[str, int] = {
     "SCHEMA_VALIDATION_ERROR": 422,
     "SCHEMA_VALIDATION_FAILED": 422,
     "INVALID_INPUT": 422,
+    "IDEMPOTENCY_CONFLICT": 409,
+    "TASK_IMMUTABLE": 409,
+    "TASK_DEFINITION_LOCKED": 409,
+    "SERVICE_UNAVAILABLE": 503,
 }
 
 
@@ -202,19 +208,36 @@ def _read_inputs(raw_body: bytes) -> tuple[Optional[dict[str, Any]], Optional[di
     return data, None
 
 
+def _request_context(request: Request) -> Context[Any]:
+    """Preserve verified identity and the inbound W3C trace across REST calls."""
+    from apcore import TraceContext
+    from apcore_mcp.auth.middleware import auth_identity_var
+
+    return Context.create(
+        identity=auth_identity_var.get(), trace_parent=TraceContext.extract(request.headers)
+    )
+
+
 async def _execute(
-    executor: Executor, module_id: str, inputs: dict[str, Any]
+    executor: Executor, module_id: str, inputs: dict[str, Any], context: Any = None
 ) -> tuple[int, dict[str, Any]]:
     """Run the module and map the result/error to an HTTP status + JSON payload."""
+    from apflow.core.utils.credentials import redact_public_data
+
     try:
-        output = await executor.call_async(module_id, inputs)
+        from apcore_mcp.auth.middleware import auth_identity_var
+
+        context = context or Context.create(identity=auth_identity_var.get())
+        output = await executor.call_async(module_id, inputs, context=context)
     except ModuleError as exc:
-        logger.info("REST execute %s failed [%s]: %s", module_id, exc.code, exc.message)
-        return _status_for_error(exc), {"error": exc.to_dict()}
+        logger.info(
+            "REST execute %s failed [%s]: %s", module_id, exc.code, redact_public_data(exc.message)
+        )
+        return _status_for_error(exc), {"error": redact_public_data(exc.to_dict())}
     except Exception as exc:  # noqa: BLE001 — surface unexpected errors as 500
-        logger.error("REST execute %s crashed: %s", module_id, exc, exc_info=True)
+        logger.error("REST execute %s crashed: %s", module_id, type(exc).__name__)
         return 500, {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}}
-    return 200, output
+    return 200, redact_public_data(output)
 
 
 def _sse_event(data: dict[str, Any], *, event: Optional[str] = None) -> str:
@@ -224,7 +247,7 @@ def _sse_event(data: dict[str, Any], *, event: Optional[str] = None) -> str:
 
 
 async def _stream_events(
-    executor: Executor, module_id: str, inputs: dict[str, Any]
+    executor: Executor, module_id: str, inputs: dict[str, Any], context: Any = None
 ) -> AsyncIterator[str]:
     """Stream a module's output as SSE frames.
 
@@ -233,14 +256,21 @@ async def _stream_events(
     A terminal ``done`` event always closes the stream; errors arrive as an
     ``error`` event rather than corrupting the SSE framing.
     """
+    from apflow.core.utils.credentials import redact_public_data
+
     try:
-        async for chunk in executor.stream(module_id, inputs):
-            yield _sse_event(chunk)
+        from apcore_mcp.auth.middleware import auth_identity_var
+
+        context = context or Context.create(identity=auth_identity_var.get())
+        async for chunk in executor.stream(module_id, inputs, context=context):
+            yield _sse_event(redact_public_data(chunk))
     except ModuleError as exc:
-        logger.info("REST stream %s failed [%s]: %s", module_id, exc.code, exc.message)
-        yield _sse_event({"error": exc.to_dict()}, event="error")
+        logger.info(
+            "REST stream %s failed [%s]: %s", module_id, exc.code, redact_public_data(exc.message)
+        )
+        yield _sse_event({"error": redact_public_data(exc.to_dict())}, event="error")
     except Exception as exc:  # noqa: BLE001 — surface as an SSE error event
-        logger.error("REST stream %s crashed: %s", module_id, exc, exc_info=True)
+        logger.error("REST stream %s crashed: %s", module_id, type(exc).__name__)
         yield _sse_event(
             {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}}, event="error"
         )
@@ -295,6 +325,23 @@ def build_rest_app(
     """
     executor = Executor.from_registry(registry)
     openapi_spec = build_openapi(registry, title=title, version=version, description=description)
+    factory = getattr(registry, "apflow_session_factory", None)
+
+    @asynccontextmanager
+    async def service_lifespan(application: Starlette) -> AsyncIterator[None]:
+        from contextlib import AsyncExitStack
+
+        async with AsyncExitStack() as stack:
+            if lifespan is not None:
+                await stack.enter_async_context(lifespan(application))
+            if factory is not None:
+                from apflow.core.execution.dispatch import TaskDispatcher
+
+                dispatcher = TaskDispatcher(factory)
+                application.state.dispatcher = dispatcher
+                await dispatcher.start()
+                stack.push_async_callback(dispatcher.stop)
+            yield
 
     async def root(_request: Request) -> Response:
         return JSONResponse(
@@ -309,6 +356,29 @@ def build_rest_app(
 
     async def healthz(_request: Request) -> Response:
         return JSONResponse({"status": "ok"})
+
+    async def readyz(_request: Request) -> Response:
+        from apflow.bridge.registry_setup import validate_required_modules
+        from apflow.core.storage.session import session_scope
+        from sqlalchemy import text
+        from sqlalchemy_session_proxy import SqlalchemySessionProxy
+
+        try:
+            from apflow.core.config_manager import get_config_manager
+
+            configuration = get_config_manager()
+            validate_required_modules(
+                registry,
+                configuration.get("service.required_modules", []),
+                configuration.get("service.required_schema_versions", {}),
+            )
+            if factory is not None:
+                async with session_scope(factory) as session:
+                    await SqlalchemySessionProxy(session).execute(text("SELECT 1"))
+        except Exception:
+            logger.warning("Service readiness check failed")
+            return JSONResponse({"status": "not_ready"}, status_code=503)
+        return JSONResponse({"status": "ready"})
 
     async def openapi_json(_request: Request) -> Response:
         return JSONResponse(openapi_spec)
@@ -334,21 +404,29 @@ def build_rest_app(
         if error is not None:
             return JSONResponse(error, status_code=400)
         assert inputs is not None  # _read_inputs returns one of (inputs, error)
+        context = _request_context(request)
 
         # Content negotiation: stream execution as SSE when the client asks for it.
         if "text/event-stream" in request.headers.get("accept", ""):
             return StreamingResponse(
-                _stream_events(executor, module_id, inputs),
+                _stream_events(executor, module_id, inputs, context),
                 media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "X-Request-ID": context.trace_id,
+                },
             )
 
-        status, payload = await _execute(executor, module_id, inputs)
-        return JSONResponse(_json_safe(payload), status_code=status)
+        status, payload = await _execute(executor, module_id, inputs, context)
+        return JSONResponse(
+            _json_safe(payload), status_code=status, headers={"X-Request-ID": context.trace_id}
+        )
 
     routes = [
         Route("/", root, methods=["GET"]),
         Route("/healthz", healthz, methods=["GET"]),
+        Route("/readyz", readyz, methods=["GET"]),
         Route("/openapi.json", openapi_json, methods=["GET"]),
         Route("/docs", docs, methods=["GET"]),
         Route("/modules", list_modules, methods=["GET"]),
@@ -370,7 +448,7 @@ def build_rest_app(
             )
         )
 
-    return Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
+    return Starlette(routes=routes, middleware=middleware, lifespan=service_lifespan)
 
 
 def serve_rest(
@@ -406,13 +484,23 @@ def serve_rest(
     if webhook:
         from apflow.api.webhook import build_webhook_routes
 
-        extra_routes = build_webhook_routes(secret_key=webhook_secret)
+        factory = getattr(registry, "apflow_session_factory", None)
+        extra_routes = (
+            build_webhook_routes(secret_key=webhook_secret, session_factory=factory)
+            if factory
+            else build_webhook_routes(secret_key=webhook_secret)
+        )
 
     lifespan = None
     if scheduler:
         from apflow.scheduler.internal import make_scheduler_lifespan
 
-        lifespan = make_scheduler_lifespan()
+        factory = getattr(registry, "apflow_session_factory", None)
+        lifespan = (
+            make_scheduler_lifespan(session_factory=factory)
+            if factory
+            else make_scheduler_lifespan()
+        )
 
     app: Any = build_rest_app(
         registry,

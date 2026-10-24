@@ -215,7 +215,9 @@ class TaskCreator:
             tasks_models.append(task)
         return tasks_models
 
-    async def create_task_tree_from_array(self, tasks: List[Dict[str, Any]]) -> TaskTreeNode:
+    async def create_task_tree_from_array(
+        self, tasks: List[Dict[str, Any]], *, commit: bool = True
+    ) -> TaskTreeNode:
         """
         Create task tree(s) from a flat array of task dictionaries.
 
@@ -252,7 +254,10 @@ class TaskCreator:
 
         # Step 4: Create all tasks (parent_id and dependencies will be set after creation)
         self.task_repository.add_tasks_in_db(task_models)
-        await self.db.commit()
+        if commit:
+            await self.db.commit()
+        else:
+            await self.db.flush()
 
         # Step 5: Build task tree structure
         root_models: List[TaskModel] = [task for task in task_models if task.parent_id is None]
@@ -268,7 +273,9 @@ class TaskCreator:
             )
             return task_trees[0]  # Backward compatible: return first tree
 
-    async def create_task_trees_from_array(self, tasks: List[Dict[str, Any]]) -> List[TaskTreeNode]:
+    async def create_task_trees_from_array(
+        self, tasks: List[Dict[str, Any]], *, commit: bool = True
+    ) -> List[TaskTreeNode]:
         """
         Create task trees from a list of task dicts.
         Supports both id and name as input, but always generates a unique UUID id for each task internally.
@@ -295,7 +302,10 @@ class TaskCreator:
 
         # Step 3: Create all tasks (parent_id and dependencies will be set after creation)
         self.task_repository.add_tasks_in_db(task_models)
-        await self.db.commit()
+        if commit:
+            await self.db.commit()
+        else:
+            await self.db.flush()
 
         # Step 4: Build task trees structure
 
@@ -610,6 +620,8 @@ class TaskCreator:
             current, "original_task_id", None
         ):
             orig_id = current.original_task_id
+            if orig_id is None:
+                break
             # get original task object (sync or async)
             original = await self.task_repository.get_task_by_id(orig_id)
             if original is None:
@@ -840,6 +852,7 @@ class TaskCreator:
         Returns:
             TaskTreeNode rooted at the fresh pending run instance.
         """
+        await self._check_scheduled_definition_available(_definition_task)
         reset_kwargs: Dict[str, Any] = {
             "origin_type": TaskOriginType.scheduled_run,
             # Fresh execution state — this instance is about to run.
@@ -897,6 +910,29 @@ class TaskCreator:
         )
         return task_tree
 
+    async def _check_scheduled_definition_available(self, definition: TaskModel) -> None:
+        """Serialize scheduled cloning with durable root acceptance."""
+        from sqlalchemy import select, update
+        from apflow.core.storage.sqlalchemy.models import TaskDispatch
+
+        root = await self.task_repository.get_root_task(definition)
+        model = self.task_repository.task_model_class
+        await self.db.execute(
+            update(model)
+            .where(model.id == root.id)
+            .values(id=model.id, updated_at=model.updated_at)
+        )
+        dispatch = await self.db.execute(
+            select(TaskDispatch.task_id).where(
+                TaskDispatch.task_id == root.id,
+                TaskDispatch.state.in_(
+                    ["accepted", "running", "cancel_requested", "reconciliation_required"]
+                ),
+            )
+        )
+        if dispatch.scalar_one_or_none() is not None:
+            raise ValueError("A submitted execution cannot also be fired as a schedule")
+
     async def from_archive(
         self,
         _original_task: TaskModel,
@@ -905,65 +941,87 @@ class TaskCreator:
         _auto_include_deps: bool = True,
         _include_dependents: bool = False,
     ) -> TaskTreeNode:
-        """
-        Create frozen archive(s) from existing task(s) (read-only, immutable)
-
-        Freezes the original task (and, when _recursive=True, its subtree) in place
-        by stamping origin_type=archive on the existing rows — the archived tasks
-        keep their original ids rather than becoming a new independent tree. This is
-        the intended snapshot contract (see test_from_archive_recursive_tree, which
-        asserts the archive retains the source id); archiving therefore mutates the
-        source tasks' origin_type rather than cloning them.
-
-        Args:
-            _original_task: Original task to archive
-
-        Returns:
-            TaskTreeNode
-        """
-
-        # check entire task tree is completed
-        task_tree = await self.task_repository.build_task_tree(_original_task)
-        if task_tree.calculate_status() != TaskStatus.COMPLETED:
-            raise ValueError(
-                "Only a fully completed task tree can be linked. There are unfinished tasks in the tree."
+        """Freeze existing IDs in place, materializing completed Link business data."""
+        try:
+            tree = await self._prepare_archive_tree(
+                _original_task, _recursive, _auto_include_deps, _include_dependents, _save
             )
-
-        reset_kwargs = {
-            "origin_type": TaskOriginType.archive,
-        }
-
-        if not _recursive:
-            _original_task.update_from_dict(reset_kwargs)
-            logger.info(f"Archive task '{_original_task.id}'")
-            task_tree = TaskTreeNode(task=_original_task)
+            tasks = tree.to_list()
+            await self._materialize_archive_links(tasks)
             if _save:
-                self.db.add(_original_task)
-                await self.db.commit()
-                await self.db.refresh(_original_task)
-            return task_tree
+                await self.task_repository.archive_tasks([str(task.id) for task in tasks])
+                await self.task_repository.refresh_tasks_in_db(tasks)
+            else:
+                tree.update({"origin_type": TaskOriginType.archive})
+            return tree
+        except BaseException:
+            if _save:
+                await self.db.rollback()
+            raise
 
-        # Build original subtree and augment with dependencies as needed
-        original_tree = await self.task_repository.build_task_tree(_original_task)
-        if _original_task.parent_id is not None:
-            if not _auto_include_deps:
-                # Validate no external dependencies if not root and not auto-including
-                await self._validate_no_external_dependencies(_original_task)
-            original_tree = await self._augment_subtree_with_dependencies(
-                original_tree,
-                _auto_include_deps,
-                _include_dependents,
-                None,
+    async def _prepare_archive_tree(
+        self,
+        original: TaskModel,
+        recursive: bool,
+        auto_include_deps: bool,
+        include_dependents: bool,
+        save: bool,
+    ) -> TaskTreeNode:
+        """Lock selected nodes and reject concurrent topology or completion changes."""
+        source_tree = await self.task_repository.build_task_tree(original)
+        source_ids = {str(task.id) for task in source_tree.to_list()}
+        if source_tree.calculate_status() != TaskStatus.COMPLETED:
+            raise ValueError("Only a fully completed task tree can be archived")
+        tree = source_tree if recursive else TaskTreeNode(task=original)
+        if recursive and original.parent_id is not None:
+            if not auto_include_deps:
+                await self._validate_no_external_dependencies(original)
+            tree = await self._augment_subtree_with_dependencies(
+                tree, auto_include_deps, include_dependents, None
             )
+        if save:
+            await self.task_repository.lock_tasks([str(task.id) for task in tree.to_list()])
+            refreshed_tree = await self.task_repository.build_task_tree(original)
+            if {str(task.id) for task in refreshed_tree.to_list()} != source_ids:
+                raise ValueError("Archive source tree changed; retry the operation")
+            await self.task_repository.refresh_tasks_in_db(tree.to_list())
+            if any(task.status != "completed" for task in tree.to_list()):
+                raise ValueError("Only fully completed tasks can be archived")
+        return tree
 
-        task_tree = original_tree.update(reset_kwargs)
-        if _save:
-            task_list = task_tree.to_list()
-            self.task_repository.add_tasks_in_db(task_list)
-            await self.db.commit()
-            await self.task_repository.refresh_tasks_in_db(task_list)
-
-        return task_tree
+    async def _materialize_archive_links(self, tasks: List[TaskModel]) -> None:
+        """Resolve every reference before mutating any row in the frozen set."""
+        preserved = {
+            "id",
+            "parent_id",
+            "user_id",
+            "task_tree_id",
+            "original_task_id",
+            "origin_type",
+            "created_at",
+            "updated_at",
+            "has_children",
+            "has_references",
+            "dependencies",
+            "execution_identity",
+        }
+        snapshots: List[tuple[TaskModel, Dict[str, Any]]] = []
+        source_values: Dict[str, Dict[str, Any]] = {}
+        for task in tasks:
+            if task.origin_type != TaskOriginType.link:
+                continue
+            effective = await self.task_repository.resolve_effective_task(task)
+            source_id = str(effective.id)
+            if source_id not in source_values:
+                source_values[source_id] = {
+                    column.key: copy.deepcopy(getattr(effective, column.key))
+                    for column in effective.__table__.columns
+                    if column.key not in preserved
+                }
+            snapshots.append((task, copy.deepcopy(source_values[source_id])))
+        for task, fields in snapshots:
+            for field, value in fields.items():
+                setattr(task, field, value)
 
     async def from_mixed(
         self,
@@ -1307,6 +1365,16 @@ class TaskCreator:
         fields["original_task_id"] = most_original_task.id
 
         if is_copy:
+            if (
+                original_task.origin_type == TaskOriginType.link
+                and fields.get("origin_type") == TaskOriginType.copy
+            ):
+                effective = await self.task_repository.resolve_effective_task(original_task)
+                content = {
+                    field: copy.deepcopy(getattr(effective, field))
+                    for field in ("inputs", "params", "schemas", "result")
+                }
+                fields = {**content, **fields}
             fields.update(
                 parent_id=None, dependencies=None, task_tree_id=fields["id"], has_children=False
             )

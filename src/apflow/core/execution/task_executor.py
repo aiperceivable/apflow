@@ -3,6 +3,7 @@ Task executor for AIPartnerUpFlow that manages task tree execution
 """
 
 import uuid
+import asyncio
 import copy
 import threading
 from typing import Dict, Any, List, Optional, Union, Sequence
@@ -68,6 +69,7 @@ class TaskExecutor:
                 # Store executor instances for cancellation (task_id -> executor)
                 # This allows cancel_task() to access executors created during execution
                 self._executor_instances: Dict[str, Any] = {}
+                self._cancellation_events: Dict[str, asyncio.Event] = {}
 
                 # Distributed cluster support
                 from apflow.core.distributed.config import DistributedConfig
@@ -182,6 +184,10 @@ class TaskExecutor:
             task_id = str(node.task.id)
             task_name = getattr(node.task, "name", "unknown")
 
+            if node.task.origin_type in {"archive", "link"}:
+                for child in node.children:
+                    collect_task_ids(child)
+                return
             # Only mark failed or completed tasks for re-execution
             # Pending tasks should execute normally without re-execution marker
             if task_status == "failed":
@@ -225,6 +231,7 @@ class TaskExecutor:
         db_session: Optional[Union[Session, AsyncSession]] = None,
         executable_task_ids: Optional[set[str]] = None,
         execution_task_id: Optional[str] = None,
+        resume: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute a task tree
@@ -253,7 +260,30 @@ class TaskExecutor:
                     db_session=session,
                     executable_task_ids=executable_task_ids,
                     execution_task_id=execution_task_id,
+                    resume=resume,
                 )
+
+        from apflow.core.execution.context import execution_context
+
+        principal = getattr(task_tree.task, "execution_identity", None)
+        if execution_context.get() is None and isinstance(principal, dict):
+            from apcore import Context, Identity
+
+            token = execution_context.set(Context.create(identity=Identity(**principal)))
+            try:
+                return await self.execute_task_tree(
+                    task_tree,
+                    root_task_id,
+                    use_streaming=use_streaming,
+                    streaming_callbacks_context=streaming_callbacks_context,
+                    use_demo=use_demo,
+                    db_session=db_session,
+                    executable_task_ids=executable_task_ids,
+                    execution_task_id=execution_task_id,
+                    resume=resume,
+                )
+            finally:
+                execution_context.reset(token)
 
         # In distributed mode, only the leader node may execute tasks
         if not self._is_leader_or_single_node():
@@ -292,7 +322,7 @@ class TaskExecutor:
         try:
             # Mark all tasks in the tree for re-execution
             # This ensures failed tasks and their dependencies are re-executed
-            tasks_to_reexecute = self._mark_tasks_for_reexecution(task_tree)
+            tasks_to_reexecute = set() if resume else self._mark_tasks_for_reexecution(task_tree)
 
             # Create TaskManager with hooks (cached at initialization)
             # In production, hooks are registered at application startup before TaskExecutor creation
@@ -303,6 +333,7 @@ class TaskExecutor:
                 pre_hooks=self.pre_hooks,
                 post_hooks=self.post_hooks,
                 executor_instances=self._executor_instances,  # Pass shared executor instances
+                cancellation_events=self._cancellation_events,
                 use_demo=use_demo,  # Pass use_demo flag
                 # Durability (F-003) + governance (F-004): wired once here so every
                 # execution path (module/REST/MCP/A2A/scheduler) is consistently governed.
@@ -419,16 +450,45 @@ class TaskExecutor:
             pre_hooks=self.pre_hooks,
             post_hooks=self.post_hooks,
             executor_instances=self._executor_instances,  # Pass shared executor instances
+            cancellation_events=self._cancellation_events,
         )
 
         # Call TaskManager.cancel_task()
         result = await task_manager.cancel_task(task_id, error_message)
 
-        # Stop task tracking if task was running
-        if self.is_task_running(task_id):
-            await self.stop_task_tracking(task_id)
-
         return result
+
+    async def cancel_task_tree(
+        self,
+        root_task_id: str,
+        error_message: Optional[str] = None,
+        db_session: Optional[Union[Session, AsyncSession]] = None,
+    ) -> Dict[str, Any]:
+        """Request cancellation for each unfinished task, including queued descendants."""
+        if db_session is None:
+            async with create_pooled_session() as session:
+                return await self.cancel_task_tree(root_task_id, error_message, session)
+        from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
+
+        repository = TaskRepository(db_session, task_model_class=self.task_model_class)
+        root = await repository.get_task_by_id(root_task_id)
+        if root is None:
+            return {"status": "failed", "message": f"Task {root_task_id} not found"}
+        tasks = await repository.get_all_tasks_in_tree(root)
+        results = []
+        for task in tasks:
+            if task.status in {"pending", "in_progress"}:
+                result = await self.cancel_task(str(task.id), error_message, db_session)
+                results.append({"task_id": str(task.id), **result})
+        if not results:
+            return await self.cancel_task(root_task_id, error_message, db_session)
+        confirmed = all(result.get("stop_confirmed", False) for result in results)
+        return {
+            "status": "cancelled" if confirmed else "cancelling",
+            "results": results,
+            "cancel_requested": True,
+            "stop_confirmed": confirmed,
+        }
 
     def _build_task_tree_from_tasks(self, tasks: List[Dict[str, Any]]) -> TaskTreeNode:
         """
@@ -645,6 +705,8 @@ class TaskExecutor:
             if not existing:
                 # New task: add directly
                 session.add(node.task)
+            elif existing.origin_type in {"archive", "link"}:
+                node.task = existing
             else:
                 # Existing task: update fields intelligently
                 for key, value in node.task.__dict__.items():
@@ -680,6 +742,8 @@ class TaskExecutor:
             if not existing:
                 # New task: add directly
                 session.add(node.task)
+            elif existing.origin_type in {"archive", "link"}:
+                node.task = existing
             else:
                 # Existing task: update fields intelligently
                 for key, value in node.task.__dict__.items():
@@ -1039,6 +1103,7 @@ class TaskExecutor:
         streaming_callbacks_context: Optional[Any] = None,
         use_demo: bool = False,
         db_session: Optional[Union[Session, AsyncSession]] = None,
+        resume: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute a task by ID with automatic dependency handling
@@ -1070,6 +1135,7 @@ class TaskExecutor:
                     streaming_callbacks_context=streaming_callbacks_context,
                     use_demo=use_demo,
                     db_session=session,
+                    resume=resume,
                 )
 
         # Create repository
@@ -1079,6 +1145,26 @@ class TaskExecutor:
         task = await task_repository.get_task_by_id(task_id)
         if not task:
             raise ValueError(f"Task {task_id} not found")
+
+        from apflow.core.execution.context import execution_context
+
+        if execution_context.get() is None and isinstance(task.execution_identity, dict):
+            from apcore import Context, Identity
+
+            token = execution_context.set(
+                Context.create(identity=Identity(**task.execution_identity))
+            )
+            try:
+                return await self.execute_task_by_id(
+                    task_id,
+                    use_streaming=use_streaming,
+                    streaming_callbacks_context=streaming_callbacks_context,
+                    use_demo=use_demo,
+                    db_session=db_session,
+                    resume=resume,
+                )
+            finally:
+                execution_context.reset(token)
 
         # Get root task ID (traverse up to find root)
         root_task = await task_repository.get_root_task(task)
@@ -1131,6 +1217,7 @@ class TaskExecutor:
             db_session=db_session,
             executable_task_ids=required_task_ids,
             execution_task_id=task_id,
+            resume=resume,
         )
 
         return execution_result

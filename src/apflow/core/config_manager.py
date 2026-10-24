@@ -17,6 +17,7 @@ Environment variable override:
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Union
@@ -46,6 +47,16 @@ _DEFAULTS: Dict[str, Any] = {
     "api.jwt_public_key_path": None,
     "storage.dialect": "sqlite",
     "storage.path": None,
+    "storage.connection_string": None,
+    "security.require_identity": False,
+    "security.admin_roles": ["apflow.admin"],
+    "security.allowed_modules": [],
+    "security.module_roles": {},
+    "security.acl_path": None,
+    "security.credentials": [],
+    "network.profiles": [],
+    "service.required_modules": [],
+    "service.required_schema_versions": {},
     "governance.default_policy": None,
     "governance.downgrade_chain": [],
     "durability.max_attempts": 3,
@@ -59,7 +70,7 @@ def _flatten_dict(data: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
     result: Dict[str, Any] = {}
     for key, value in data.items():
         full_key = f"{prefix}{key}" if prefix else key
-        if isinstance(value, dict):
+        if isinstance(value, dict) and not isinstance(_DEFAULTS.get(full_key), dict):
             result.update(_flatten_dict(value, f"{full_key}."))
         else:
             result[full_key] = value
@@ -154,6 +165,11 @@ class ConfigManager:
                 return current_value
         if isinstance(current_value, list):
             return [s.strip() for s in env_value.split(",") if s.strip()]
+        if isinstance(current_value, dict):
+            parsed = json.loads(env_value)
+            if not isinstance(parsed, dict):
+                raise ValueError(f"{key} must be a JSON object")
+            return parsed
         return env_value
 
     # --- Core get/set interface (future apcore Config compatible) ---

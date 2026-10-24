@@ -4,11 +4,18 @@ Token budget management for AI agent tasks.
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional, TypeVar
+from uuid import uuid4
+
+from apflow.core.execution.errors import ConfigurationError
+from apflow.core.execution.result_protocol import ResultFormat, normalize_executor_result
+from apflow.core.storage.sqlalchemy.models import TaskModel
+from apflow.governance.ledger import BudgetLedger
 
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
+ResultT = TypeVar("ResultT")
 
 
 class BudgetScope(Enum):
@@ -77,6 +84,43 @@ class BudgetManager:
 
     def __init__(self, task_repository: Any) -> None:
         self._repo = task_repository
+
+    async def execute_with_reservation(
+        self,
+        task: TaskModel,
+        execute_fn: Callable[[], Awaitable[ResultT]],
+        token_bound: int | None = None,
+        *,
+        result_format: ResultFormat = "envelope",
+    ) -> ResultT:
+        """Reserve before an opted-in executor invocation, including every retry.
+
+        The registered executor must enforce its declared aggregate token bound.
+        A caller-provided estimate alone cannot establish this contract. Exceptions
+        or missing usage retain a liability until an authorized reconciliation.
+        """
+        scope_id = task.budget_scope_id
+        if scope_id is None:
+            return await execute_fn()
+        if isinstance(token_bound, bool) or not isinstance(token_bound, int) or token_bound < 0:
+            raise ConfigurationError("Shared budgets require an executor-enforced token bound")
+        ledger = BudgetLedger(self._repo.db.session)
+        reservation_id = await ledger.reserve(scope_id, str(task.id), uuid4().hex, token_bound)
+        try:
+            result = await execute_fn()
+            usage = normalize_executor_result(result, result_format).get("token_usage")
+            if isinstance(result, dict) and result.get("token_usage") == {}:
+                usage = None
+            actual_tokens = _reported_total(usage)
+            await ledger.settle(reservation_id, actual_tokens)
+            if actual_tokens is not None and actual_tokens > token_bound:
+                raise ConfigurationError(
+                    "Executor exceeded its declared token reservation bound", token_usage=usage
+                )
+            return result
+        except BaseException as exc:
+            await ledger.settle(reservation_id, _reported_total(getattr(exc, "token_usage", None)))
+            raise
 
     async def check_budget(self, task_id: str) -> BudgetCheckResult:
         """Check if a task has remaining budget.
@@ -155,3 +199,11 @@ class BudgetManager:
             limit=task.token_budget,
             used=accumulated_total,
         )
+
+
+def _reported_total(usage: Any) -> int | None:
+    """Missing counters mean unknown; an explicit zero is an accounted result."""
+    if usage is None or usage == {}:
+        return None
+    result = normalize_executor_result({"result": None, "token_usage": usage}, "envelope")
+    return result.get("token_usage", {})["total"]

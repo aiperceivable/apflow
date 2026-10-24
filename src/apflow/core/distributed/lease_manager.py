@@ -7,7 +7,7 @@ to ensure exactly-once execution semantics across worker nodes.
 import uuid
 from datetime import timedelta
 
-from sqlalchemy import text
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -18,7 +18,7 @@ from apflow.core.distributed.config import (
     utcnow as _utcnow,
 )
 from apflow.core.distributed.events import emit_task_event
-from apflow.core.storage.sqlalchemy.models import TaskLease, TaskModel
+from apflow.core.storage.sqlalchemy.models import TaskDispatch, TaskLease, TaskModel
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
@@ -41,6 +41,18 @@ class LeaseManager:
             raise ValueError("task_id and node_id must not be empty")
 
         with self._session_factory() as session:
+            # Share the admission lock with durable submission before either owner is recorded.
+            locked = session.execute(
+                update(TaskModel)
+                .where(TaskModel.id == task_id)
+                .values(id=TaskModel.id, updated_at=TaskModel.updated_at)
+            )
+            if not locked.rowcount:
+                session.rollback()
+                return None
+            if session.scalar(select(TaskDispatch.task_id).where(TaskDispatch.task_id == task_id)):
+                session.rollback()
+                return None
             if is_postgresql(session):
                 return self._acquire_lease_postgresql(session, task_id, node_id)
             return self._acquire_lease_default(session, task_id, node_id)

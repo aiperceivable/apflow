@@ -85,8 +85,10 @@ class InternalScheduler(BaseScheduler):
         config: Optional[SchedulerConfig] = None,
         verbose: bool = False,
         dispatch_only: bool = False,
+        session_factory: Any = None,
     ):
         super().__init__(config)
+        self._session_factory = session_factory
         # Dispatch-only (distributed) mode: each fire instantiates a pending run
         # instance and advances the definition's schedule, but does NOT execute
         # the run in-process — distributed workers lease and execute it. Used by
@@ -108,6 +110,14 @@ class InternalScheduler(BaseScheduler):
             from rich.console import Console
 
             self._console = Console()
+
+    def _session_context(self) -> Any:
+        from apflow.core.storage.session import session_scope
+        from apflow.core.storage import create_pooled_session
+
+        if self._session_factory is not None:
+            return session_scope(self._session_factory)
+        return create_pooled_session()
 
     async def start(self) -> None:
         """
@@ -357,10 +367,9 @@ class InternalScheduler(BaseScheduler):
             List of task dictionaries that are due
         """
         try:
-            from apflow.core.storage import create_pooled_session
             from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
 
-            async with create_pooled_session() as db_session:
+            async with self._session_context() as db_session:
                 task_repository = TaskRepository(db_session)
 
                 tasks = await task_repository.get_due_scheduled_tasks(
@@ -423,7 +432,6 @@ class InternalScheduler(BaseScheduler):
         try:
             logger.debug(f"Firing scheduled task via DB: {task_id}")
 
-            from apflow.core.storage import create_pooled_session
             from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
             from apflow.core.execution.task_creator import TaskCreator
             from apflow.core.execution.task_executor import TaskExecutor
@@ -432,7 +440,7 @@ class InternalScheduler(BaseScheduler):
             # never executed in place — the clone is what runs, giving isolated
             # per-fire history and matching the distributed one-task-id-per-run
             # model.
-            async with create_pooled_session() as db_session:
+            async with self._session_context() as db_session:
                 task_repository = TaskRepository(db_session)
                 definition = await task_repository.get_task_by_id(task_id)
                 if not definition:
@@ -475,7 +483,7 @@ class InternalScheduler(BaseScheduler):
             # Execute the run instance in-process (single-node mode).
             task_executor = TaskExecutor()
 
-            async with create_pooled_session() as db_session:
+            async with self._session_context() as db_session:
                 task_repository = TaskRepository(db_session)
 
                 run = await task_repository.get_task_by_id(run_id)
@@ -542,10 +550,9 @@ class InternalScheduler(BaseScheduler):
         finally:
             # Advance the definition's schedule (next run time, run_count).
             try:
-                from apflow.core.storage import create_pooled_session
                 from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
 
-                async with create_pooled_session() as db_session:
+                async with self._session_context() as db_session:
                     task_repository = TaskRepository(db_session)
                     await task_repository.complete_scheduled_run(
                         task_id=task_id,
@@ -604,7 +611,9 @@ async def run_scheduler(config: Optional[SchedulerConfig] = None, verbose: bool 
             await scheduler.stop()
 
 
-def make_scheduler_lifespan(config: Optional[SchedulerConfig] = None) -> Any:
+def make_scheduler_lifespan(
+    config: Optional[SchedulerConfig] = None, session_factory: Any = None
+) -> Any:
     """Build a Starlette lifespan that runs the scheduler in the server process.
 
     This is the single-node consistency path: the poll loop shares the server's
@@ -617,7 +626,11 @@ def make_scheduler_lifespan(config: Optional[SchedulerConfig] = None) -> Any:
 
     @asynccontextmanager
     async def lifespan(_app: Any) -> AsyncIterator[None]:
-        scheduler = InternalScheduler(config)
+        scheduler = (
+            InternalScheduler(config, session_factory=session_factory)
+            if session_factory
+            else InternalScheduler(config)
+        )
         await scheduler.start()
         try:
             yield

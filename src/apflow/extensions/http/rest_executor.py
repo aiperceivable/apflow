@@ -11,8 +11,19 @@ from pydantic import BaseModel, ConfigDict, Field
 from apflow.core.base import BaseTask
 from apflow.core.execution.result_protocol import executor_result_schema
 from apflow.core.extensions.decorators import executor_register
-from apflow.core.execution.errors import NetworkError, ValidationError
+from apflow.core.execution.errors import (
+    ErrorInfo,
+    NetworkError,
+    ValidationError,
+    execution_error_info,
+    http_error_info,
+)
 from apflow.core.utils.network_security import validate_url_not_private
+from apflow.core.utils.credentials import (
+    get_connection_profile,
+    redact_public_data,
+    resolve_outbound_inputs,
+)
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
@@ -20,26 +31,48 @@ logger = get_logger(__name__)
 
 class RestAuthConfig(BaseModel):
     type: Literal["bearer", "basic", "apikey"] = Field(description="Authentication type")
-    token: Optional[str] = Field(default=None, description="Bearer token (for bearer auth)")
+    token: Optional[str] = Field(
+        default=None,
+        description="Bearer token (for bearer auth)",
+        json_schema_extra={"x-sensitive": True},
+    )
     username: Optional[str] = Field(default=None, description="Username (for basic auth)")
-    password: Optional[str] = Field(default=None, description="Password (for basic auth)")
+    password: Optional[str] = Field(
+        default=None,
+        description="Password (for basic auth)",
+        json_schema_extra={"x-sensitive": True},
+    )
     key: Optional[str] = Field(default=None, description="API key name (for apikey auth)")
-    value: Optional[str] = Field(default=None, description="API key value (for apikey auth)")
+    value: Optional[str] = Field(
+        default=None,
+        description="API key value (for apikey auth)",
+        json_schema_extra={"x-sensitive": True},
+    )
     location: Literal["header", "query"] = Field(
         default="header", description="Where to place the API key (default: header)"
     )
 
 
 class RestInputSchema(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_schema_extra={"anyOf": [{"required": ["url"]}, {"required": ["connection_profile"]}]},
+    )
 
-    url: str = Field(description="Target URL for the HTTP request")
+    url: Optional[str] = Field(default=None, description="Target URL, or the profile base URL")
+    connection_profile: Optional[str] = Field(
+        default=None, description="Service-owned connection profile"
+    )
+    credential_ref: Optional[str] = Field(
+        default=None, description="Credential reference authorized by the profile"
+    )
     method: Literal["GET", "POST", "PUT", "DELETE", "PATCH"] = Field(
         default="GET", description="HTTP method (default: GET)"
     )
     headers: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Additional HTTP headers as key-value pairs (merged with defaults)",
+        json_schema_extra={"x-sensitive": True},
     )
     params: Optional[Dict[str, Any]] = Field(
         default=None, description="Query parameters as key-value pairs"
@@ -121,20 +154,26 @@ class RestExecutor(BaseTask):
         """Extension type identifier for categorization"""
         return "http"
 
-    async def _validate_url_not_private(self, url: str) -> None:
+    async def _validate_url_not_private(
+        self, url: str, profile_id: str | None = None, method: str = "GET"
+    ) -> None:
         """Validate that a URL does not target private or internal network addresses.
 
         See ``network_security.validate_url_not_private`` for details. Shared
         with other executors that make outbound requests to task-supplied
         URLs (e.g. apflow_api_executor), so the SSRF guard stays in one place.
         """
-        await validate_url_not_private(url, self.id)
+        if profile_id:
+            await validate_url_not_private(url, self.id, profile_id=profile_id, method=method)
+        else:
+            await validate_url_not_private(url, self.id)
 
     async def _follow_redirects_with_validation(
         self,
         client: httpx.AsyncClient,
         response: httpx.Response,
         max_redirects: int = 20,
+        profile_id: str | None = None,
     ) -> httpx.Response:
         """Manually follow redirects, re-validating each hop against SSRF checks.
 
@@ -158,18 +197,67 @@ class RestExecutor(BaseTask):
             next_request = response.next_request
             if next_request is None:
                 break
-            await self._validate_url_not_private(str(next_request.url))
+            await self._validate_url_not_private(
+                str(next_request.url), profile_id, next_request.method
+            )
             response = await client.send(next_request, follow_redirects=False)
             redirects += 1
         return response
 
     async def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """Separate provider business output from execution failure metadata."""
-        response = await self._execute_request(inputs)
+        response = await self._execute_request(resolve_outbound_inputs(inputs))
+        error_info = response.pop("error_info", None)
         outcome: Dict[str, Any] = {"result": response}
         if response.get("success") is False:
             outcome["error"] = str(response.get("error") or "HTTP request failed")
-        return outcome
+            if error_info is not None:
+                outcome["error_info"] = error_info
+        return redact_public_data(outcome)
+
+    @staticmethod
+    def _http_failure(response: httpx.Response, method: str, retry_safe: bool) -> Dict[str, Any]:
+        upstream_code = None
+        try:
+            payload = response.json()
+            error = payload.get("error", payload) if isinstance(payload, dict) else None
+            if isinstance(error, dict) and isinstance(error.get("code"), str):
+                upstream_code = error["code"]
+        except ValueError:
+            pass
+        return {
+            "success": False,
+            "status_code": response.status_code,
+            "url": str(response.url),
+            "headers": dict(response.headers),
+            "text": response.text,
+            "method": method,
+            "error_info": http_error_info(
+                response.status_code,
+                method,
+                retry_safe=retry_safe,
+                retry_after=response.headers.get("Retry-After"),
+                upstream_code=upstream_code,
+                request_id=response.headers.get("X-Request-ID"),
+            ),
+        }
+
+    @staticmethod
+    def _network_failure_info(
+        error: Exception, method: str, retry_safe: bool, not_sent: bool = False
+    ) -> ErrorInfo:
+        info = execution_error_info(error)
+        info.update(
+            {
+                "code": "CONNECTION_FAILED" if not_sent else "HTTP_TRANSPORT_ERROR",
+                "category": "transient",
+                "origin": "http",
+                "phase": "request",
+                "delivery_state": "not_sent" if not_sent else "unknown",
+                "retryable": not_sent or retry_safe or method in {"GET", "HEAD", "OPTIONS"},
+            }
+        )
+        return info
 
     async def _execute_request(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -192,7 +280,11 @@ class RestExecutor(BaseTask):
         if not url:
             raise ValidationError(f"[{self.id}] url is required in inputs")
 
-        await self._validate_url_not_private(url)
+        profile_id = inputs.get("connection_profile")
+        await self._validate_url_not_private(url, profile_id, inputs.get("method", "GET"))
+        retry_safe = bool(
+            profile_id and get_connection_profile(profile_id).get("replay_safe") is True
+        )
 
         method = inputs.get("method", "GET").upper()
         headers = {**self.default_headers, **(inputs.get("headers") or {})}
@@ -247,8 +339,9 @@ class RestExecutor(BaseTask):
         if auth:
             request_kwargs["auth"] = auth
 
-        logger.info(f"Executing HTTP {method} request to {url}")
+        logger.info("Executing HTTP %s request to %s", method, redact_public_data(url))
 
+        response_received = False
         try:
             async with httpx.AsyncClient(
                 verify=inputs.get("verify", self.default_verify), timeout=timeout
@@ -258,22 +351,18 @@ class RestExecutor(BaseTask):
                     return {"success": False, "error": "Request was cancelled", "method": method}
 
                 response = await client.request(**request_kwargs)
+                response_received = True
                 if self.default_follow_redirects:
-                    response = await self._follow_redirects_with_validation(client, response)
+                    response = await self._follow_redirects_with_validation(
+                        client, response, profile_id=profile_id
+                    )
 
                 # Check for cancellation after request
                 if self.cancellation_checker and self.cancellation_checker():
                     return {"success": False, "error": "Request was cancelled", "method": method}
 
                 if not (200 <= response.status_code < 300):
-                    return {
-                        "success": False,
-                        "status_code": response.status_code,
-                        "url": str(response.url),
-                        "headers": dict(response.headers),
-                        "text": response.text,
-                        "method": method,
-                    }
+                    return self._http_failure(response, method, retry_safe)
 
                 # Try to parse JSON response
                 json_response = None
@@ -300,21 +389,28 @@ class RestExecutor(BaseTask):
                         "text": response.text,
                         "method": method,
                     }
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as error:
             raise NetworkError(
                 f"[{self.id}] Request timeout",
                 what="HTTP request timed out",
                 why=f"No response from {url} within {timeout} seconds",
                 how_to_fix="1. Check if the target service is running\n2. Increase timeout value\n3. Verify network connectivity",
                 context={"url": url, "method": method, "timeout": timeout},
+                error_info=self._network_failure_info(
+                    error,
+                    method,
+                    retry_safe,
+                    isinstance(error, httpx.ConnectTimeout) and not response_received,
+                ),
             )
         except httpx.ConnectError as e:
             raise NetworkError(
                 f"[{self.id}] Connection failed",
                 what="Failed to connect to server",
-                why=f"Cannot establish connection to {url}: {str(e)}",
+                why=f"Cannot establish connection to {url}: {type(e).__name__}",
                 how_to_fix="1. Verify the URL is correct\n2. Check if the service is running\n3. Check firewall and network settings",
-                context={"url": url, "method": method, "error": str(e)},
+                context={"url": url, "method": method, "error_type": type(e).__name__},
+                error_info=self._network_failure_info(e, method, retry_safe, not response_received),
             )
         except httpx.HTTPError as e:
             raise NetworkError(
@@ -325,9 +421,9 @@ class RestExecutor(BaseTask):
                 context={
                     "url": url,
                     "method": method,
-                    "error": str(e),
                     "error_type": type(e).__name__,
                 },
+                error_info=self._network_failure_info(e, method, retry_safe),
             )
 
     def get_demo_result(self, task: Any, inputs: Dict[str, Any]) -> Optional[Dict[str, Any]]:

@@ -87,3 +87,136 @@ async def test_failed_outcome_is_not_completed_or_cached_as_success(
         assert stored is not None and stored.status == "failed"
         cached = session.query(ExecutionIdempotency).filter_by(task_id=task.id).one()
         assert cached.status == "failed"
+
+
+def test_worker_selects_only_unowned_runnable_roots(
+    worker_sessions: sessionmaker[Session],
+) -> None:
+    from apflow.core.storage.sqlalchemy.models import TaskDispatch
+
+    async def execute(task: TaskModel) -> dict[str, Any]:
+        return {"status": "completed"}
+
+    worker = _worker(worker_sessions, execute)
+    with worker_sessions() as session:
+        session.add_all(
+            [
+                TaskModel(id="root", name="Root"),
+                TaskModel(id="child", name="Child", parent_id="root"),
+                TaskModel(id="detached", name="Detached"),
+                TaskModel(id="schedule-run", name="Run", origin_type="scheduled_run"),
+            ]
+        )
+        session.add(TaskDispatch(task_id="detached", state="accepted"))
+        session.commit()
+    assert {task.id for task in worker._find_executable_tasks()} == {"root", "schedule-run"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lost_ownership", ["reassigned", "expired", "dispatch_owned"])
+async def test_worker_fence_rejects_inner_write_after_lease_reassignment(
+    worker_sessions: sessionmaker[Session],
+    lost_ownership: str,
+) -> None:
+    from apflow.core.execution.context import execution_context
+    from datetime import datetime, timedelta, timezone
+    from apflow.core.storage.sqlalchemy.models import TaskLease, TaskDispatch
+    from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
+
+    observed: list[bool] = []
+
+    async def execute(task: TaskModel) -> dict[str, Any]:
+        context = execution_context.get()
+        assert context.data["worker_root_id"] == task.id
+        with worker_sessions() as session:
+            lease = session.get(TaskLease, task.id)
+            assert lease is not None
+            if lost_ownership == "reassigned":
+                lease.lease_token = "replacement-worker-token"
+            elif lost_ownership == "expired":
+                lease.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            else:
+                session.add(TaskDispatch(task_id=task.id, state="accepted"))
+            session.commit()
+        with worker_sessions() as session:
+            result = await TaskRepository(session).transition_task(
+                task.id, expected_statuses=["pending"], status="completed", result="stale"
+            )
+            observed.append(result is None)
+        return {"status": "completed", "result": "stale"}
+
+    worker = _worker(worker_sessions, execute)
+    with worker_sessions() as session:
+        task = TaskModel(id="stale-root", name="Stale root")
+        session.add(task)
+        session.commit()
+        session.expunge(task)
+    await worker._execute_task(task)
+    assert observed == [True]
+    with worker_sessions() as session:
+        stored = session.get(TaskModel, task.id)
+        assert stored is not None and stored.status == "pending"
+        assert stored.result is None
+        assert session.query(ExecutionIdempotency).filter_by(task_id=task.id).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_worker_does_not_complete_cancelled_outcome(
+    worker_sessions: sessionmaker[Session],
+) -> None:
+    from datetime import datetime, timezone
+
+    async def execute(task: TaskModel) -> dict[str, Any]:
+        with worker_sessions() as session:
+            stored = session.get(TaskModel, task.id)
+            assert stored is not None
+            stored.cancel_requested_at = datetime.now(timezone.utc)
+            stored.status = "cancelled"
+            session.commit()
+        return {"status": "cancelled", "result": None}
+
+    worker = _worker(worker_sessions, execute)
+    with worker_sessions() as session:
+        task = TaskModel(id="cancelled-root", name="Cancelled root")
+        session.add(task)
+        session.commit()
+        session.expunge(task)
+    await worker._execute_task(task)
+    with worker_sessions() as session:
+        stored = session.get(TaskModel, task.id)
+        assert stored is not None and stored.status == "cancelled"
+        assert (
+            session.query(ExecutionIdempotency)
+            .filter_by(task_id=task.id, status="completed")
+            .count()
+            == 0
+        )
+
+
+@pytest.mark.asyncio
+async def test_worker_uses_persisted_identity_not_task_inputs(
+    worker_sessions: sessionmaker[Session],
+) -> None:
+    from apflow.core.execution.context import execution_context
+
+    seen: list[tuple[str, list[str]]] = []
+
+    async def execute(task: TaskModel) -> dict[str, Any]:
+        identity = execution_context.get().identity
+        seen.append((identity.id, list(identity.roles)))
+        return {"status": "completed"}
+
+    worker = _worker(worker_sessions, execute)
+    with worker_sessions() as session:
+        task = TaskModel(
+            id="identity-root",
+            name="Identity root",
+            user_id="alice",
+            inputs={"roles": ["apflow.admin"]},
+            execution_identity={"id": "alice", "type": "user", "roles": ["operator"], "attrs": {}},
+        )
+        session.add(task)
+        session.commit()
+        session.expunge(task)
+    await worker._execute_task(task)
+    assert seen == [("alice", ["operator"])]

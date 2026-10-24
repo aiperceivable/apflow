@@ -23,8 +23,15 @@ class UsageSummary:
     total_tokens: int = 0
     total_cost_usd: float = 0.0
     task_count: int = 0
+    unknown_cost_task_count: int = 0
+    unknown_usage_task_count: int = 0
     period_start: Optional[datetime] = None
     period_end: Optional[datetime] = None
+
+    @property
+    def cost_complete(self) -> bool:
+        """A numeric aggregate is only complete when every task supplied its actual cost."""
+        return self.unknown_cost_task_count == 0
 
 
 class UsageReporter:
@@ -53,6 +60,8 @@ class UsageReporter:
             total_tokens=usage.get("total", 0),
             total_cost_usd=cost,
             task_count=1,
+            unknown_cost_task_count=int(task.actual_cost_usd is None),
+            unknown_usage_task_count=int(not task.token_usage),
         )
 
     async def get_user_usage(
@@ -72,6 +81,8 @@ class UsageReporter:
         total_tokens = 0
         total_cost = 0.0
         count = 0
+        unknown_cost_count = 0
+        unknown_usage_count = 0
 
         # query_tasks() is paginated (default limit=100); page through every
         # result instead of only the first page, or a user with more tasks
@@ -98,6 +109,8 @@ class UsageReporter:
                 total_tokens += usage.get("total", 0)
                 if task.actual_cost_usd:
                     total_cost += float(task.actual_cost_usd)
+                unknown_cost_count += int(task.actual_cost_usd is None)
+                unknown_usage_count += int(not task.token_usage)
                 count += 1
 
             if len(tasks) < page_size:
@@ -112,6 +125,8 @@ class UsageReporter:
             total_tokens=total_tokens,
             total_cost_usd=total_cost,
             task_count=count,
+            unknown_cost_task_count=unknown_cost_count,
+            unknown_usage_task_count=unknown_usage_count,
             period_start=start_time,
             period_end=end_time,
         )
@@ -126,6 +141,9 @@ class UsageReporter:
             "total_tokens": summary.total_tokens,
             "total_cost_usd": summary.total_cost_usd,
             "task_count": summary.task_count,
+            "unknown_cost_task_count": summary.unknown_cost_task_count,
+            "unknown_usage_task_count": summary.unknown_usage_task_count,
+            "cost_complete": summary.cost_complete,
             "period_start": summary.period_start.isoformat() if summary.period_start else None,
             "period_end": summary.period_end.isoformat() if summary.period_end else None,
         }

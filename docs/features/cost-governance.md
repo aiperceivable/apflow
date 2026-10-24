@@ -19,19 +19,59 @@ Provide token budget management and cost policy enforcement for AI agent tasks. 
 
 ## Current Behavior and Cost Data Sources
 
-Budget checks run before each task execution. They use usage already reported by
+Legacy per-task budget checks run before each task execution. They use usage already reported by
 previous executions; they do not interrupt a running executor or reserve tokens
 for its next request. A single execution can therefore exceed the remaining
 budget. `NOTIFY` and `CONTINUE` policies permit execution after their threshold,
 including after exhaustion; `DOWNGRADE` passes the selected model in
 `inputs["model"]`, which the executor must honor.
 
-Budget enforcement is per task. `BudgetScope.USER` is reserved for representing a
+That budget enforcement is per task. `BudgetScope.USER` is reserved for representing a
 user scope; user-wide budget enforcement is not implemented. `UsageReporter`
 already provides per-user usage aggregation.
 
+For a shared experiment or task group, configure a token account with
+`BudgetLedger.configure_scope(scope_id, limit_tokens)` and bind the trusted
+`budget_scope_id` to its member tasks. Service callers use owner-scoped public
+names; `scope_budget_key()` derives an internal identifier from the authenticated
+owner and public name. Repeating configuration verifies the existing limit;
+it does not reset spending or increase an existing account's allowance.
+
+Scoped executions require a registered executor's synchronous
+`token_reservation_bound(inputs) -> int` method. The executor must enforce this
+bound across all provider calls inside that invocation. A task-supplied estimate
+or `max_tokens` field alone is insufficient. If that contract is absent,
+execution fails before calling the executor, including when the optional legacy
+governance policy manager was not configured. Generic HTTP executors cannot
+establish a remote service's hidden model consumption; use a trusted bounded
+adapter before adding such calls to a strict scope.
+
+Before each invocation, including every retry, a conditional database update
+reserves tokens only when `spent + reserved + unknown + requested <= limit`.
+SQLite serializes the balance mutation; PostgreSQL uses the same conditional
+update and transactional reservation insert. Reported usage settles the
+reservation exactly once. Failed invocations can report billable usage. Missing
+usage, lost receipts, cancellation, and exceptions without counters retain an
+unknown liability equal to the reservation; a restart or timeout never releases
+it automatically. A hard process exit can leave that held record marked
+`reserved` until reconciliation; it still reduces available capacity.
+Authorized reconciliation settles the original reservation
+with actual usage. Task usage accounting remains separate from this account and
+includes each attempt without counting the final result twice.
+
+These are token admission and accounting guarantees. Actual consumption can
+exceed a declared bound if an executor violates its contract; recorded usage is
+never truncated to hide that violation, and the invocation fails with a
+configuration error when reported tokens exceed its declared bound. Strict monetary limits require a
+provider-enforced upper bound, current pricing, and all billable operations to
+participate. The ledger does not promise a hard dollar ceiling for hidden calls
+or unknown provider charges. Fixed-model experiments must choose blocking
+policies rather than model downgrade policies. Model downgrade requires the
+task to explicitly select a registered policy allowing that action; sharing an
+account does not select a downgrade policy.
+
 New executors report counters outside their business result in the explicit
-`{result, error?, token_usage?}` execution envelope. The function decorator wraps
+`{result, error?, error_info?, token_usage?}` execution envelope. The function decorator wraps
 raw business returns automatically; functions reporting execution usage declare
 `result_format="envelope"`. Usage is stored separately from business output, even
 without budget enforcement. Legacy executor classes retain their old top-level
@@ -57,6 +97,15 @@ model column. Provider pricing and predictive estimates remain future work
 actual costs; an unset cost contributes zero to the aggregate, which does not
 establish that the execution was free. An explicit zero amount remains `0.0`
 when the task is serialized, while an unset amount remains `null`.
+Reports preserve numeric aggregates for compatibility, and additionally expose
+`unknown_cost_task_count`, `unknown_usage_task_count`, and `cost_complete` so an
+unknown cost is distinguishable from an explicitly reported zero. Shared-scope
+status and its reservation records separately show outstanding and unknown
+token liabilities.
+Manual reconciliation stores its first evidence reference, operator identity,
+observation time, and actual token amount atomically with the settlement in an
+immutable submission receipt. Repeating settlement preserves that evidence;
+changing the actual amount conflicts instead of rewriting the old charge.
 
 ---
 

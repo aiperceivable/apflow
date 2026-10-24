@@ -7,6 +7,7 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from apflow.core.execution.errors import ValidationError
+from apflow.core.execution.error_info import http_error_info
 from apflow.core.execution.result_protocol import (
     ResultFormat,
     executor_result_schema,
@@ -90,6 +91,26 @@ def test_null_error_is_preserved_as_success() -> None:
         "result": 0,
         "error": None,
     }
+
+
+def test_error_info_preserves_versioned_metadata_without_mutating_source() -> None:
+    info = http_error_info(503, "GET", upstream_code="WORLD_UNAVAILABLE", request_id="r-1")
+    value = {"result": {"partial": True}, "error": "Unavailable", "error_info": info}
+    result = normalize_executor_result(value, "envelope")
+    assert result == value
+    assert Draft202012Validator(executor_result_schema({})).is_valid(value)
+    copied_info = result.get("error_info")
+    assert copied_info is not None
+    copied_info["code"] = "OTHER"
+    assert info["code"] == "HTTP_503"
+
+
+@pytest.mark.parametrize("info", [{"version": 2}, {"version": 1}, "error", None])
+def test_error_info_rejects_invalid_or_unknown_versions(info: Any) -> None:
+    value = {"result": None, "error": "Failure", "error_info": info}
+    with pytest.raises(ValidationError, match="error_info"):
+        normalize_executor_result(value, "envelope")
+    assert not Draft202012Validator(executor_result_schema({})).is_valid(value)
 
 
 def test_envelope_rejects_outer_business_fields() -> None:

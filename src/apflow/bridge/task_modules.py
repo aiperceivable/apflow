@@ -18,6 +18,13 @@ from apcore import Change, ModuleAnnotations, PreviewResult
 from apcore.errors import ModuleError
 
 from apflow.bridge.errors import invalid_input_error, not_found_error
+from apflow.bridge.access import (
+    authorize_task_inputs,
+    execution_context,
+    module_namespace,
+    task_owner,
+)
+from apflow.core.utils.credentials import redact_public_data, reject_inline_credentials
 
 
 def _make_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -95,6 +102,7 @@ _TASK_TREE_ITEM_FIELDS = (
     "token_budget",
     "cost_policy",
     "max_attempts",
+    "budget_scope_id",
 )
 
 # (minimum, maximum) bounds for integer fields accepted from external MCP/A2A
@@ -139,6 +147,7 @@ _TASK_CREATE_INPUT = {
         "dependencies": {"type": "array", "items": {"type": "object"}},
         "token_budget": {"type": "integer", "minimum": 0},
         "cost_policy": {"type": "string"},
+        "budget_scope_id": {"type": "string", "minLength": 1},
         "max_attempts": {
             "type": "integer",
             "minimum": 1,
@@ -192,9 +201,17 @@ class TaskCreateModule:
         self._creator = task_creator
         self._repo = task_repository
         self.input_schema = _make_schema(_TASK_CREATE_INPUT)
+        self.input_schema["properties"]["idempotency_key"] = {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+        }
         self.output_schema = _make_schema(_TASK_CREATE_OUTPUT)
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo, inputs, context, "task.create", module_id=getattr(self, "module_id", None)
+        )
         name = inputs.get("name", "")
         if not name:
             raise invalid_input_error("Task name must be non-empty")
@@ -209,11 +226,41 @@ class TaskCreateModule:
             "token_budget",
             "cost_policy",
             "max_attempts",
+            "budget_scope_id",
         ]:
             if field in inputs and inputs[field] is not None:
                 task_data[field] = inputs[field]
         _coerce_int_fields(task_data)
+        if task_data.get("budget_scope_id"):
+            from apflow.governance.ledger import scope_budget_key
 
+            task_data["budget_scope_id"] = scope_budget_key(
+                task_owner(context), task_data["budget_scope_id"]
+            )
+        if task_owner(context) is not None:
+            task_data["user_id"] = task_owner(context)
+            identity = context.identity
+            task_data["execution_identity"] = {
+                "id": identity.id,
+                "type": identity.type,
+                "roles": list(identity.roles),
+                "attrs": {"apflow_namespace": module_namespace(self, "task.create")},
+            }
+
+        if task_owner(context) is not None:
+            reject_inline_credentials(task_data)
+        if "idempotency_key" in inputs:
+            from apflow.core.execution.submission import create_with_receipt
+
+            return await create_with_receipt(
+                self._creator,
+                self._repo,
+                [task_data],
+                inputs["idempotency_key"],
+                task_owner(context),
+                "task",
+                namespace=module_namespace(self, "task.create"),
+            )
         trees = await self._creator.create_task_trees_from_array([task_data])
         if not trees:
             raise RuntimeError("Task creation returned no tasks")
@@ -269,10 +316,31 @@ class TaskExecuteModule:
         )
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._manager.task_repository,
+            inputs,
+            context,
+            "task.execute",
+            module_id=getattr(self, "module_id", None),
+        )
         task_id = inputs.get("task_id", "")
         if not task_id:
             raise invalid_input_error("task_id must be non-empty")
-        return await self._new_executor().execute_task_by_id(task_id)
+        return await self._execute_in_session(task_id, context)
+
+    async def _execute_in_session(
+        self, task_id: str, context: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        from sqlalchemy.ext.asyncio import AsyncSession
+        from sqlalchemy.orm import Session
+
+        token = execution_context.set(context)
+        try:
+            if isinstance(getattr(self._manager, "db", None), (Session, AsyncSession)):
+                kwargs["db_session"] = self._manager.db
+            return await self._new_executor().execute_task_by_id(task_id, **kwargs)
+        finally:
+            execution_context.reset(token)
 
     async def stream(self, inputs: dict[str, Any], context: Any) -> AsyncIterator[dict[str, Any]]:
         """Execute the task, relaying engine progress events as they occur."""
@@ -280,10 +348,17 @@ class TaskExecuteModule:
         if not task_id:
             raise invalid_input_error("task_id must be non-empty")
 
+        inputs = await authorize_task_inputs(
+            self._manager.task_repository,
+            inputs,
+            context,
+            "task.execute",
+            module_id=getattr(self, "module_id", None),
+        )
         events: asyncio.Queue = asyncio.Queue()
         run = asyncio.create_task(
-            self._new_executor().execute_task_by_id(
-                task_id, use_streaming=True, streaming_callbacks_context=events
+            self._execute_in_session(
+                task_id, context, use_streaming=True, streaming_callbacks_context=events
             )
         )
         try:
@@ -336,6 +411,9 @@ class TaskListModule:
         )
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo, inputs, context, "task.list", module_id=getattr(self, "module_id", None)
+        )
         limit = _coerce_int(inputs.get("limit"), 50, minimum=1, maximum=1000)
         offset = _coerce_int(inputs.get("offset"), 0, minimum=0)
 
@@ -373,6 +451,9 @@ class TaskGetModule:
         self.output_schema = _make_schema({"type": "object"})
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo, inputs, context, "task.get", module_id=getattr(self, "module_id", None)
+        )
         task_id = inputs.get("task_id", "")
         if not task_id:
             raise invalid_input_error("task_id must be non-empty")
@@ -381,7 +462,24 @@ class TaskGetModule:
         if task is None:
             raise not_found_error(f"Task '{task_id}' not found")
 
-        return task.to_dict()
+        payload = task.to_dict()
+        from sqlalchemy.ext.asyncio import AsyncSession
+        from sqlalchemy.orm import Session
+
+        session = getattr(self._repo.db, "_session", None)
+        if isinstance(session, (Session, AsyncSession)):
+            from apflow.durability.attempts import list_execution_attempts
+            from apflow.core.storage.sqlalchemy.models import TaskDispatch
+            from sqlalchemy import select
+
+            payload["attempts"] = await list_execution_attempts(task_id, session)
+            result = await self._repo.db.execute(
+                select(TaskDispatch).where(TaskDispatch.task_id == task_id)
+            )
+            dispatch = result.scalar_one_or_none()
+            if dispatch is not None:
+                payload["dispatch"] = {"state": dispatch.state, "attempt_id": dispatch.attempt_id}
+        return redact_public_data(payload)
 
 
 class TaskDeleteModule:
@@ -415,6 +513,9 @@ class TaskDeleteModule:
         )
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo, inputs, context, "task.delete", module_id=getattr(self, "module_id", None)
+        )
         task_id = inputs.get("task_id", "")
         if not task_id:
             raise invalid_input_error("task_id must be non-empty")
@@ -506,9 +607,21 @@ class TaskCreateTreeModule:
         self._creator = task_creator
         self._repo = task_repository
         self.input_schema = _make_schema(_TASK_CREATE_TREE_INPUT)
+        self.input_schema["properties"]["idempotency_key"] = {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+        }
         self.output_schema = _make_schema(_TASK_CREATE_TREE_OUTPUT)
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo,
+            inputs,
+            context,
+            "task.create_tree",
+            module_id=getattr(self, "module_id", None),
+        )
         raw_tasks = inputs.get("tasks", [])
         if not isinstance(raw_tasks, list):
             raise invalid_input_error("tasks must be an array")
@@ -521,8 +634,38 @@ class TaskCreateTreeModule:
                 raise invalid_input_error(f"tasks[{index}] must be an object")
             if not t.get("name"):
                 raise invalid_input_error("Each task must have a non-empty 'name'")
-            tasks.append(_filter_task_tree_item(t))
+            task_data = _filter_task_tree_item(t)
+            if task_owner(context) is not None:
+                task_data["user_id"] = task_owner(context)
+                identity = context.identity
+                task_data["execution_identity"] = {
+                    "id": identity.id,
+                    "type": identity.type,
+                    "roles": list(identity.roles),
+                    "attrs": {"apflow_namespace": module_namespace(self, "task.create_tree")},
+                }
+            if task_data.get("budget_scope_id"):
+                from apflow.governance.ledger import scope_budget_key
 
+                task_data["budget_scope_id"] = scope_budget_key(
+                    task_owner(context), task_data["budget_scope_id"]
+                )
+            tasks.append(task_data)
+
+        if task_owner(context) is not None:
+            reject_inline_credentials(tasks)
+        if "idempotency_key" in inputs:
+            from apflow.core.execution.submission import create_with_receipt
+
+            return await create_with_receipt(
+                self._creator,
+                self._repo,
+                tasks,
+                inputs["idempotency_key"],
+                task_owner(context),
+                "tree",
+                namespace=module_namespace(self, "task.create_tree"),
+            )
         tree = await self._creator.create_task_tree_from_array(tasks)
 
         # Collect all task IDs from the tree
@@ -595,6 +738,9 @@ class TaskLinkModule:
         self.output_schema = _make_schema(_TASK_REUSE_OUTPUT)
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo, inputs, context, "task.link", module_id=getattr(self, "module_id", None)
+        )
         task_id = inputs.get("task_id", "")
         if not task_id:
             raise invalid_input_error("task_id must be non-empty")
@@ -604,6 +750,8 @@ class TaskLinkModule:
             raise not_found_error(f"Task '{task_id}' not found")
 
         overrides = _filter_reuse_overrides(inputs.get("overrides"))
+        if task_owner(context) is not None:
+            reject_inline_credentials(overrides)
         tree = await self._creator.from_link(
             task,
             _recursive=inputs.get("recursive", True),
@@ -635,6 +783,9 @@ class TaskCopyModule:
         self.output_schema = _make_schema(_TASK_REUSE_OUTPUT)
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo, inputs, context, "task.copy", module_id=getattr(self, "module_id", None)
+        )
         task_id = inputs.get("task_id", "")
         if not task_id:
             raise invalid_input_error("task_id must be non-empty")
@@ -644,6 +795,8 @@ class TaskCopyModule:
             raise not_found_error(f"Task '{task_id}' not found")
 
         overrides = _filter_reuse_overrides(inputs.get("overrides"))
+        if task_owner(context) is not None:
+            reject_inline_credentials(overrides)
         tree = await self._creator.from_copy(
             task,
             _recursive=inputs.get("recursive", True),
@@ -676,6 +829,9 @@ class TaskArchiveModule:
         self.output_schema = _make_schema(_TASK_REUSE_OUTPUT)
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo, inputs, context, "task.archive", module_id=getattr(self, "module_id", None)
+        )
         task_id = inputs.get("task_id", "")
         if not task_id:
             raise invalid_input_error("task_id must be non-empty")
@@ -732,6 +888,13 @@ class TaskCloneMixedModule:
         self.output_schema = _make_schema(_TASK_REUSE_OUTPUT)
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo,
+            inputs,
+            context,
+            "task.clone_mixed",
+            module_id=getattr(self, "module_id", None),
+        )
         task_id = inputs.get("task_id", "")
         if not task_id:
             raise invalid_input_error("task_id must be non-empty")
@@ -741,6 +904,8 @@ class TaskCloneMixedModule:
             raise not_found_error(f"Task '{task_id}' not found")
 
         overrides = _filter_reuse_overrides(inputs.get("overrides"))
+        if task_owner(context) is not None:
+            reject_inline_credentials(overrides)
         link_task_ids = inputs.get("link_task_ids", [])
         # Validate the array up front (inputs aren't schema-checked before execute):
         # a non-list would silently degrade the mixed clone to a full copy (string
@@ -817,6 +982,9 @@ class TaskUpdateModule:
         self.output_schema = _make_schema({"type": "object"})
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo, inputs, context, "task.update", module_id=getattr(self, "module_id", None)
+        )
         task_id = inputs.get("task_id", "")
         if not task_id:
             raise invalid_input_error("task_id must be non-empty")
@@ -831,11 +999,13 @@ class TaskUpdateModule:
             if field in inputs and (field == "result" or inputs[field] is not None)
         }
         _coerce_int_fields(update_fields)
+        if update_fields and task_owner(context) is not None:
+            reject_inline_credentials(update_fields)
         if update_fields:
             await self._repo.update_task(task_id=task_id, **update_fields)
 
         task = await self._repo.get_task_by_id(task_id)
-        return task.to_dict()
+        return redact_public_data(task.to_dict())
 
 
 class TaskCancelModule:
@@ -889,6 +1059,13 @@ class TaskCancelModule:
         return PreviewResult(changes=changes)
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._manager.task_repository,
+            inputs,
+            context,
+            "task.cancel",
+            module_id=getattr(self, "module_id", None),
+        )
         task_ids = inputs.get("task_ids", [])
         if not isinstance(task_ids, list):
             raise invalid_input_error("task_ids must be an array")
@@ -899,7 +1076,17 @@ class TaskCancelModule:
         results = []
         for tid in task_ids:
             try:
-                result = await self._manager.cancel_task(tid, error_message=error_message)
+                from sqlalchemy.ext.asyncio import AsyncSession
+                from sqlalchemy.orm import Session
+
+                if isinstance(getattr(self._manager, "db", None), (Session, AsyncSession)):
+                    from apflow.core.execution.task_executor import TaskExecutor
+
+                    result = await TaskExecutor().cancel_task_tree(
+                        tid, error_message=error_message, db_session=self._manager.db
+                    )
+                else:
+                    result = await self._manager.cancel_task(tid, error_message=error_message)
                 results.append({"task_id": tid, **result})
             except Exception as e:
                 results.append({"task_id": tid, "status": "failed", "message": str(e)})
@@ -922,6 +1109,9 @@ class TaskTreeModule:
         self.output_schema = _make_schema({"type": "object"})
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo, inputs, context, "task.tree", module_id=getattr(self, "module_id", None)
+        )
         task_id = inputs.get("task_id", "")
         if not task_id:
             raise invalid_input_error("task_id must be non-empty")
@@ -931,7 +1121,7 @@ class TaskTreeModule:
             raise not_found_error(f"Task '{task_id}' not found")
 
         tree = await self._repo.build_task_tree(task)
-        return tree.output()
+        return redact_public_data(tree.output())
 
 
 class TaskChildrenModule:
@@ -951,6 +1141,9 @@ class TaskChildrenModule:
         )
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo, inputs, context, "task.children", module_id=getattr(self, "module_id", None)
+        )
         task_id = inputs.get("task_id", "")
         if not task_id:
             raise invalid_input_error("task_id must be non-empty")
@@ -989,6 +1182,9 @@ class TaskRunningListModule:
         )
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo, inputs, context, "task.running", module_id=getattr(self, "module_id", None)
+        )
         tasks = await self._repo.query_tasks(
             status="in_progress",
             user_id=inputs.get("user_id"),
@@ -1030,6 +1226,13 @@ class TaskScheduledListModule:
         )
 
     async def execute(self, inputs: dict[str, Any], context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo,
+            inputs,
+            context,
+            "task.scheduled",
+            module_id=getattr(self, "module_id", None),
+        )
         # Filter scheduled tasks (and scope by user_id) at the DB layer so `limit`
         # bounds the scheduled result set rather than an unscheduled pre-filter page,
         # matching the user_id scoping applied by the sibling list modules.

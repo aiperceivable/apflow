@@ -92,9 +92,9 @@ def _build_module_subgroups(module_group: Any) -> list[click.Group]:
 
 def _build_cli() -> click.Group:
     """Build the apflow CLI by extending apcore-cli with apflow-specific commands."""
-    from apflow.app import create_app
+    from apflow.app import create_cli_registry
 
-    app = create_app()
+    registry = create_cli_registry()
 
     from apcore_cli import create_cli
 
@@ -104,7 +104,7 @@ def _build_cli() -> click.Group:
     # when given version=/description=, so the old click.params surgery is no longer
     # needed (it also no longer leaks the SDK's own version — see apcore-cli Issue #18).
     cli = create_cli(
-        registry=app.registry,
+        registry=registry,
         prog_name="apflow",
         version=__version__,
         description="apflow — AI-Perceivable Distributed Orchestration",
@@ -117,6 +117,7 @@ def _build_cli() -> click.Group:
     cli.add_command(info)
     cli.add_command(worker)
     cli.add_command(scheduler)
+    cli.add_command(dispatcher)
 
     # Promote task.* and schedule.* into top-level groups (apflow task create, etc.)
     # apcore-cli returns a _LazyGroup (not a plain click.Group), so we resolve it
@@ -563,10 +564,12 @@ def worker(db: str, node_id: Optional[str], scheduler: bool, log_level: Optional
 
     async def execute_one(task: Any) -> dict:
         """Execute a single claimed task via the shared TaskExecutor singleton."""
-        return await TaskExecutor().execute_tasks(
-            [{"id": task.id}],
-            require_existing_tasks=True,
-        )
+        from apflow.core.storage.session import session_scope
+
+        async with session_scope(app.session_factory) as session:
+            return await TaskExecutor().execute_task_by_id(
+                str(task.id), db_session=session, resume=True
+            )
 
     runtime = DistributedRuntime.from_session(app.session, config, task_executor=execute_one)
 
@@ -638,6 +641,33 @@ def scheduler(
         asyncio.run(run_scheduler(config, verbose=verbose))
     except KeyboardInterrupt:
         click.echo("Scheduler stopped")
+
+
+@click.command()
+@click.option("--db", default=None, help="Database connection string")
+def dispatcher(db: Optional[str]) -> None:
+    """Execute durably submitted roots for standalone MCP, A2A, or CLI services."""
+    import asyncio
+
+    from apflow.app import create_app
+    from apflow.core.execution.dispatch import TaskDispatcher
+
+    app = create_app(connection_string=db)
+
+    async def run() -> None:
+        service = TaskDispatcher(app.session_factory)
+        await service.start()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await service.stop()
+
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        click.echo("Dispatcher stopped")
+    finally:
+        app.session.close()
 
 
 # Lazily built Click group for use by tests (via CliRunner) and entry point.

@@ -5,9 +5,12 @@ Retry logic with configurable backoff strategies.
 import asyncio
 import random
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Awaitable, Callable, Optional, TypeVar
 
+from apflow.core.execution.error_info import ErrorInfo, execution_error_info, validate_error_info
+from apflow.core.execution.errors import BusinessError, NetworkError
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
@@ -39,6 +42,7 @@ class RetryPolicy:
     backoff_base_seconds: float = 1.0
     backoff_max_seconds: float = 300.0
     jitter: bool = True
+    retry_unknown_errors: bool = True
 
     def __post_init__(self) -> None:
         if not (1 <= self.max_attempts <= 100):
@@ -99,26 +103,25 @@ class RetryManager:
         policy: RetryPolicy,
         execute_fn: Callable[..., Awaitable[ResultT]],
         on_retry: Optional[Callable[[str, int, Exception], Awaitable[None]]] = None,
+        *,
+        cancellation_check: Callable[[], Awaitable[bool]] | None = None,
     ) -> ResultT:
-        """Execute a function with retry logic.
-
-        Args:
-            task_id: Task identifier for logging and checkpointing.
-            policy: Retry policy configuration.
-            execute_fn: Async function to execute.
-            on_retry: Optional callback called before each retry.
-
-        Returns:
-            Result from execute_fn.
-
-        Raises:
-            The last exception if all attempts fail.
-        """
+        """Retry classified failures; preserve the final envelope or raise its exception."""
         last_exception: Optional[Exception] = None
 
         for attempt in range(policy.max_attempts):
+            if cancellation_check is not None and await cancellation_check():
+                raise asyncio.CancelledError("Task cancellation requested")
             try:
                 result = await execute_fn()
+                failure = _returned_failure(result)
+                if failure is not None:
+                    if attempt >= policy.max_attempts - 1 or not _can_retry(failure, policy):
+                        return result
+                    await self._wait_before_retry(
+                        task_id, policy, attempt, failure, on_retry, cancellation_check
+                    )
+                    continue
                 if attempt > 0:
                     logger.info(
                         f"Task {task_id} succeeded on attempt {attempt + 1}/{policy.max_attempts}"
@@ -130,23 +133,87 @@ class RetryManager:
                     f"Task {task_id} attempt {attempt + 1}/{policy.max_attempts} failed: {e}"
                 )
 
-                if attempt >= policy.max_attempts - 1:
+                if attempt >= policy.max_attempts - 1 or not _can_retry(e, policy):
                     break
 
-                if on_retry is not None:
-                    try:
-                        await on_retry(task_id, attempt, e)
-                    except Exception as callback_error:
-                        # A failing callback (e.g. checkpoint save, DB status
-                        # update) must not abort the retry sequence or mask
-                        # the real execution failure (e) with its own error.
-                        logger.warning(
-                            f"Task {task_id}: on_retry callback failed on attempt "
-                            f"{attempt + 1}: {callback_error}"
-                        )
+                await self._wait_before_retry(
+                    task_id, policy, attempt, e, on_retry, cancellation_check
+                )
 
-                delay = policy.calculate_delay(attempt)
-                logger.debug(f"Task {task_id} retrying in {delay:.2f}s")
-                await asyncio.sleep(delay)
+        assert last_exception is not None
+        raise last_exception
 
-        raise last_exception  # type: ignore[misc]
+    async def _wait_before_retry(
+        self,
+        task_id: str,
+        policy: RetryPolicy,
+        attempt: int,
+        error: Exception,
+        on_retry: Optional[Callable[[str, int, Exception], Awaitable[None]]],
+        cancellation_check: Callable[[], Awaitable[bool]] | None,
+    ) -> None:
+        """Keep callback failure separate from execution failure and honor server delay."""
+        info = _failure_info(error)
+        delay = max(policy.calculate_delay(attempt), (info or {}).get("retry_after_seconds", 0.0))
+        error.next_retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)  # type: ignore[attr-defined]
+        if on_retry is not None:
+            try:
+                await on_retry(task_id, attempt, error)
+            except Exception as callback_error:
+                logger.warning("Task %s: on_retry callback failed: %s", task_id, callback_error)
+        logger.debug("Task %s retrying in %.2fs", task_id, delay)
+        await _wait_or_cancel(delay, cancellation_check)
+
+
+class ReturnedExecutionFailure(RuntimeError):
+    """Internal retry callback view of a failed envelope, preserving its metadata."""
+
+    def __init__(self, result: dict[str, Any]) -> None:
+        super().__init__(str(result["error"]))
+        self.error_info = result.get("error_info")
+        self.token_usage = result.get("token_usage")
+
+
+def _returned_failure(result: Any) -> ReturnedExecutionFailure | None:
+    if isinstance(result, dict) and result.get("error"):
+        return ReturnedExecutionFailure(result)
+    return None
+
+
+def _failure_info(error: Exception) -> ErrorInfo | None:
+    info = getattr(error, "error_info", None)
+    return validate_error_info(info) if info else None
+
+
+def _can_retry(error: Exception, policy: RetryPolicy) -> bool:
+    if isinstance(error, (ValueError, TypeError, PermissionError)):
+        return False
+    if isinstance(error, BusinessError) and not isinstance(error, NetworkError):
+        return False
+    info = _failure_info(error)
+    if info is not None:
+        return (
+            info["retryable"] and info.get("retry_after_seconds", 0) <= policy.backoff_max_seconds
+        )
+    if execution_error_info(error)["category"] == "permanent":
+        return False
+    if isinstance(error, (ReturnedExecutionFailure, NetworkError)):
+        return False
+    return policy.retry_unknown_errors
+
+
+async def _wait_or_cancel(
+    delay: float, cancellation_check: Callable[[], Awaitable[bool]] | None
+) -> None:
+    if cancellation_check is None:
+        await asyncio.sleep(delay)
+        return
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + delay
+    while True:
+        if await cancellation_check():
+            raise asyncio.CancelledError("Task cancellation requested")
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(remaining, 0.1))

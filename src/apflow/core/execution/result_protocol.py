@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any, Literal, NotRequired, TypedDict
 
 from apflow.core.execution.errors import ValidationError
+from apflow.core.execution.error_info import ERROR_INFO_SCHEMA, ErrorInfo, validate_error_info
 
 ResultFormat = Literal["legacy", "raw", "envelope"]
 
@@ -14,6 +15,7 @@ class ExecutorResult(TypedDict):
     result: Any
     error: NotRequired[str | None]
     token_usage: NotRequired[dict[str, int]]
+    error_info: NotRequired[ErrorInfo]
 
 
 def normalize_executor_result(value: Any, result_format: ResultFormat) -> ExecutorResult:
@@ -36,10 +38,12 @@ def normalize_executor_result(value: Any, result_format: ResultFormat) -> Execut
                 usage = deepcopy(value["token_usage"])
                 usage.setdefault("total", usage.get("input", 0) + usage.get("output", 0))
                 outcome["token_usage"] = usage
+            if value.get("error_info"):
+                outcome["error_info"] = _validate_error_info(value["error_info"])
         return outcome
     if not isinstance(value, dict):
         raise ValidationError("An envelope executor must return a dictionary")
-    unexpected = set(value) - {"result", "error", "token_usage"}
+    unexpected = set(value) - {"result", "error", "token_usage", "error_info"}
     if unexpected:
         raise ValidationError(
             f"Unexpected execution envelope fields: {sorted(unexpected, key=str)}. "
@@ -55,7 +59,18 @@ def normalize_executor_result(value: Any, result_format: ResultFormat) -> Execut
         outcome["error"] = error
     if "token_usage" in value:
         outcome["token_usage"] = _validate_token_usage(value["token_usage"])
+    if "error_info" in value:
+        if error is None:
+            raise ValidationError("error_info requires an execution error")
+        outcome["error_info"] = _validate_error_info(value["error_info"])
     return outcome
+
+
+def _validate_error_info(value: Any) -> ErrorInfo:
+    try:
+        return validate_error_info(deepcopy(value))
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
 
 
 def _validate_token_usage(value: Any) -> dict[str, int]:
@@ -80,6 +95,7 @@ def executor_result_schema(business_schema: dict[str, Any]) -> dict[str, Any]:
         "properties": {
             "result": {"$ref": "#/$defs/business_result"} if business else {},
             "error": {"type": ["string", "null"], "minLength": 1},
+            "error_info": deepcopy(ERROR_INFO_SCHEMA),
             "token_usage": {
                 "type": "object",
                 "properties": {
@@ -93,6 +109,9 @@ def executor_result_schema(business_schema: dict[str, Any]) -> dict[str, Any]:
             {"required": ["error"], "properties": {"error": {"type": "string"}}},
         ],
         "additionalProperties": False,
+        "dependentSchemas": {
+            "error_info": {"required": ["error"], "properties": {"error": {"type": "string"}}}
+        },
     }
     if business:
         schema["$defs"] = {"business_result": {"anyOf": [business, {"type": "null"}]}}

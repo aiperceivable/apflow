@@ -312,7 +312,7 @@ class TestRestExecutor:
         mock_response.url = "https://api.example.com/test"
         mock_response.headers = {}
         mock_response.text = "Not Found"
-        mock_response.json.side_effect = Exception("Not JSON")
+        mock_response.json.side_effect = ValueError("Not JSON")
 
         with patch("httpx.AsyncClient") as mock_client:
             mock_client_instance = AsyncMock()
@@ -629,7 +629,7 @@ class TestRestExecutor:
         redirect_response.url = "https://api.example.com/redirect"
         redirect_response.headers = {}
         redirect_response.text = ""
-        redirect_response.json.side_effect = Exception("Not JSON")
+        redirect_response.json.side_effect = ValueError("Not JSON")
 
         with patch("httpx.AsyncClient") as mock_client:
             mock_client_instance = AsyncMock()
@@ -699,7 +699,8 @@ class TestRestExecutor:
         schema = executor.get_input_schema()
 
         assert schema["type"] == "object"
-        assert "url" in schema["required"]
+        assert "connection_profile" in schema["properties"]
+        assert "credential_ref" in schema["properties"]
         assert "properties" in schema
         assert "method" in schema["properties"]
         assert "auth" in schema["properties"]

@@ -275,6 +275,8 @@ class TestApFlowApiExecutor:
         mock_response = MagicMock()
         mock_response.status_code = 500
         mock_response.text = "Internal Server Error"
+        mock_response.headers = {}
+        mock_response.json.side_effect = ValueError("Not JSON")
 
         with patch("httpx.AsyncClient") as mock_client:
             mock_client_instance = AsyncMock()
@@ -492,7 +494,8 @@ class TestApFlowApiExecutor:
         schema = executor.get_input_schema()
 
         assert schema["type"] == "object"
-        assert "base_url" in schema["required"]
+        assert "connection_profile" in schema["properties"]
+        assert "credential_ref" in schema["properties"]
         assert "method" in schema["required"]
         assert "params" in schema["required"]
         assert "wait_for_completion" in schema["properties"]

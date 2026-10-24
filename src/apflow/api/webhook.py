@@ -44,6 +44,7 @@ def build_webhook_routes(
     allowed_ips: Optional[list[str]] = None,
     rate_limit: int = 0,
     async_execution: bool = True,
+    session_factory: Any = None,
 ) -> list[Route]:
     """Build the inbound webhook route backed by a configured ``WebhookGateway``.
 
@@ -66,7 +67,11 @@ def build_webhook_routes(
         rate_limit=rate_limit,
         async_execution=async_execution,
     )
-    gateway = WebhookGateway(config)
+    gateway = (
+        WebhookGateway(config, session_factory=session_factory)
+        if session_factory
+        else WebhookGateway(config)
+    )
 
     async def trigger(request: Request) -> Response:
         task_id = request.path_params["task_id"]

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, cast
 
-from sqlalchemy import text
+from sqlalchemy import text, exists, select, or_
 from sqlalchemy.orm import sessionmaker
 
 from apflow.core.distributed.config import DistributedConfig, is_postgresql, utcnow
@@ -19,7 +19,7 @@ from apflow.core.distributed.lease_manager import LeaseManager
 from apflow.core.distributed.node_registry import NodeRegistry
 from apflow.core.distributed.placement import PlacementEngine
 from apflow.core.distributed.types import TaskExecutorFn
-from apflow.core.storage.sqlalchemy.models import DistributedNode, TaskModel
+from apflow.core.storage.sqlalchemy.models import DistributedNode, TaskModel, TaskDispatch
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
@@ -162,6 +162,13 @@ class WorkerRuntime:
             query = session.query(TaskModel).filter(
                 TaskModel.status == "pending",
                 TaskModel.schedule_enabled.isnot(True),
+                TaskModel.parent_id.is_(None),
+                TaskModel.cancel_requested_at.is_(None),
+                or_(
+                    TaskModel.origin_type.is_(None),
+                    TaskModel.origin_type.notin_(["archive", "link"]),
+                ),
+                ~exists(select(TaskDispatch.task_id).where(TaskDispatch.task_id == TaskModel.id)),
             )
             if is_postgresql(session):
                 query = query.with_for_update(skip_locked=True)
@@ -251,7 +258,7 @@ class WorkerRuntime:
                     result = cached_result
                 else:
                     emit_task_event(self._session_factory, task_id, "task_started", self._node_id)
-                    result = await self._task_executor(task)
+                    result = await self._execute_with_lease_context(task, token)
 
                 if result.get("status") in ("failed", "error"):
                     self._report_failure(
@@ -264,10 +271,20 @@ class WorkerRuntime:
                         key,
                     )
                     return
-                if not is_cached:
+                outcome = result.get("status", "completed")
+                if outcome in {"cancelled", "cancelling"}:
+                    self._finalize_task(
+                        task_id, token, "cancelled" if outcome == "cancelled" else "in_progress"
+                    )
+                    return
+                if outcome != "completed":
+                    logger.warning(
+                        "Task %s returned nonterminal outcome %s; releasing lease", task_id, outcome
+                    )
+                    self._lease_manager.release_lease(task_id, token)
+                    return
+                if self._report_completion(task_id, token, result) and not is_cached:
                     self._idempotency.store_result(task_id, attempt_id, key, result, "completed")
-
-                self._report_completion(task_id, token, result)
             except asyncio.CancelledError:
                 logger.warning("Task %s cancelled", task_id)
                 # Release the lease here: the finally block pops _active_leases, so
@@ -286,6 +303,26 @@ class WorkerRuntime:
                 self._running_tasks.pop(task_id, None)
                 self._active_leases.pop(task_id, None)
 
+    async def _execute_with_lease_context(self, task: TaskModel, token: str) -> dict[str, Any]:
+        """Fence every inner DAG transition with this root's live worker lease."""
+        from apcore import Context, Identity
+        from apflow.core.execution.context import execution_context
+
+        current = execution_context.get()
+        prior_data = getattr(current, "data", None)
+        data = dict(prior_data) if isinstance(prior_data, dict) else {}
+        data.update(worker_root_id=str(task.id), worker_token=token)
+        identity = getattr(current, "identity", None)
+        principal = getattr(task, "execution_identity", None)
+        if isinstance(principal, dict):
+            identity = Identity(**principal)
+        context = Context.create(identity=identity, data=data)
+        marker = execution_context.set(context)
+        try:
+            return await self._task_executor(task)
+        finally:
+            execution_context.reset(marker)
+
     async def _renew_lease_loop(self, task_id: str, lease_token: str) -> None:
         """Renew lease periodically. Stops if renewal fails."""
         interval = self._config.lease_duration_seconds / 3
@@ -302,7 +339,7 @@ class WorkerRuntime:
                     running.cancel()
                 return
 
-    def _finalize_task(self, task_id: str, lease_token: str, new_status: str) -> None:
+    def _finalize_task(self, task_id: str, lease_token: str, new_status: str) -> bool:
         """Update task status and release lease atomically, guarded by lease ownership.
 
         The status write is gated on the token-scoped lease DELETE matching a row: if
@@ -312,9 +349,11 @@ class WorkerRuntime:
         with self._session_factory() as session:
             deleted = session.execute(
                 text(
-                    "DELETE FROM apflow_task_leases " "WHERE task_id = :tid AND lease_token = :tok"
+                    "DELETE FROM apflow_task_leases "
+                    "WHERE task_id = :tid AND lease_token = :tok AND expires_at > :now "
+                    "AND NOT EXISTS (SELECT 1 FROM apflow_task_dispatch WHERE task_id = :tid)"
                 ),
-                {"tid": task_id, "tok": lease_token},
+                {"tid": task_id, "tok": lease_token, "now": utcnow()},
             )
             if deleted.rowcount == 0:
                 # Lease no longer held (expired / reassigned) — skip the status write.
@@ -323,24 +362,28 @@ class WorkerRuntime:
                     "Skipped finalizing task %s: lease no longer held by this node",
                     task_id,
                 )
-                return
+                return False
 
             task = session.get(TaskModel, task_id)
-            if task is not None:
-                task.status = new_status
+            if task is not None and task.status not in {"completed", "failed", "cancelled"}:
+                task.status = "cancelled" if task.cancel_requested_at is not None else new_status
             session.commit()
+            return task is not None and task.status == new_status
 
-    def _report_completion(self, task_id: str, lease_token: str, result: dict[str, Any]) -> None:
-        """Mark task as completed, release lease, and emit event."""
-        self._finalize_task(task_id, lease_token, "completed")
+    def _report_completion(self, task_id: str, lease_token: str, result: dict[str, Any]) -> bool:
+        """Mark task as completed only while its execution lease is still owned."""
+        if not self._finalize_task(task_id, lease_token, "completed"):
+            return False
         emit_task_event(self._session_factory, task_id, "task_completed", self._node_id)
         logger.info("Task %s completed", task_id)
+        return True
 
     def _report_failure(
         self, task_id: str, attempt_id: int, lease_token: str, error: str, key: str
     ) -> None:
         """Mark task as failed, release lease, store failure, and emit event."""
-        self._finalize_task(task_id, lease_token, "failed")
+        if not self._finalize_task(task_id, lease_token, "failed"):
+            return
         self._idempotency.store_failure(
             task_id,
             attempt_id,

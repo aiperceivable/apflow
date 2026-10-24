@@ -18,7 +18,12 @@ DEFAULT_RESOLVE_TIMEOUT_SECONDS = 5.0
 
 
 async def validate_url_not_private(
-    url: str, executor_id: str, resolve_timeout: float = DEFAULT_RESOLVE_TIMEOUT_SECONDS
+    url: str,
+    executor_id: str,
+    resolve_timeout: float = DEFAULT_RESOLVE_TIMEOUT_SECONDS,
+    *,
+    profile_id: str | None = None,
+    method: str = "GET",
 ) -> None:
     """Validate that a URL does not target private or internal network addresses.
 
@@ -44,7 +49,14 @@ async def validate_url_not_private(
         ValidationError: If the URL targets a private/reserved address, cannot be
             resolved, or resolution exceeds ``resolve_timeout``.
     """
-    if os.environ.get("APFLOW_REST_ALLOW_PRIVATE_URLS") == "1":
+    allow_private = False
+    if profile_id:
+        from apflow.core.utils.credentials import get_connection_profile, validate_profile_target
+
+        profile = get_connection_profile(profile_id)
+        validate_profile_target(url, method, profile)
+        allow_private = profile.get("allow_private") is True
+    elif os.environ.get("APFLOW_REST_ALLOW_PRIVATE_URLS") == "1":
         return
 
     parsed = urlparse(url)
@@ -70,7 +82,11 @@ async def validate_url_not_private(
     for addr_info in addr_infos:
         ip_str = addr_info[4][0]
         ip = ipaddress.ip_address(ip_str)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+        if ip.is_link_local or ip.is_reserved or ip.is_unspecified or ip.is_multicast:
+            raise ValidationError(
+                f"[{executor_id}] URL targets a private/reserved address: {hostname}"
+            )
+        if not allow_private and (ip.is_private or ip.is_loopback):
             raise ValidationError(
                 f"[{executor_id}] URL targets a private/reserved address: {hostname} -> {ip_str}"
             )

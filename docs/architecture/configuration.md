@@ -4,6 +4,73 @@ description: Configuration architecture for apflow defaults, YAML files, environ
 
 # Table Name Configuration
 
+## Service Deployment Configuration
+
+`create_app(connection_string=...)` and CLI `--db` take precedence over
+`storage.connection_string`. If neither is set, the existing environment
+resolution applies (`DATABASE_URL`, then `APFLOW_DATABASE_URL`, then the SQLite
+default). HTTP operations, schedulers created by the server, and dispatchers
+share the application's selected engine. CLI help and version discovery do not
+initialize storage.
+
+The following YAML keys are consumed by `ConfigManager`:
+
+```yaml
+storage:
+  connection_string: "postgresql+psycopg://user:password@database/apflow"
+security:
+  require_identity: true
+  admin_roles: [apflow.admin]
+  allowed_modules: ["apflow.*"]
+  module_roles:
+    "apflow.task.reconcile": [apflow.admin]
+    "apflow.budget.reconcile": [apflow.admin]
+  # Optional path to an apcore ACL YAML policy.
+  acl_path: null
+  credentials:
+    - id: training-service
+      env_var: TRAINING_SERVICE_TOKEN
+      header: Authorization
+      prefix: "Bearer "
+      allowed_profiles: [training-api]
+network:
+  profiles:
+    - id: training-api
+      base_url: "https://training.internal.example/v1/"
+      allow_private: true
+      allowed_methods: [POST]
+      allowed_path_prefixes: [/v1/training/]
+      allowed_subjects: [training-worker]
+      credential_ref: training-service
+      replay_safe: false
+service:
+  required_modules: [apflow.rest_executor]
+  required_schema_versions: {}
+```
+
+Use module IDs returned by the deployment's registry for `required_modules`.
+An absent module, failed schema discovery, or mismatched configured schema
+version prevents startup/readiness and new task admission. Optional executor
+discovery remains optional. Configure `required_schema_versions` only for
+plugins publishing that metadata.
+
+Run network-facing services with `--auth` and configured JWT verification.
+`require_identity` also denies anonymous module execution at the bridge. Trusted
+local library use remains compatible when this setting is false. Connection
+profile `allowed_subjects` matches the verified identity ID; role policy is a
+separate capability restriction.
+
+Task inputs select a profile using `connection_profile: training-api` and a URL
+within its configured origin/path/method policy. Private destinations remain
+blocked by default; enabling one profile does not authorize arbitrary internal
+addresses or task-supplied credentials. Keep deployment egress restrictions to
+enforce network boundaries at connection time, including DNS changes. Never put
+real database passwords or credential values into tracked configuration.
+
+For reproducible integration testing, install from `uv.lock` (`uv sync --frozen`)
+or use equivalent lock-derived constraints. CI installs constrained dependencies
+and runs `pip check` plus the dependency closure test before the full suite.
+
 ## Overview
 
 The `TaskModel` table name is configurable via environment variable to avoid conflicts with other frameworks or to align with your naming conventions.

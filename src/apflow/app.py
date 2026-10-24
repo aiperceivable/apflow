@@ -42,6 +42,9 @@ class ApflowApp:
         self.task_creator = task_creator
         self.task_repository = task_repository
         self.registry = registry
+        from apflow.core.storage.session import session_factory_for
+
+        self.session_factory = session_factory_for(session)
         # Set only in cluster mode; the caller's event loop awaits its start().
         self.distributed_runtime = distributed_runtime
 
@@ -79,8 +82,10 @@ def create_app(
 
     # Resolve connection string
     if connection_string is None:
+        from apflow.core.storage.factory import _get_database_url_from_env
+
         cm = get_config_manager()
-        connection_string = cm.get("storage.connection_string")
+        connection_string = cm.get("storage.connection_string") or _get_database_url_from_env()
 
     # Create session
     session = create_session(connection_string=connection_string)
@@ -135,7 +140,21 @@ def create_app(
         task_creator=task_creator,
         task_repository=task_repository,
         namespace=namespace,
+        required_modules=get_config_manager().get("service.required_modules", []),
+        required_schema_versions=get_config_manager().get("service.required_schema_versions", {}),
     )
+    from apflow.bridge.session import SessionBoundModule
+    from apflow.core.storage.session import session_factory_for
+
+    factory = session_factory_for(session)
+    setattr(registry, "apflow_session_factory", factory)
+    for module_id in list(registry.list()):
+        if module_id.startswith(
+            (f"{namespace}.task.", f"{namespace}.schedule.", f"{namespace}.budget.")
+        ):
+            module = registry.get(module_id)
+            registry.unregister(module_id)
+            registry.register(module_id, SessionBoundModule(module, factory, registry))
     logger.info(f"apcore Registry populated ({len(list(registry.list()))} modules)")
 
     # Construct the distributed runtime if cluster mode. create_app() is
@@ -169,4 +188,26 @@ def create_app(
         task_repository=task_repository,
         registry=registry,
         distributed_runtime=distributed_runtime,
+    )
+
+
+def create_cli_registry() -> "Registry":
+    """Discover CLI metadata without opening or migrating a database."""
+    from apflow.bridge import create_apflow_registry
+
+    application: list[ApflowApp] = []
+
+    class LazyComponent:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def __getattr__(self, name: str) -> object:
+            if not application:
+                application.append(create_app())
+            return getattr(getattr(application[0], self.name), name)
+
+    return create_apflow_registry(
+        task_manager=LazyComponent("task_manager"),
+        task_creator=LazyComponent("task_creator"),
+        task_repository=LazyComponent("task_repository"),
     )

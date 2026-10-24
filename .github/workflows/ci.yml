@@ -34,13 +34,17 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # Install development tools and core CLI/API dependencies.
-        # If a constraints.txt file is present, use it to pin critical dependency versions.
-        if [ -f constraints.txt ]; then
-          pip install -e ".[dev]" -c constraints.txt
-        else
-          pip install -e ".[dev]"
-        fi
+        python - <<'PY'
+        import pathlib
+        import tomllib
+        lock = tomllib.loads(pathlib.Path("uv.lock").read_text())
+        constraints = [f"{item['name']}=={item['version']}" for item in lock["package"]
+                       if "registry" in item["source"]]
+        pathlib.Path(".ci-constraints.txt").write_text("\n".join(constraints) + "\n")
+        PY
+        pip install -e ".[dev]" -c .ci-constraints.txt
+        pip check
+        python -m pytest tests/integration/test_package_acceptance.py::test_core_dependency_closure_excludes_removed_optional_integrations
 
     - name: Check lint and formatting
       run: |

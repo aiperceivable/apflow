@@ -58,26 +58,45 @@ import httpx
 from typing import Any, Dict, Literal, Optional
 from urllib.parse import quote
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from apflow.core.base import BaseTask
 from apflow.core.execution.result_protocol import executor_result_schema
 from apflow.core.extensions.decorators import executor_register
 from apflow.core.utils.network_security import validate_url_not_private
+from apflow.core.utils.credentials import (
+    get_connection_profile,
+    redact_public_data,
+    resolve_outbound_inputs,
+)
+from apflow.core.execution.errors import execution_error_info, http_error_info
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 class ApFlowApiInputSchema(BaseModel):
-    base_url: str = Field(
-        description='apflow API base URL (e.g., "http://localhost:8000") (required)'
+    model_config = ConfigDict(
+        json_schema_extra={
+            "anyOf": [{"required": ["base_url"]}, {"required": ["connection_profile"]}]
+        }
+    )
+    base_url: Optional[str] = Field(
+        default=None, description="apflow API base URL, or the connection profile base URL"
+    )
+    connection_profile: Optional[str] = Field(
+        default=None, description="Service-owned connection profile"
+    )
+    credential_ref: Optional[str] = Field(
+        default=None, description="Credential reference authorized by the profile"
     )
     method: str = Field(
         description='Registry module ID or task method alias (e.g., "apflow.task.get", "tasks.create")'
     )
     params: Dict[str, Any] = Field(description="Method parameters dict (required)")
     auth_token: Optional[str] = Field(
-        default=None, description="Optional JWT token for authentication"
+        default=None,
+        description="Optional JWT token for authentication",
+        json_schema_extra={"x-sensitive": True},
     )
     use_streaming: bool = Field(
         default=False,
@@ -94,7 +113,9 @@ class ApFlowApiInputSchema(BaseModel):
     )
     timeout: float = Field(default=300.0, description="Total timeout in seconds (default: 300.0)")
     headers: Optional[Dict[str, str]] = Field(
-        default=None, description="Additional HTTP headers dict (optional)"
+        default=None,
+        description="Additional HTTP headers dict (optional)",
+        json_schema_extra={"x-sensitive": True},
     )
 
 
@@ -198,11 +219,15 @@ class ApFlowApiExecutor(BaseTask):
 
     async def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """Separate provider business output from execution failure metadata."""
-        response = await self._execute_remote(inputs)
+        resolved = resolve_outbound_inputs(inputs, url_field="base_url")
+        response = await self._execute_remote(resolved)
+        error_info = response.pop("error_info", None)
         outcome: Dict[str, Any] = {"result": response}
         if response.get("success") is False:
             outcome["error"] = str(response.get("error") or "Remote apflow call failed")
-        return outcome
+            if error_info is not None:
+                outcome["error_info"] = error_info
+        return redact_public_data(outcome)
 
     async def _execute_remote(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -245,6 +270,10 @@ class ApFlowApiExecutor(BaseTask):
         poll_interval = inputs.get("poll_interval", 1.0)
         timeout = inputs.get("timeout", 300.0)
         headers = inputs.get("headers") or {}
+        profile_id = inputs.get("connection_profile")
+        replay_safe = bool(
+            profile_id and get_connection_profile(profile_id).get("replay_safe") is True
+        )
 
         # Prepare headers
         request_headers = {"Content-Type": "application/json", **headers}
@@ -259,14 +288,16 @@ class ApFlowApiExecutor(BaseTask):
             module_id = f"apflow.{method}"
         api_url = f"{base_url.rstrip('/')}/modules/{quote(module_id, safe='.')}"
 
-        logger.info(f"Calling apflow API {method} on {base_url}")
+        logger.info("Calling apflow API %s on %s", method, redact_public_data(base_url))
 
         try:
             # base_url is task-supplied; without this check a task could target
             # internal/private infrastructure (e.g. the cloud metadata endpoint)
             # via this executor (unlike sibling rest_executor, which already
             # validates outbound URLs the same way).
-            await validate_url_not_private(api_url, self.id)
+            await validate_url_not_private(
+                api_url, self.id, profile_id=inputs.get("connection_profile"), method="POST"
+            )
 
             async with httpx.AsyncClient(timeout=timeout) as client:
                 # Check for cancellation before making request
@@ -294,9 +325,7 @@ class ApFlowApiExecutor(BaseTask):
 
                 # Parse response
                 if response.status_code != 200:
-                    logger.error(
-                        f"apflow API returned status {response.status_code}: {response.text}"
-                    )
+                    logger.error(f"apflow API returned status {response.status_code}")
                     failure: Dict[str, Any] = {
                         "success": False,
                         "error": f"API returned status {response.status_code}",
@@ -316,6 +345,18 @@ class ApFlowApiExecutor(BaseTask):
                         failure["error"] = remote_error.get("message") or failure["error"]
                         failure["error_code"] = remote_error.get("code")
                         failure["error_data"] = remote_error.get("details")
+                    failure["error_info"] = http_error_info(
+                        response.status_code,
+                        "POST",
+                        retry_safe=replay_safe,
+                        retry_after=response.headers.get("Retry-After"),
+                        upstream_code=(
+                            failure.get("error_code")
+                            if isinstance(failure.get("error_code"), str)
+                            else None
+                        ),
+                        request_id=response.headers.get("X-Request-ID"),
+                    )
                     return failure
 
                 result_data = response.json()
@@ -332,6 +373,7 @@ class ApFlowApiExecutor(BaseTask):
                             poll_interval=poll_interval,
                             timeout=timeout,
                             headers=headers,
+                            profile_id=inputs.get("connection_profile"),
                         )
                         return final_result
 
@@ -342,25 +384,47 @@ class ApFlowApiExecutor(BaseTask):
                     "method": method,
                 }
 
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as error:
             logger.error(f"apflow API call timeout after {timeout} seconds: {base_url}")
             return {
                 "success": False,
                 "error": f"Request timeout after {timeout} seconds",
                 "base_url": base_url,
                 "method": method,
+                "error_info": self._remote_transport_error(error, replay_safe),
             }
         except httpx.RequestError as e:
-            logger.error(f"apflow API request error: {e}", exc_info=True)
+            logger.error("apflow API request error: %s", type(e).__name__)
             return {
                 "success": False,
-                "error": f"Request error: {str(e)}",
+                "error": f"Request error: {type(e).__name__}",
                 "base_url": base_url,
                 "method": method,
+                "error_info": self._remote_transport_error(e, replay_safe),
             }
         except Exception as e:
-            logger.error(f"Unexpected error calling apflow API: {e}", exc_info=True)
-            return {"success": False, "error": str(e), "base_url": base_url, "method": method}
+            logger.error("Unexpected error calling apflow API: %s", type(e).__name__)
+            return {
+                "success": False,
+                "error": str(redact_public_data(str(e))),
+                "base_url": base_url,
+                "method": method,
+                "error_info": execution_error_info(e, phase="remote_request"),
+            }
+
+    @staticmethod
+    def _remote_transport_error(error: httpx.RequestError, replay_safe: bool) -> Dict[str, Any]:
+        info = execution_error_info(error, phase="remote_request")
+        not_sent = isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout))
+        info.update(
+            {
+                "category": "transient",
+                "origin": "http",
+                "delivery_state": "not_sent" if not_sent else "unknown",
+                "retryable": not_sent or replay_safe,
+            }
+        )
+        return dict(info)
 
     async def _wait_for_task_completion(
         self,
@@ -370,6 +434,7 @@ class ApFlowApiExecutor(BaseTask):
         poll_interval: float,
         timeout: float,
         headers: Optional[Dict[str, Any]],
+        profile_id: str | None = None,
     ) -> Dict[str, Any]:
         """
         Wait for task completion by polling task status with production-grade retry logic
@@ -401,7 +466,7 @@ class ApFlowApiExecutor(BaseTask):
         # Validated once here, not per poll iteration — base_url is fixed for
         # the lifetime of this polling loop, so re-resolving DNS on every poll
         # would be wasted work.
-        await validate_url_not_private(api_url, self.id)
+        await validate_url_not_private(api_url, self.id, profile_id=profile_id, method="POST")
         start_time = asyncio.get_event_loop().time()
 
         # Production-grade retry configuration
@@ -499,7 +564,7 @@ class ApFlowApiExecutor(BaseTask):
                         # Client error (4xx) - likely non-retryable
                         consecutive_failures += 1
                         total_failures += 1
-                        last_error = f"Client error {response.status_code}: {response.text[:200]}"
+                        last_error = f"Client error {response.status_code}: {redact_public_data(response.text[:200])}"
                         logger.error(
                             f"Task {task_id} poll {poll_count}: {last_error} "
                             f"(consecutive: {consecutive_failures}, total: {total_failures})"
@@ -523,7 +588,7 @@ class ApFlowApiExecutor(BaseTask):
                         # Server error (5xx) - retryable
                         consecutive_failures += 1
                         total_failures += 1
-                        last_error = f"Server error {response.status_code}: {response.text[:200]}"
+                        last_error = f"Server error {response.status_code}: {redact_public_data(response.text[:200])}"
                         logger.warning(
                             f"Task {task_id} poll {poll_count}: {last_error} "
                             f"(consecutive: {consecutive_failures}, total: {total_failures})"
@@ -533,7 +598,7 @@ class ApFlowApiExecutor(BaseTask):
                 # Network timeout - retryable
                 consecutive_failures += 1
                 total_failures += 1
-                last_error = f"Request timeout: {str(e)}"
+                last_error = f"Request timeout: {type(e).__name__}"
                 logger.warning(
                     f"Task {task_id} poll {poll_count}: {last_error} "
                     f"(consecutive: {consecutive_failures}, total: {total_failures})"
@@ -542,7 +607,7 @@ class ApFlowApiExecutor(BaseTask):
                 # Network error - retryable
                 consecutive_failures += 1
                 total_failures += 1
-                last_error = f"Network error: {str(e)}"
+                last_error = f"Network error: {type(e).__name__}"
                 logger.warning(
                     f"Task {task_id} poll {poll_count}: {last_error} "
                     f"(consecutive: {consecutive_failures}, total: {total_failures})"
@@ -551,11 +616,10 @@ class ApFlowApiExecutor(BaseTask):
                 # Unexpected error - log but continue
                 consecutive_failures += 1
                 total_failures += 1
-                last_error = f"Unexpected error: {str(e)}"
+                last_error = f"Unexpected error: {type(e).__name__}"
                 logger.error(
                     f"Task {task_id} poll {poll_count}: {last_error} "
                     f"(consecutive: {consecutive_failures}, total: {total_failures})",
-                    exc_info=True,
                 )
 
             # Circuit breaker: Stop if too many consecutive failures

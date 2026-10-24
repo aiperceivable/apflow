@@ -83,15 +83,24 @@ class WebhookGateway:
             return result
     """
 
-    def __init__(self, config: Optional[WebhookConfig] = None):
+    def __init__(self, config: Optional[WebhookConfig] = None, session_factory: Any = None):
         """
         Initialize webhook gateway.
 
         Args:
             config: Webhook configuration. Uses defaults if not provided.
         """
+        self._session_factory = session_factory
         self.config = config or WebhookConfig()
         self._execution_callbacks: List[Callable] = []
+
+    def _session_context(self) -> Any:
+        from apflow.core.storage.session import session_scope
+        from apflow.core.storage import create_pooled_session
+
+        if self._session_factory is not None:
+            return session_scope(self._session_factory)
+        return create_pooled_session()
 
     def validate_signature(
         self,
@@ -258,11 +267,10 @@ class WebhookGateway:
         logger.info(f"Webhook trigger for task {task_id} (async={async_exec})")
 
         try:
-            from apflow.core.storage import create_pooled_session
             from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
 
             # Verify task exists and check permissions
-            async with create_pooled_session() as db_session:
+            async with self._session_context() as db_session:
                 task_repository = TaskRepository(db_session)
                 task = await task_repository.get_task_by_id(task_id)
 
@@ -318,7 +326,6 @@ class WebhookGateway:
         Returns:
             Execution result
         """
-        from apflow.core.storage import create_pooled_session
         from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
         from apflow.core.execution.task_creator import TaskCreator
         from apflow.core.execution.task_executor import TaskExecutor
@@ -326,7 +333,7 @@ class WebhookGateway:
 
         run_created = False
         try:
-            async with create_pooled_session() as db_session:
+            async with self._session_context() as db_session:
                 task_repository = TaskRepository(db_session)
                 task_executor = TaskExecutor()
 
@@ -443,7 +450,7 @@ class WebhookGateway:
 
             # Try to complete schedule tracking even on failure
             try:
-                async with create_pooled_session() as db_session:
+                async with self._session_context() as db_session:
                     task_repository = TaskRepository(db_session)
                     await task_repository.complete_scheduled_run(
                         task_id=task_id,

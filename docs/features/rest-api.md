@@ -70,6 +70,7 @@ Start with `apflow rest` (default `:8080`).
 |---|---|
 | `GET /` | Service info (name, version, module count, doc links) |
 | `GET /healthz` | Liveness probe (`{"status": "ok"}`) |
+| `GET /readyz` | Database and required capability readiness; returns 503 when unavailable |
 | `GET /modules` | List all module descriptors; response: `{"modules": [...], "count": N}` — each item has `module_id`, `description`, `input_schema`, `output_schema`, `tags` |
 | `GET /modules/{id}` | Single module descriptor |
 | `POST /modules/{id}` | Execute a module with a JSON-object body (the module `inputs`) |
@@ -77,7 +78,8 @@ Start with `apflow rest` (default `:8080`).
 | `GET /docs` | Swagger UI |
 | `POST /webhook/trigger/{task_id}` | Trigger a scheduled task (opt-in via `--webhook`; see [Inbound Webhook](#inbound-webhook)) |
 
-Module ids are dotted (e.g. `POST /modules/task.create`, `POST /modules/schedule.set`).
+Module ids include the registry namespace (e.g. `POST /modules/apflow.task.create`,
+`POST /modules/apflow.schedule.set`).
 On error, the response body is `{"error": {"code": "...", "message": "..."}}` and the HTTP
 status is mapped from the apcore error code (e.g. `MODULE_NOT_FOUND` → 404,
 `SCHEMA_VALIDATION_ERROR` → 422, `MODULE_TIMEOUT` → 504).
@@ -87,7 +89,7 @@ status is mapped from the apcore error code (e.g. `MODULE_NOT_FOUND` → 404,
 curl localhost:8080/modules
 
 # execute a module
-curl -X POST localhost:8080/modules/task.create \
+curl -X POST localhost:8080/modules/apflow.task.create \
   -H 'content-type: application/json' \
   -d '{"name": "build"}'
 ```
@@ -113,11 +115,65 @@ of a single JSON body.
 `{"type": "result", …}` event — so a UI can show live execution progress.
 
 ```bash
-curl -N -X POST localhost:8080/modules/task.execute \
+curl -N -X POST localhost:8080/modules/apflow.task.execute \
   -H 'accept: text/event-stream' \
   -H 'content-type: application/json' \
   -d '{"task_id": "<id>"}'
 ```
+
+---
+
+## Durable Submission and Recovery
+
+Use separate creation, acceptance, and observation calls for work that must
+survive a disconnected client:
+
+1. Call `apflow.task.create` or `apflow.task.create_tree` with an
+   `idempotency_key`. The definitions and receipt commit atomically. Repeating
+   the same caller-scoped key and definition returns the original receipt;
+   changed content returns `IDEMPOTENCY_CONFLICT` (HTTP 409).
+2. If the response is lost, call `apflow.task.receipt` with the key and `shape`
+   (`task` or `tree`). Receipt namespaces also include the registry namespace.
+3. Call `apflow.task.submit` with the root `task_id`. Acceptance is persisted
+   before returning. Repeating this call does not create another execution.
+4. Poll `apflow.task.get` for persisted status, `error_info`, bounded invocation
+   history, and dispatch state. Queries never start work.
+
+REST and the unified server run a dispatcher during their application lifespan.
+For standalone MCP, A2A, or CLI submission, run `apflow dispatcher --db <url>`
+against the same database. Unsubmitted `pending` rows remain drafts for the
+dispatcher. A dispatcher executes the complete tree and its dependency DAG.
+Each operation uses a fresh session bound to the application's selected engine.
+
+`task.execute` and its SSE stream retain request-scoped execution behavior;
+the durable path above is the background execution contract. A stream is an
+observation channel, not an execution receipt or a remote idempotency guarantee.
+
+Expired leases with an interrupted child or unknown delivery state become
+`reconciliation_required`. They are never blindly replayed. After checking the
+remote operation receipt, an administrator can call `apflow.task.reconcile`
+with `replay_safe: true` and an `evidence_ref`. Reconciliation evidence is
+persisted atomically with the new acceptance. Checkpoints alone do not prove
+whether a remote side effect happened.
+
+Cancellation records intent and signals the actual execution runtime. It may
+remain `cancelling` while the executor is still stopping; a late result cannot
+overwrite an acknowledged cancellation. Previously incurred usage is retained.
+
+## Service Identity and Secrets
+
+Under JWT authentication, JSON and SSE calls receive the verified apcore
+identity. Task reads, writes, reuse operations, and dependency references check
+ownership. Body fields cannot replace the verified owner. Administrative access
+requires a configured role. The native apcore ACL and module role restrictions
+also apply to nested executor calls. Trace headers correlate requests but do
+not grant authority or establish operation identity.
+
+Use service-owned connection profiles and credential references for outbound
+calls. Authenticated task creation and reuse reject inline credentials, and
+public results are redacted. Credentials are resolved from environment variables
+into an execution copy, without modifying stored task inputs. Deployment
+configuration is described in [Configuration](../architecture/configuration.md#service-deployment-configuration).
 
 ---
 

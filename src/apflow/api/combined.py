@@ -111,7 +111,12 @@ async def _serve_all_async(
     if webhook:
         from apflow.api.webhook import build_webhook_routes
 
-        extra_routes = build_webhook_routes(secret_key=webhook_secret)
+        factory = getattr(registry, "apflow_session_factory", None)
+        extra_routes = (
+            build_webhook_routes(secret_key=webhook_secret, session_factory=factory)
+            if factory
+            else build_webhook_routes(secret_key=webhook_secret)
+        )
 
     a2a_auth = None
     mcp_auth = None
@@ -178,10 +183,14 @@ async def _serve_all_async(
         if scheduler:
             from apflow.scheduler.internal import InternalScheduler
 
-            scheduler_obj = InternalScheduler()
+            factory = getattr(registry, "apflow_session_factory", None)
+            scheduler_obj = (
+                InternalScheduler(session_factory=factory) if factory else InternalScheduler()
+            )
             await scheduler_obj.start()
         try:
-            await uvicorn.Server(config).serve()
+            async with rest_app.router.lifespan_context(rest_app):
+                await uvicorn.Server(config).serve()
         finally:
             if scheduler_obj is not None:
                 await scheduler_obj.stop()

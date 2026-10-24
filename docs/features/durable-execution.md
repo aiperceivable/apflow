@@ -17,6 +17,40 @@ Enable checkpoint/resume for long-running agent tasks so that failures do not lo
 
 ---
 
+## Retry and Failure Contract
+
+The task engine retries classified transient failures from either exceptions or
+canonical execution envelopes. Validation, authentication, authorization, and
+configuration failures stop immediately. Unclassified task failures and legacy
+error envelopes are not replayed automatically. Standalone `RetryPolicy` retains
+`retry_unknown_errors=True` for compatibility; the task engine explicitly sets
+it to `False`. Standalone callers executing external side effects should also
+disable it and supply classified failure metadata.
+
+HTTP 408, 425, 429, 500, 502, 503, and 504 can be transient, but retry permission
+also requires a safe read method or a trusted profile declaring the operation
+replay-safe. A caller-supplied idempotency header is not proof of remote
+idempotency. `Retry-After` supports delta seconds and HTTP dates; a delay beyond
+the configured maximum suppresses retry rather than ignoring the server's
+minimum wait. A business result such as `verdict=rejected` stays a normal
+completed operation.
+
+`error` remains a backward compatible string. Optional `error_info` version 1
+contains bounded structured fields for category, retryability, delivery state,
+origin, phase, observation time, upstream status/code, and task/attempt/request
+correlation. It contains no raw stack trace, headers, body, or arbitrary exception
+context. Task storage preserves this object separately from business results.
+Invocation history records each attempt's status, reported usage, structured
+failure, and next retry time; task retrieval returns a bounded history.
+
+Checkpoints restore executor state only. They cannot establish whether an
+external operation completed after a lost response. Such operations need a
+stable business operation key and remote receipt lookup before replay. Trace
+identifiers correlate diagnostics; they do not establish idempotency or
+exactly-once execution.
+
+---
+
 ## File Changes
 
 ### New Files

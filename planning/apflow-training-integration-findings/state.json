@@ -1,0 +1,132 @@
+{
+  "feature": "apflow-training-integration-findings",
+  "created": "2026-10-24T00:57:06.148128+00:00",
+  "updated": "2026-10-24T01:39:57.714368+00:00",
+  "status": "completed",
+  "execution_order": [
+    "core-invariants",
+    "bootstrap-identity",
+    "outbound-readiness",
+    "idempotent-submission",
+    "durable-dispatch",
+    "retry-errors",
+    "scope-budget"
+  ],
+  "progress": {
+    "total_tasks": 7,
+    "completed": 7,
+    "in_progress": 0,
+    "pending": 0
+  },
+  "tasks": [
+    {
+      "id": "core-invariants",
+      "file": "tasks/core-invariants.md",
+      "title": "Reference results, archives, and actual cancellation",
+      "dependencies": [],
+      "estimated_hours": 8,
+      "status": "completed",
+      "started_at": "2026-10-24T00:57:06.148128+00:00",
+      "completed_at": "2026-10-24T01:39:57.714368+00:00",
+      "assignee": "implementation-team",
+      "commits": []
+    },
+    {
+      "id": "bootstrap-identity",
+      "file": "tasks/bootstrap-identity.md",
+      "title": "Bootstrap, identity boundaries, and dependency contract",
+      "dependencies": [],
+      "estimated_hours": 8,
+      "status": "completed",
+      "started_at": "2026-10-24T00:57:06.148128+00:00",
+      "completed_at": "2026-10-24T01:39:57.714368+00:00",
+      "assignee": "implementation-team",
+      "commits": []
+    },
+    {
+      "id": "outbound-readiness",
+      "file": "tasks/outbound-readiness.md",
+      "title": "Target policy, credential references, and readiness",
+      "dependencies": [],
+      "estimated_hours": 8,
+      "status": "completed",
+      "started_at": "2026-10-24T00:57:06.148128+00:00",
+      "completed_at": "2026-10-24T01:39:57.714368+00:00",
+      "assignee": "implementation-team",
+      "commits": []
+    },
+    {
+      "id": "idempotent-submission",
+      "file": "tasks/idempotent-submission.md",
+      "title": "Atomic idempotent task submission",
+      "dependencies": [
+        "bootstrap-identity"
+      ],
+      "estimated_hours": 6,
+      "status": "completed",
+      "started_at": "2026-10-24T00:57:06.148128+00:00",
+      "completed_at": "2026-10-24T01:39:57.714368+00:00",
+      "assignee": "implementation-team",
+      "commits": []
+    },
+    {
+      "id": "durable-dispatch",
+      "file": "tasks/durable-dispatch.md",
+      "title": "Persistent detached dispatch and recovery",
+      "dependencies": [
+        "core-invariants",
+        "bootstrap-identity",
+        "idempotent-submission"
+      ],
+      "estimated_hours": 10,
+      "status": "completed",
+      "started_at": "2026-10-24T00:57:06.148128+00:00",
+      "completed_at": "2026-10-24T01:39:57.714368+00:00",
+      "assignee": "implementation-team",
+      "commits": []
+    },
+    {
+      "id": "retry-errors",
+      "file": "tasks/retry-errors.md",
+      "title": "Retry classification and structured errors",
+      "dependencies": [
+        "core-invariants"
+      ],
+      "estimated_hours": 6,
+      "status": "completed",
+      "started_at": "2026-10-24T00:57:06.148128+00:00",
+      "completed_at": "2026-10-24T01:39:57.714368+00:00",
+      "assignee": "implementation-team",
+      "commits": []
+    },
+    {
+      "id": "scope-budget",
+      "file": "tasks/scope-budget.md",
+      "title": "Scope reservations and failed usage accounting",
+      "dependencies": [
+        "core-invariants",
+        "retry-errors"
+      ],
+      "estimated_hours": 8,
+      "status": "completed",
+      "started_at": "2026-10-24T00:57:06.148128+00:00",
+      "completed_at": "2026-10-24T01:39:57.714368+00:00",
+      "assignee": "implementation-team",
+      "commits": []
+    }
+  ],
+  "metadata": {
+    "source_doc": "/Users/tercelyi/Workspace/corefirst/corefirst-world/docs/apflow-training-integration-findings.md",
+    "created_by": "code-forge",
+    "version": "1.0",
+    "verification": {
+      "default_suite": "1761 passed, 10 skipped, 34 warnings",
+      "final_service_boundary_suite": "171 passed",
+      "storage_and_dispatch_supplement": "43 passed",
+      "ruff": "passed",
+      "black": "276 files unchanged",
+      "pyright": "0 errors, 0 warnings",
+      "dependency_check": "No broken requirements found"
+    }
+  }
+}

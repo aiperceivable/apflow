@@ -23,6 +23,7 @@ from typing import Any
 
 from apcore import ModuleAnnotations
 
+from apflow.bridge.access import authorize_task_inputs, execution_context
 from apflow.bridge.errors import invalid_input_error, not_found_error
 from apflow.bridge.task_modules import _coerce_int, _make_schema
 
@@ -63,6 +64,9 @@ class ScheduleSetModule:
         self.output_schema = _make_schema({"type": "object"})
 
     async def execute(self, inputs: dict[str, Any], _context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo, inputs, _context, "schedule.set", module_id=getattr(self, "module_id", None)
+        )
         from apflow.core.storage.sqlalchemy.schedule_calculator import ScheduleCalculator
 
         task_id = inputs.get("task_id", "")
@@ -129,6 +133,9 @@ class ScheduleDueModule:
         )
 
     async def execute(self, inputs: dict[str, Any], _context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo, inputs, _context, "schedule.due", module_id=getattr(self, "module_id", None)
+        )
         tasks = await self._repo.get_due_scheduled_tasks(
             user_id=inputs.get("user_id"),
             limit=_coerce_int(inputs.get("limit"), 100, minimum=1, maximum=1000),
@@ -174,6 +181,13 @@ class ScheduleCompleteModule:
         self.output_schema = _make_schema({"type": "object"})
 
     async def execute(self, inputs: dict[str, Any], _context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo,
+            inputs,
+            _context,
+            "schedule.complete",
+            module_id=getattr(self, "module_id", None),
+        )
         task_id = inputs.get("task_id", "")
         if not task_id:
             raise invalid_input_error("task_id must be non-empty")
@@ -234,6 +248,13 @@ class ScheduleHistoryModule:
         )
 
     async def execute(self, inputs: dict[str, Any], _context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo,
+            inputs,
+            _context,
+            "schedule.history",
+            module_id=getattr(self, "module_id", None),
+        )
         task_id = inputs.get("task_id", "")
         if not task_id:
             raise invalid_input_error("task_id must be non-empty")
@@ -311,6 +332,13 @@ class ScheduleTriggerModule:
         self.output_schema = _make_schema({"type": "object"})
 
     async def execute(self, inputs: dict[str, Any], _context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo,
+            inputs,
+            _context,
+            "schedule.trigger",
+            module_id=getattr(self, "module_id", None),
+        )
         from apflow.scheduler.gateway.webhook import WebhookGateway
 
         task_id = inputs.get("task_id", "")
@@ -323,12 +351,24 @@ class ScheduleTriggerModule:
         if await self._repo.get_task_by_id(task_id) is None:
             raise not_found_error(f"Task '{task_id}' not found")
 
-        gateway = WebhookGateway()
-        return await gateway.trigger_task(
-            task_id,
-            user_id=inputs.get("user_id"),
-            execute_async=bool(inputs.get("async_execution", False)),
+        from apflow.core.storage.session import session_factory_for
+        from sqlalchemy.ext.asyncio import AsyncSession
+        from sqlalchemy.orm import Session
+
+        session = getattr(self._repo.db, "_session", None)
+        factory = (
+            session_factory_for(session) if isinstance(session, (Session, AsyncSession)) else None
         )
+        gateway = WebhookGateway(session_factory=factory) if factory else WebhookGateway()
+        token = execution_context.set(_context)
+        try:
+            return await gateway.trigger_task(
+                task_id,
+                user_id=inputs.get("user_id"),
+                execute_async=bool(inputs.get("async_execution", False)),
+            )
+        finally:
+            execution_context.reset(token)
 
 
 class ScheduleExportICalModule:
@@ -337,7 +377,8 @@ class ScheduleExportICalModule:
     description = "Export scheduled tasks as an iCalendar (.ics) feed."
     annotations = ModuleAnnotations(readonly=True, idempotent=True)
 
-    def __init__(self) -> None:
+    def __init__(self, task_repository: Any = None) -> None:
+        self._repo = task_repository
         self.input_schema = _make_schema(
             {
                 "type": "object",
@@ -361,9 +402,27 @@ class ScheduleExportICalModule:
         )
 
     async def execute(self, inputs: dict[str, Any], _context: Any = None) -> dict[str, Any]:
+        inputs = await authorize_task_inputs(
+            self._repo,
+            inputs,
+            _context,
+            "schedule.export_ical",
+            module_id=getattr(self, "module_id", None),
+        )
         from apflow.scheduler.gateway.ical import ICalExporter
 
         exporter = ICalExporter(base_url=inputs.get("base_url"))
+        if self._repo is not None:
+            tasks = await self._repo.get_scheduled_tasks(
+                user_id=inputs.get("user_id"),
+                schedule_type=inputs.get("schedule_type"),
+                enabled_only=bool(inputs.get("enabled_only", True)),
+                limit=_coerce_int(inputs.get("limit"), 100, minimum=1, maximum=1000),
+            )
+            return {
+                "ical": exporter.generate_ical([task.to_dict() for task in tasks]),
+                "format": "text/calendar",
+            }
         ical = await exporter.export_tasks(
             user_id=inputs.get("user_id"),
             schedule_type=inputs.get("schedule_type"),

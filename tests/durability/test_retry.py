@@ -185,9 +185,9 @@ class TestRetryManager:
         async def fn():
             nonlocal call_count
             call_count += 1
-            raise ValueError("real execution failure")
+            raise RuntimeError("real execution failure")
 
-        with pytest.raises(ValueError, match="real execution failure"):
+        with pytest.raises(RuntimeError, match="real execution failure"):
             await rm.execute_with_retry(
                 "t1",
                 RetryPolicy(max_attempts=3, backoff_base_seconds=0.1, jitter=False),

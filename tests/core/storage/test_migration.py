@@ -54,13 +54,14 @@ class TestMigrationDiscovery:
         # Regression: id must be the filename-derived stem (e.g.
         # "001_add_task_tree_fields"), not the class name — otherwise migrations
         # sort alphabetically by class name (003, 004, 005, 002, 001) instead of
-        # the documented 001-005 execution order.
+        # the documented execution order.
         assert migration_ids == [
             "001_add_task_tree_fields",
             "002_add_scheduling_fields",
             "003_add_distributed_support",
             "004_add_durability_and_governance",
             "005_add_idempotency_key_unique_index",
+            "006_add_service_execution_contracts",
         ], f"Migrations executing out of documented order: {migration_ids}"
 
     def test_add_task_tree_fields_migration_exists(self, migration_manager):
