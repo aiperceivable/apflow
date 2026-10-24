@@ -54,6 +54,110 @@ ModuleCall = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["mcp", "mcp-trace", "mcp-stream", "a2a"])
+async def test_mcp_errors_redact_credentials_and_preserve_error_contract(
+    sdk_app: ApflowApp,
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from apcore.errors import ModuleError
+    from apflow.core.config_manager import get_config_manager
+
+    secret = "synthetic-protocol-error-credential"
+    monkeypatch.setenv("APFLOW_TEST_PROTOCOL_SECRET", secret)
+    configuration = get_config_manager()
+    monkeypatch.setattr(configuration, "_data", dict(configuration._data))
+    configuration.set(
+        "security.credentials", [{"id": "test", "env_var": "APFLOW_TEST_PROTOCOL_SECRET"}]
+    )
+    closed: list[bool] = []
+
+    class FailingModule:
+        description = "Return a typed upstream error."
+        input_schema = output_schema = {"type": "object"}
+
+        async def execute(self, inputs: dict[str, Any], context: Any) -> dict[str, Any]:
+            raise ModuleError(
+                code="UPSTREAM_FAILURE",
+                message=f"Upstream failed: {secret}",
+                details={"diagnostic": secret, "request_id": "request-123"},
+                cause=ValueError(secret),
+                retryable=True,
+                user_fixable=False,
+                ai_guidance=f"Inspect {secret}",
+                suggestion=f"Retry {secret}",
+            )
+
+        async def stream(
+            self, inputs: dict[str, Any], context: Any
+        ) -> AsyncIterator[dict[str, Any]]:
+            try:
+                yield {"progress": 1}
+                await self.execute(inputs, context)
+            finally:
+                closed.append(True)
+
+    sdk_app.registry.register("apflow.failure_probe", FailingModule())
+    with pytest.raises(ModuleError) as failure:
+        await PublicExecutor(Executor.from_registry(sdk_app.registry)).call_async(
+            "apflow.failure_probe", {}
+        )
+    assert failure.value.code == "UPSTREAM_FAILURE"
+    assert failure.value.retryable is True and failure.value.user_fixable is False
+    assert failure.value.details["request_id"] == "request-123"
+    assert secret not in json.dumps(failure.value.to_dict())
+    if protocol == "a2a":
+        from apcore_a2a import async_serve
+
+        server = await async_serve(PublicExecutor(Executor.from_registry(sdk_app.registry)))
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=server), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                "/",
+                headers={"A2A-Version": "1.0"},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": "failure",
+                    "method": "SendMessage",
+                    "params": {
+                        "message": {
+                            "messageId": "failure",
+                            "role": "ROLE_USER",
+                            "parts": [{"data": {}}],
+                            "metadata": {"skillId": "apflow.failure_probe"},
+                        }
+                    },
+                },
+            )
+        assert response.status_code == 200
+        assert "TASK_STATE_FAILED" in response.text
+        serialized = response.text
+    else:
+
+        async def progress(progress: float, total: float | None, message: str | None) -> None:
+            pass
+
+        async with _mcp_client(sdk_app, trace=protocol == "mcp-trace") as client:
+            result = await client.call_tool(
+                "apflow.failure_probe",
+                {},
+                progress_callback=progress if protocol == "mcp-stream" else None,
+            )
+        assert result.isError
+        serialized = result.model_dump_json()
+        if protocol == "mcp-stream":
+            assert closed == [True]
+    if protocol != "a2a":
+        assert "Upstream failed" in serialized
+    assert secret not in serialized
+    assert secret not in str([record.__dict__ for record in caplog.records])
+    assert secret not in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
 async def test_public_protocol_stream_closes_upstream_immediately() -> None:
     closed: list[bool] = []
 

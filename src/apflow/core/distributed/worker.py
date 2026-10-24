@@ -26,6 +26,7 @@ from apflow.core.storage.sqlalchemy.models import (
     WorkflowRun,
 )
 from apflow.logger import get_logger
+from apflow.core.utils.credentials import redact_public_data
 
 logger = get_logger(__name__)
 
@@ -85,7 +86,7 @@ class WorkerRuntime:
                 pass
 
     async def shutdown(self) -> None:
-        """Graceful shutdown: cancel tasks, release leases, deregister."""
+        """Cancel tasks, persist recovery state, and relinquish ownership."""
         self._shutdown_event.set()
 
         for task_id, task in list(self._running_tasks.items()):
@@ -96,7 +97,7 @@ class WorkerRuntime:
             await asyncio.gather(*self._running_tasks.values(), return_exceptions=True)
 
         for task_id, token in list(self._active_leases.items()):
-            self._lease_manager.release_lease(task_id, token)
+            self._lease_manager.recover_lease(task_id, token)
 
         self._node_registry.deregister_node(self._node_id)
         logger.info("Worker %s shut down gracefully", self._node_id)
@@ -296,24 +297,23 @@ class WorkerRuntime:
                     return
                 outcome = result.get("status", "completed")
                 if outcome in {"cancelled", "cancelling"}:
-                    self._finalize_task(
-                        task_id, token, "cancelled" if outcome == "cancelled" else "in_progress"
-                    )
+                    if outcome == "cancelled":
+                        self._finalize_task(task_id, token, "cancelled")
+                    else:
+                        self._lease_manager.recover_lease(task_id, token)
                     return
                 if outcome != "completed":
                     logger.warning(
                         "Task %s returned nonterminal outcome %s; releasing lease", task_id, outcome
                     )
-                    self._lease_manager.release_lease(task_id, token)
+                    self._lease_manager.recover_lease(task_id, token)
                     return
                 if self._report_completion(task_id, token, result) and not is_cached:
                     self._idempotency.store_result(task_id, attempt_id, key, result, "completed")
             except asyncio.CancelledError:
                 logger.warning("Task %s cancelled", task_id)
-                # Release the lease here: the finally block pops _active_leases, so
-                # shutdown()'s release loop would otherwise miss this still-held lease
-                # and leave the DB row to linger until expiry.
-                self._lease_manager.release_lease(task_id, token)
+                # Cancellation cannot prove whether external side effects completed.
+                self._lease_manager.recover_lease(task_id, token)
                 raise
             except Exception as exc:
                 self._report_failure(task_id, attempt_id, token, str(exc), key)
@@ -405,6 +405,7 @@ class WorkerRuntime:
         self, task_id: str, attempt_id: int, lease_token: str, error: str, key: str
     ) -> None:
         """Mark task as failed, release lease, store failure, and emit event."""
+        error = str(redact_public_data(error))
         if not self._finalize_task(task_id, lease_token, "failed"):
             return
         self._idempotency.store_failure(

@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator
 from typing import Any
+import asyncio
 
 import pytest
 from sqlalchemy import create_engine
@@ -220,3 +221,199 @@ async def test_worker_uses_persisted_identity_not_task_inputs(
         session.expunge(task)
     await worker._execute_task(task)
     assert seen == [("alice", ["operator"])]
+
+
+@pytest.mark.asyncio
+async def test_worker_shutdown_preserves_real_run_for_reconciliation(
+    worker_sessions: sessionmaker[Session],
+) -> None:
+    from apflow.core.base import BaseTask
+    from apflow.core.execution.task_executor import TaskExecutor
+    from apflow.core.extensions import get_registry
+    from apflow.core.storage.sqlalchemy.models import ExecutionAttempt, TaskLease, WorkflowRun
+
+    started = asyncio.Event()
+    calls: list[str] = []
+
+    class BlockingExecutor(BaseTask):
+        id = "worker_shutdown_probe"
+        name = "Shutdown probe"
+        description = "Wait after recording a real invocation."
+        result_format = "envelope"
+
+        async def execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
+            calls.append("started")
+            started.set()
+            await asyncio.Event().wait()
+            return {"result": None}
+
+    async def execute(task: TaskModel) -> dict[str, Any]:
+        with worker_sessions() as session:
+            return await TaskExecutor().execute_task_by_id(task.id, db_session=session)
+
+    registry = get_registry()
+    registry.register(BlockingExecutor(), executor_class=BlockingExecutor)
+    worker = _worker(worker_sessions, execute)
+    try:
+        with worker_sessions() as session:
+            task = TaskModel(
+                id="shutdown-root", name="Root", params={"executor_id": BlockingExecutor.id}
+            )
+            session.add(task)
+            session.commit()
+            session.expunge(task)
+        active = asyncio.create_task(worker._execute_task(task))
+        worker._running_tasks[task.id] = active
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await worker.shutdown()
+        assert active.cancelled()
+        with worker_sessions() as session:
+            run = session.get(WorkflowRun, task.id)
+            assert run is not None and run.status == "reconciliation_required"
+            stored = session.get(TaskModel, task.id)
+            assert stored is not None and stored.status == "in_progress"
+            invocation = session.query(ExecutionAttempt).filter_by(run_id=run.id).one()
+            assert invocation.status == "unknown"
+            assert session.get(TaskLease, task.id) is None
+        replacement = _worker(worker_sessions, execute)
+        assert replacement._find_executable_tasks() == []
+        assert replacement._lease_manager.cleanup_expired_leases() == []
+        assert calls == ["started"]
+    finally:
+        if worker._running_tasks:
+            await worker.shutdown()
+        registry.unregister(BlockingExecutor.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("started", [False, True])
+@pytest.mark.parametrize("matching_token", [False, True])
+async def test_recover_lease_preserves_progress_and_fences_stale_owners(
+    worker_sessions: sessionmaker[Session],
+    started: bool,
+    matching_token: bool,
+) -> None:
+    from datetime import datetime, timezone
+    from apflow.core.execution.runs import RunService
+    from apflow.core.storage.sqlalchemy.models import (
+        BudgetAccount,
+        BudgetReservation,
+        ExecutionAttempt,
+        TaskLease,
+        WorkflowRun,
+    )
+
+    config = DistributedConfig(node_id="local")
+    manager = LeaseManager(worker_sessions, config)
+    with worker_sessions() as session:
+        task = TaskModel(id="recover-root", name="Root")
+        session.add(task)
+        session.commit()
+        await RunService(session).ensure_run(task.id)
+    lease = manager.acquire_lease("recover-root", "local")
+    assert lease is not None
+    token = lease.lease_token
+    if started:
+        with worker_sessions() as session:
+            await RunService(session).start_run("recover-root")
+            session.add_all(
+                [
+                    BudgetAccount(scope_id="scope", limit_tokens=10, reserved_tokens=5),
+                    BudgetReservation(
+                        id="invocation",
+                        scope_id="scope",
+                        task_id="recover-root",
+                        state="reserved",
+                        reserved_tokens=5,
+                    ),
+                    ExecutionAttempt(
+                        id="invocation",
+                        task_id="recover-root",
+                        run_id="recover-root",
+                        attempt_id=0,
+                        attempt_number=1,
+                        status="running",
+                        started_at=datetime.now(timezone.utc),
+                    ),
+                ]
+            )
+            session.commit()
+    supplied = token if matching_token else "stale-owner"
+    assert manager.recover_lease("recover-root", supplied) is matching_token
+    assert manager.recover_lease("recover-root", supplied) is False
+    with worker_sessions() as session:
+        run = session.get(WorkflowRun, "recover-root")
+        assert run is not None
+        expected = (
+            "reconciliation_required"
+            if matching_token and started
+            else "running" if started else "accepted"
+        )
+        assert run.status == expected
+        assert (session.get(TaskLease, "recover-root") is None) is matching_token
+        if started:
+            account = session.get(BudgetAccount, "scope")
+            assert account is not None
+            assert account.unknown_tokens == (5 if matching_token else 0)
+            assert account.reserved_tokens == (0 if matching_token else 5)
+        elif matching_token:
+            assert manager.acquire_lease("recover-root", "replacement") is not None
+
+
+def test_recover_lease_rolls_back_ownership_when_reconciliation_fails(
+    worker_sessions: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from apflow.core.storage.sqlalchemy.models import TaskLease, WorkflowRun
+
+    manager = LeaseManager(worker_sessions, DistributedConfig(node_id="local"))
+    with worker_sessions() as session:
+        session.add(TaskModel(id="root", name="Root"))
+        session.commit()
+    lease = manager.acquire_lease("root", "local")
+    assert lease is not None
+
+    def fail(*arguments: Any) -> bool:
+        raise RuntimeError("Recovery storage failure")
+
+    monkeypatch.setattr(manager, "_reconcile_run", fail)
+    with pytest.raises(RuntimeError, match="Recovery storage failure"):
+        manager.recover_lease("root", lease.lease_token)
+    with worker_sessions() as session:
+        stored = session.get(TaskLease, "root")
+        assert stored is not None and stored.lease_token == lease.lease_token
+        assert session.get(WorkflowRun, "root") is None
+
+
+@pytest.mark.asyncio
+async def test_worker_failure_redacts_cached_error_and_events(
+    worker_sessions: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from apflow.core.config_manager import get_config_manager
+    from apflow.core.storage.sqlalchemy.models import TaskEvent
+
+    secret = "synthetic-worker-failure-secret"
+    monkeypatch.setenv("APFLOW_TEST_WORKER_SECRET", secret)
+    configuration = get_config_manager()
+    monkeypatch.setattr(configuration, "_data", dict(configuration._data))
+    configuration.set(
+        "security.credentials", [{"id": "test", "env_var": "APFLOW_TEST_WORKER_SECRET"}]
+    )
+
+    async def execute(task: TaskModel) -> dict[str, Any]:
+        raise RuntimeError(f"Upstream failed: {secret}")
+
+    worker = _worker(worker_sessions, execute)
+    with worker_sessions() as session:
+        task = TaskModel(id="failure-root", name="Root")
+        session.add(task)
+        session.commit()
+        session.expunge(task)
+    await worker._execute_task(task)
+    with worker_sessions() as session:
+        cached = session.query(ExecutionIdempotency).filter_by(task_id=task.id).one()
+        assert "Upstream failed" in str(cached.result)
+        assert secret not in str(cached.result)
+        events = session.query(TaskEvent).filter_by(task_id=task.id).all()
+        assert events and all(secret not in str(event.details) for event in events)

@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock
 from pathlib import Path
+import asyncio
+from typing import Any
 
 import pytest
 
@@ -103,3 +105,69 @@ def test_missing_required_capability_refuses_new_admission(
             assert response.json()["error"]["code"] == "SERVICE_UNAVAILABLE"
     finally:
         application.session.close()
+
+
+@pytest.mark.parametrize("operation", ["task.execute", "schedule.trigger", "readiness_probe"])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_unready_service_blocks_new_execution_before_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    reset_storage_singleton: None,
+    operation: str,
+    streaming: bool,
+) -> None:
+    from starlette.testclient import TestClient
+    from apflow.app import create_app
+    from apflow.api.rest import build_rest_app
+    from apflow.core.base import BaseTask
+    from apflow.core.config_manager import get_config_manager
+    from apflow.core.extensions import get_registry
+
+    calls: list[bool] = []
+
+    class Probe(BaseTask):
+        id = "readiness_probe"
+        name = "Readiness probe"
+        description = "Record execution without external side effects."
+        result_format = "envelope"
+
+        async def execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
+            calls.append(True)
+            return {"result": {"executed": True}}
+
+    configuration = get_config_manager()
+    monkeypatch.setattr(configuration, "_data", dict(configuration._data))
+    configuration.set("service.required_modules", [])
+    registry = get_registry()
+    registry.register(Probe(), executor_class=Probe)
+    application = create_app(
+        connection_string=f"sqlite:///{tmp_path / 'execution.db'}", namespace="service"
+    )
+    try:
+        task = asyncio.run(
+            application.task_repository.create_task(name="Draft", params={"executor_id": Probe.id})
+        )
+        with TestClient(build_rest_app(application.registry)) as client:
+            configuration.set("service.required_modules", ["service.missing_plugin"])
+            assert client.get("/readyz").status_code == 503
+            response = client.post(
+                f"/modules/service.{operation}",
+                json={"task_id": task.id} if operation != Probe.id else {},
+                headers={"Accept": "text/event-stream"} if streaming else {},
+            )
+            assert calls == []
+            assert "SERVICE_UNAVAILABLE" in response.text
+            if streaming:
+                assert "event: error" in response.text and "event: done" in response.text
+            else:
+                assert response.status_code == 503
+            assert (
+                client.post("/modules/service.task.get", json={"task_id": task.id}).status_code
+                == 200
+            )
+            cancelled = client.post("/modules/service.task.cancel", json={"task_ids": [task.id]})
+            assert cancelled.status_code == 200
+    finally:
+        application.session.close()
+        application.session.get_bind().engine.dispose()
+        registry.unregister(Probe.id)

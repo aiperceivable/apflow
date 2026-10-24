@@ -46,6 +46,7 @@ from apflow.core.execution.context import current_invocation_id
 from apflow.core.execution.result_protocol import ExecutorResult, normalize_executor_result
 from apflow.core.execution.error_info import ErrorInfo, execution_error_info
 from apflow.logger import get_logger
+from apflow.core.utils.credentials import log_public_exception, redact_public_data
 
 logger = get_logger(__name__)
 
@@ -215,7 +216,11 @@ class TaskManager:
         try:
             return await executor.cancel() or {}
         except Exception as exc:
-            logger.warning("Executor cancellation failed for task %s: %s", task_id, exc)
+            logger.warning(
+                "Executor cancellation failed for task %s: %s",
+                task_id,
+                redact_public_data(str(exc)),
+            )
             return {}
 
     async def _record_cancellation_usage(
@@ -234,7 +239,9 @@ class TaskManager:
                 await AttemptRecorder(self.db).record_partial(task_id, generation, normalized_usage)
             return normalized_usage
         except ValidationError as exc:
-            logger.warning("Task %s: invalid cancellation usage: %s", task_id, exc)
+            logger.warning(
+                "Task %s: invalid cancellation usage: %s", task_id, redact_public_data(str(exc))
+            )
             return None
 
     async def _confirm_requested_cancellation(
@@ -319,7 +326,9 @@ class TaskManager:
             except Exception as e:
                 # Call on_tree_failed hook
                 if root_task is not None:
-                    await self._call_task_tree_hooks("on_tree_failed", root_task, str(e))
+                    await self._call_task_tree_hooks(
+                        "on_tree_failed", root_task, str(redact_public_data(str(e)))
+                    )
                 raise
         finally:
             # Clear hook context
@@ -407,16 +416,22 @@ class TaskManager:
                     )
 
             except Exception as e:
-                logger.error(f"Error in distribute_task_tree_with_streaming: {str(e)}")
+                logger.error(
+                    f"Error in distribute_task_tree_with_streaming: {str(redact_public_data(str(e)))}"
+                )
                 # Use saved task ID to avoid accessing task after session rollback
                 try:
                     task_tree_root_id = root_task.id if root_task is not None else root_task_id
                 except Exception:
                     task_tree_root_id = root_task_id
-                self.streaming_callbacks.task_failed(task_tree_root_id, str(e))
+                self.streaming_callbacks.task_failed(
+                    task_tree_root_id, str(redact_public_data(str(e)))
+                )
                 # Call on_tree_failed hook
                 if root_task is not None:
-                    await self._call_task_tree_hooks("on_tree_failed", root_task, str(e))
+                    await self._call_task_tree_hooks(
+                        "on_tree_failed", root_task, str(redact_public_data(str(e)))
+                    )
                 raise
         finally:
             # Clear hook context
@@ -513,15 +528,12 @@ class TaskManager:
         except Exception as e:
             task_id_str = str(node_task_id) if node_task_id else "unknown"
             # Log business errors without stack trace, unexpected errors with stack trace
-            if isinstance(e, BusinessError):
-                logger.error(
-                    f"Business error in _execute_task_tree_recursive for task {task_id_str}: {str(e)}"
-                )
-            else:
-                logger.error(
-                    f"Error in _execute_task_tree_recursive for task {task_id_str}: {str(e)}",
-                    exc_info=True,
-                )
+            log_public_exception(
+                logger,
+                f"Error in _execute_task_tree_recursive for task {task_id_str}",
+                e,
+                include_traceback=not isinstance(e, BusinessError),
+            )
 
             # Update task status if possible
             try:
@@ -531,7 +543,7 @@ class TaskManager:
                         expected_statuses=["pending", "in_progress"],
                         expected_attempt_id=node.task.attempt_id,
                         status="failed",
-                        error=str(e),
+                        error=str(redact_public_data(str(e))),
                         error_info=execution_error_info(
                             e,
                             task_id=node_task_id,
@@ -541,7 +553,9 @@ class TaskManager:
                         completed_at=datetime.now(timezone.utc),
                     )
             except Exception as db_error:
-                logger.error(f"Error updating task status in database: {str(db_error)}")
+                logger.error(
+                    f"Error updating task status in database: {redact_public_data(str(db_error))}"
+                )
             raise
 
     def _group_children_by_priority_for_execution(
@@ -1016,7 +1030,9 @@ class TaskManager:
                 try:
                     await self._checkpoint_manager.delete_checkpoints(task_id)
                 except Exception as e:
-                    logger.debug(f"Task {task_id}: checkpoint cleanup: {e}")
+                    logger.debug(
+                        f"Task {task_id}: checkpoint cleanup: {redact_public_data(str(e))}"
+                    )
 
             # Refresh and notify
             if not self.is_async:
@@ -1042,13 +1058,14 @@ class TaskManager:
                     delay = 0.1 * (2**attempt)  # 0.1s, 0.2s
                     logger.warning(
                         f"execute_after_task failed for {task_id} "
-                        f"(attempt {attempt + 1}/{max_retries}), retrying in {delay}s: {e}"
+                        f"(attempt {attempt + 1}/{max_retries}), retrying in {delay}s: {redact_public_data(str(e))}"
                     )
                     await asyncio.sleep(delay)
                 else:
-                    logger.error(
-                        f"execute_after_task failed for {task_id} after {max_retries} attempts: {e}",
-                        exc_info=True,
+                    log_public_exception(
+                        logger,
+                        f"execute_after_task failed for {task_id} after {max_retries} attempts",
+                        e,
                     )
 
     async def _are_dependencies_satisfied(self, task: TaskModel) -> bool:
@@ -1260,7 +1277,9 @@ class TaskManager:
                     return await self._execute_attempt(task, attempt_inputs)
 
                 async def _on_retry(tid: str, attempt: int, exc: Exception):
-                    logger.warning(f"Task {tid} retry {attempt + 1}: {exc}")
+                    logger.warning(
+                        f"Task {tid} retry {attempt + 1}: {redact_public_data(str(exc))}"
+                    )
                     if self._checkpoint_manager:
                         # Save checkpoint on retry if executor supports it
                         async with self._executor_lock:
@@ -1316,10 +1335,12 @@ class TaskManager:
                 raise
         except Exception as e:
             # Log business errors without stack trace, unexpected errors with stack trace
-            if isinstance(e, BusinessError):
-                logger.error(f"Business error executing task {task_id}: {str(e)}")
-            else:
-                logger.error(f"Error executing task {task_id}: {str(e)}", exc_info=True)
+            log_public_exception(
+                logger,
+                f"Error executing task {task_id}",
+                e,
+                include_traceback=not isinstance(e, BusinessError),
+            )
 
             # --- Durability: Record failure on circuit breaker ---
             self._record_breaker_failure(task, e)
@@ -1344,22 +1365,24 @@ class TaskManager:
                             expected_statuses=["in_progress"],
                             expected_attempt_id=execution_attempt_id,
                             status="failed",
-                            error=str(e),
+                            error=str(redact_public_data(str(e))),
                             error_info=execution_error_info(
                                 e, task_id=task_id, attempt_id=task.attempt_id
                             ),
                             completed_at=datetime.now(timezone.utc),
                         )
                 except Exception as update_error:
-                    logger.warning(f"Failed to update task status for {task_id}: {update_error}")
+                    logger.warning(
+                        f"Failed to update task status for {task_id}: {redact_public_data(str(update_error))}"
+                    )
 
             # Notify streaming callback
             if self.stream and task_id:
                 try:
-                    self.streaming_callbacks.task_failed(task_id, str(e))
+                    self.streaming_callbacks.task_failed(task_id, str(redact_public_data(str(e))))
                 except Exception as callback_error:
                     logger.warning(
-                        f"Failed to call task_failed callback for {task_id}: {callback_error}"
+                        f"Failed to call task_failed callback for {task_id}: {redact_public_data(str(callback_error))}"
                     )
         finally:
             if self._execution_attempt_ids.get(task_id) == execution_attempt_id:
@@ -1397,7 +1420,7 @@ class TaskManager:
             except Exception as e:
                 # Log error but don't fail the task execution
                 logger.warning(
-                    f"Pre-hook {hook.__name__} failed for task {task.id}: {str(e)}. "
+                    f"Pre-hook {hook.__name__} failed for task {task.id}: {str(redact_public_data(str(e)))}. "
                     f"Continuing with task execution."
                 )
 
@@ -1427,7 +1450,7 @@ class TaskManager:
             except Exception as e:
                 # Log error but don't fail the task execution
                 logger.warning(
-                    f"Post-hook {hook.__name__} failed for task {task.id}: {str(e)}. "
+                    f"Post-hook {hook.__name__} failed for task {task.id}: {str(redact_public_data(str(e)))}. "
                     f"Task execution already completed."
                 )
 
@@ -1508,7 +1531,7 @@ class TaskManager:
                 # Log error but don't fail the task tree execution
                 logger.warning(
                     f"Task tree hook '{hook_type}' {hook.__name__ if hasattr(hook, '__name__') else str(hook)} "
-                    f"failed for root task {root_task.id}: {str(e)}. Continuing with task tree execution."
+                    f"failed for root task {root_task.id}: {str(redact_public_data(str(e)))}. Continuing with task tree execution."
                 )
 
     async def execute_after_task(self, completed_task: TaskModel):
@@ -1583,10 +1606,7 @@ class TaskManager:
                 )
         except Exception as e:
             # Post-hook failures must not prevent dependent task triggering
-            logger.error(
-                f"Post-hook phase failed for {completed_task.id}: {str(e)}",
-                exc_info=True,
-            )
+            log_public_exception(logger, f"Post-hook phase failed for {completed_task.id}", e)
 
         # --- Phase 2: Dependency check & trigger (errors propagate for retry) ---
         logger.info(
@@ -1631,22 +1651,19 @@ class TaskManager:
                         await self._execute_single_task(task, use_callback=True)
                     except Exception as e:
                         # Log business errors without stack trace, unexpected errors with stack trace
-                        if isinstance(e, BusinessError):
-                            logger.error(
-                                f"❌ Business error executing dependent task {task.id}: {str(e)}"
-                            )
-                        else:
-                            logger.error(
-                                f"❌ Failed to execute dependent task {task.id}: {str(e)}",
-                                exc_info=True,
-                            )
+                        log_public_exception(
+                            logger,
+                            f"Failed to execute dependent task {task.id}",
+                            e,
+                            include_traceback=not isinstance(e, BusinessError),
+                        )
                         # Update task status using repository
                         await self.task_repository.transition_task(
                             task_id=task.id,
                             expected_statuses=["pending", "in_progress"],
                             expected_attempt_id=task.attempt_id,
                             status="failed",
-                            error=str(e),
+                            error=str(redact_public_data(str(e))),
                             error_info=execution_error_info(
                                 e,
                                 task_id=str(task.id),
@@ -1773,7 +1790,11 @@ class TaskManager:
                     with Session(bind=self.db.get_bind()) as session:
                         await inspect_request(session)
             except Exception as exc:
-                logger.error("Cannot inspect cancellation for task %s: %s", task_id, exc)
+                logger.error(
+                    "Cannot inspect cancellation for task %s: %s",
+                    task_id,
+                    redact_public_data(str(exc)),
+                )
                 return
 
     async def _execute_attempt(self, task: TaskModel, inputs: Dict[str, Any]) -> ExecutorResult:
@@ -1864,8 +1885,10 @@ class TaskManager:
             logger.debug(f"Task {task.id} params: {params}, executor_id from params: {executor_id}")
 
         except ExecutorError as e:
-            error_msg = f"{str(e)}"
-            logger.error(f"Executor loading error for task {task.id}: {str(e)}")
+            error_msg = f"{str(redact_public_data(str(e)))}"
+            logger.error(
+                f"Executor loading error for task {task.id}: {str(redact_public_data(str(e)))}"
+            )
             result = {
                 "result": None,
                 "error": error_msg,
@@ -1987,7 +2010,7 @@ class TaskManager:
                     demo_result = executor.get_demo_result(task, inputs)
                 except Exception as e:
                     logger.warning(
-                        f"get_demo_result() failed for executor {executor_id}: {str(e)}. Using default demo data."
+                        f"get_demo_result() failed for executor {executor_id}: {str(redact_public_data(str(e)))}. Using default demo data."
                     )
 
             # Use default demo result if executor doesn't provide one
@@ -2053,11 +2076,11 @@ class TaskManager:
                                     )
                             except Exception as e:
                                 logger.warning(
-                                    f"Post_hook failed for executor {executor_id}: {str(e)}"
+                                    f"Post_hook failed for executor {executor_id}: {str(redact_public_data(str(e)))}"
                                 )
                 except Exception as e:
                     logger.warning(
-                        f"Pre_hook failed for executor {executor_id}: {str(e)}. Continuing with execution."
+                        f"Pre_hook failed for executor {executor_id}: {str(redact_public_data(str(e)))}. Continuing with execution."
                     )
 
         if hook_result is not None:
@@ -2106,7 +2129,9 @@ class TaskManager:
                         else:
                             await asyncio.to_thread(post_hook, executor, task, inputs, result)
                     except Exception as e:
-                        logger.warning(f"Post_hook failed for executor {executor_id}: {str(e)}")
+                        logger.warning(
+                            f"Post_hook failed for executor {executor_id}: {str(redact_public_data(str(e)))}"
+                        )
 
             # Explicitly clear task context to prevent memory leaks
             # This is important for long-running executors and memory management
@@ -2124,15 +2149,12 @@ class TaskManager:
             return normalize_executor_result(result, executor.result_format)
         except Exception as e:
             # Log business errors without stack trace, unexpected errors with stack trace
-            if isinstance(e, BusinessError):
-                logger.error(
-                    f"Business error executing task {task.id} with executor {executor.__class__.__name__}: {e}"
-                )
-            else:
-                logger.error(
-                    f"Error executing task {task.id} with executor {executor.__class__.__name__}: {e}",
-                    exc_info=True,
-                )
+            log_public_exception(
+                logger,
+                f"Error executing task {task.id} with executor {executor.__class__.__name__}",
+                e,
+                include_traceback=not isinstance(e, BusinessError),
+            )
             # Note: the executor reference and its task context are deliberately
             # NOT cleared here. A retry callback (see _execute_single_task's
             # _on_retry) needs to read this same instance via get_checkpoint()

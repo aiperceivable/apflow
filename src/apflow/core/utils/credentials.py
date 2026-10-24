@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import logging
+import traceback
 import os
 import posixpath
 import re
@@ -247,3 +249,11 @@ def resolve_outbound_inputs(
     resolved[url_field] = url
     _inject_credential(resolved, profile)
     return resolved
+
+
+def log_public_exception(
+    logger: logging.Logger, message: str, error: BaseException, *, include_traceback: bool = True
+) -> None:
+    """Redact a complete exception chain before handing diagnostics to log handlers."""
+    diagnostic = "".join(traceback.format_exception(error)) if include_traceback else str(error)
+    logger.error("%s: %s", message, redact_public_data(diagnostic))

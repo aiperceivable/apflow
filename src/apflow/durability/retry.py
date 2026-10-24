@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable, Optional, TypeVar
 
 from apflow.core.execution.error_info import ErrorInfo, execution_error_info, validate_error_info
 from apflow.core.execution.errors import BusinessError, NetworkError
+from apflow.core.utils.credentials import redact_public_data
 from apflow.logger import get_logger
 
 logger = get_logger(__name__)
@@ -130,7 +131,7 @@ class RetryManager:
             except Exception as e:
                 last_exception = e
                 logger.warning(
-                    f"Task {task_id} attempt {attempt + 1}/{policy.max_attempts} failed: {e}"
+                    f"Task {task_id} attempt {attempt + 1}/{policy.max_attempts} failed: {redact_public_data(str(e))}"
                 )
 
                 if attempt >= policy.max_attempts - 1 or not _can_retry(e, policy):
@@ -160,7 +161,11 @@ class RetryManager:
             try:
                 await on_retry(task_id, attempt, error)
             except Exception as callback_error:
-                logger.warning("Task %s: on_retry callback failed: %s", task_id, callback_error)
+                logger.warning(
+                    "Task %s: on_retry callback failed: %s",
+                    task_id,
+                    redact_public_data(str(callback_error)),
+                )
         logger.debug("Task %s retrying in %.2fs", task_id, delay)
         await _wait_or_cancel(delay, cancellation_check)
 

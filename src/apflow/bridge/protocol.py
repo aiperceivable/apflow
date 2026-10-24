@@ -4,6 +4,8 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from apcore import Context, Executor, Registry, redact_sensitive
+from apcore.errors import ModuleError
+from apcore.middleware import Middleware
 from apcore.pipeline import ExecutionStrategy, PipelineTrace
 from apcore_mcp import APCoreMCP
 
@@ -34,6 +36,37 @@ _ACCOUNTING_COUNTERS = _USAGE_COUNTERS | frozenset(
 )
 
 
+def _public_error(error: ModuleError) -> ModuleError:
+    """Detach transport diagnostics from raw exceptions while preserving error metadata."""
+    payload = redact_public_data(ModuleError.to_dict(error))
+    cause = payload.pop("cause", None)
+    timestamp = payload.pop("timestamp", error.timestamp)
+    public = ModuleError(**payload, cause=Exception(cause) if cause is not None else None)
+    public.timestamp = timestamp
+    return public
+
+
+class _PublicErrorMiddleware(Middleware):
+    """Sanitize diagnostics before the SDK's reverse-order error observers run."""
+
+    def __init__(self) -> None:
+        super().__init__(priority=0)
+
+    def on_error(
+        self, module_id: str, inputs: dict[str, Any], error: Exception, context: Any
+    ) -> None:
+        if isinstance(error, ModuleError):
+            public = _public_error(error)
+            # Control metadata and typed causes still belong to SDK middleware.
+            error.message = public.message
+            error.details = public.details
+            error.ai_guidance = public.ai_guidance
+            error.suggestion = public.suggestion
+            error.args = public.args
+        else:
+            error.args = tuple(redact_public_data(error.args))
+
+
 def _restore_accounting(source: Any, target: Any) -> Any:
     """Retain SDK name masking except for already sanitized integer accounting data."""
     if isinstance(source, dict) and isinstance(target, dict):
@@ -59,6 +92,10 @@ class PublicExecutor:
 
     def __init__(self, executor: Executor) -> None:
         self._executor = executor
+        if isinstance(executor, Executor) and not any(
+            isinstance(middleware, _PublicErrorMiddleware) for middleware in executor.middlewares
+        ):
+            executor.use(_PublicErrorMiddleware())
 
     @property
     def registry(self) -> Registry:
@@ -81,7 +118,10 @@ class PublicExecutor:
         context: Context | None = None,
         version_hint: str | None = None,
     ) -> dict[str, Any]:
-        result = await self._executor.call_async(module_id, inputs, context, version_hint)
+        try:
+            result = await self._executor.call_async(module_id, inputs, context, version_hint)
+        except ModuleError as error:
+            raise _public_error(error) from None
         return self._redact(module_id, result)
 
     async def stream(
@@ -95,6 +135,8 @@ class PublicExecutor:
         try:
             async for chunk in source:
                 yield self._redact(module_id, chunk)
+        except ModuleError as error:
+            raise _public_error(error) from None
         finally:
             close = getattr(source, "aclose", None)
             if close is not None:
@@ -109,9 +151,12 @@ class PublicExecutor:
         version_hint: str | None = None,
         strategy: ExecutionStrategy | str | None = None,
     ) -> tuple[dict[str, Any], PipelineTrace]:
-        output, trace = await self._executor.call_async_with_trace(
-            module_id, inputs, context, version_hint=version_hint, strategy=strategy
-        )
+        try:
+            output, trace = await self._executor.call_async_with_trace(
+                module_id, inputs, context, version_hint=version_hint, strategy=strategy
+            )
+        except ModuleError as error:
+            raise _public_error(error) from None
         return self._redact(module_id, output), trace
 
 

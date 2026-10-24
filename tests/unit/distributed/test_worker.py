@@ -603,7 +603,7 @@ class TestFinalizeLeaseOwnership:
 
 class TestExecuteTaskCancellation:
     @pytest.mark.asyncio
-    async def test_cancellation_releases_lease(self) -> None:
+    async def test_cancellation_recovers_lease(self) -> None:
         lease_mgr = MagicMock()
         lease_mgr.acquire_lease.return_value = _make_lease()
         idem = MagicMock()
@@ -618,7 +618,7 @@ class TestExecuteTaskCancellation:
         with pytest.raises(asyncio.CancelledError):
             await worker._execute_task(_make_task_model())
 
-        lease_mgr.release_lease.assert_called_once_with("task-1", "abc123")
+        lease_mgr.recover_lease.assert_called_once_with("task-1", "abc123")
 
 
 class TestPollSkipsInFlight:

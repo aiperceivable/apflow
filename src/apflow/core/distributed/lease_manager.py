@@ -279,6 +279,39 @@ class LeaseManager:
             emit_task_event(self._session_factory, task_id, "task_reconciliation_required")
         return cleaned
 
+    def recover_lease(self, task_id: str, lease_token: str) -> bool:
+        """Relinquish a matching owner and preserve its recovery state atomically."""
+        if not task_id or not lease_token:
+            raise ValueError("task_id and lease_token must not be empty")
+        reconcile = False
+        with self._session_factory() as session:
+            # Use the same root lock as admission and lease acquisition.
+            session.execute(
+                update(TaskModel)
+                .where(TaskModel.id == task_id)
+                .values(updated_at=TaskModel.updated_at)
+            )
+            removed = session.execute(
+                delete(TaskLease)
+                .where(
+                    TaskLease.task_id == task_id,
+                    TaskLease.lease_token == lease_token,
+                    ~select(TaskDispatch.task_id).where(TaskDispatch.task_id == task_id).exists(),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if not removed.rowcount:
+                session.rollback()
+                return False
+            task = session.get(TaskModel, task_id)
+            if task is not None:
+                run, tasks = self._recover_run(session, task)
+                reconcile = self._reconcile_run(session, run, tasks, _utcnow())
+            session.commit()
+        if reconcile:
+            emit_task_event(self._session_factory, task_id, "task_reconciliation_required")
+        return True
+
     def _recover_run(
         self, session: Session, task: TaskModel
     ) -> tuple[WorkflowRun, list[TaskModel]]:

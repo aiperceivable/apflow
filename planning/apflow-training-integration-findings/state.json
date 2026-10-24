@@ -1,7 +1,7 @@
 {
   "feature": "apflow-training-integration-findings",
   "created": "2026-10-24T00:57:06.148128+00:00",
-  "updated": "2026-10-24T06:10:42.403257+00:00",
+  "updated": "2026-10-24T10:32:47.869122+00:00",
   "status": "completed",
   "execution_order": [
     "core-invariants",
@@ -245,5 +245,47 @@
       },
       "completed_at": "2026-10-24T06:10:42.403257+00:00"
     }
-  }
+  },
+  "fixes": [
+    {
+      "bug": "Public schema/error redaction, execution admission, and worker shutdown recovery",
+      "root_cause_level": 1,
+      "root_cause": "Existing generic contracts were bypassed by successful REST outputs, exception diagnostics, direct execution admission, and worker lease deletion before recovery.",
+      "fixed_files": [
+        "src/apflow/api/rest.py",
+        "src/apflow/app.py",
+        "src/apflow/bridge/protocol.py",
+        "src/apflow/bridge/session.py",
+        "src/apflow/core/distributed/lease_manager.py",
+        "src/apflow/core/distributed/worker.py",
+        "src/apflow/core/execution/task_manager.py",
+        "src/apflow/core/storage/sqlalchemy/task_repository.py",
+        "src/apflow/core/utils/credentials.py",
+        "src/apflow/durability/attempts.py",
+        "src/apflow/durability/retry.py",
+        "tests/api/test_rest_adapter.py",
+        "tests/bridge/test_required_modules.py",
+        "tests/core/execution/test_exception_redaction.py",
+        "tests/integration/test_sdk_compatibility.py",
+        "tests/unit/distributed/test_worker.py",
+        "tests/unit/distributed/test_worker_outcomes.py"
+      ],
+      "commits": [],
+      "doc_updates": [],
+      "fixed_at": "2026-10-24T10:32:47.869122+00:00",
+      "verification": {
+        "default_suite": "1939 passed, 26 skipped, 35 warnings in 375.67 seconds; exit 0",
+        "storage_supplement": "33 passed; exit 0",
+        "final_focused_suite": "56 passed; exit 0",
+        "warning_audit": "19 passed; warnings originate in existing event-loop and Python 3.12 SQLite datetime deprecations",
+        "ruff": "passed",
+        "black": "290 files unchanged",
+        "pyright": "0 errors, 0 warnings",
+        "imports": "133 modules, no circular imports",
+        "recovery_helper_statement_coverage": "17/18 statements, 94.4%"
+      },
+      "scope": "Generic schema redaction, credential diagnostics, configured capabilities, Run/invocation recovery, and token fencing; no application-specific scheduling policy or schema migration.",
+      "operational_boundary": "Temporary SQLite and installed MCP/A2A SDKs with synthetic credentials/executors; native PostgreSQL, OS process crashes, and external provider integration were not exercised."
+    }
+  ]
 }

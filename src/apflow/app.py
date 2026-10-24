@@ -146,12 +146,14 @@ def create_app(
         required_schema_versions=get_config_manager().get("service.required_schema_versions", {}),
     )
     from apflow.bridge.session import SessionBoundModule
+    from apflow.bridge.module_adapter import ExecutableTaskModuleAdapter
     from apflow.core.storage.session import session_factory_for
 
     factory = session_factory_for(session)
     setattr(registry, "apflow_session_factory", factory)
     for module_id in list(registry.list()):
-        if module_id.startswith(
+        module = registry.get(module_id)
+        if isinstance(module, ExecutableTaskModuleAdapter) or module_id.startswith(
             (
                 f"{namespace}.task.",
                 f"{namespace}.schedule.",
@@ -160,7 +162,6 @@ def create_app(
                 f"{namespace}.usage.",
             )
         ):
-            module = registry.get(module_id)
             registry.unregister(module_id)
             registry.register(module_id, SessionBoundModule(module, factory, registry))
     logger.info(f"apcore Registry populated ({len(list(registry.list()))} modules)")

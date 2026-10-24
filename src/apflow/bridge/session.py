@@ -59,10 +59,20 @@ class SessionBoundModule:
 
     def _check_admission(self) -> None:
         """Stop new service work if a required capability becomes unavailable."""
+        from apflow.bridge.module_adapter import ExecutableTaskModuleAdapter
+
         identifier = getattr(self._module, "module_id", "")
-        if self._registry is None or not identifier.endswith(
-            (".task.create", ".task.create_tree", ".task.submit", ".run.retry")
-        ):
+        starts_work = isinstance(self._module, ExecutableTaskModuleAdapter) or identifier.endswith(
+            (
+                ".task.create",
+                ".task.create_tree",
+                ".task.submit",
+                ".task.execute",
+                ".schedule.trigger",
+                ".run.retry",
+            )
+        )
+        if self._registry is None or not starts_work:
             return
         from apcore.errors import ModuleError
         from apflow.bridge.registry_setup import validate_required_modules

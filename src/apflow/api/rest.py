@@ -241,7 +241,9 @@ async def _execute(
     except Exception as exc:  # noqa: BLE001 — surface unexpected errors as 500
         logger.error("REST execute %s crashed: %s", module_id, type(exc).__name__)
         return 500, {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}}
-    return 200, redact_public_data(output)
+    definition = executor.registry.get_definition(module_id)
+    schema = definition.output_schema if definition is not None else None
+    return 200, redact_public_data(output, schema)
 
 
 def _sse_event(data: dict[str, Any], *, event: Optional[str] = None) -> str:
@@ -266,8 +268,10 @@ async def _stream_events(
         from apcore_mcp.auth.middleware import auth_identity_var
 
         context = context or Context.create(identity=auth_identity_var.get())
+        definition = executor.registry.get_definition(module_id)
+        schema = definition.output_schema if definition is not None else None
         async for chunk in executor.stream(module_id, inputs, context=context):
-            yield _sse_event(redact_public_data(chunk))
+            yield _sse_event(redact_public_data(chunk, schema))
     except ModuleError as exc:
         logger.info(
             "REST stream %s failed [%s]: %s", module_id, exc.code, redact_public_data(exc.message)

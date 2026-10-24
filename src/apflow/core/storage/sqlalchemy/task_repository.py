@@ -27,6 +27,7 @@ from typing import (
 from apflow.core.storage.sqlalchemy.models import TaskModel, TaskOriginType, TaskModelType
 from apflow.core.distributed.config import as_utc, is_postgresql
 from apflow.core.execution.errors import ValidationError
+from apflow.core.utils.credentials import redact_public_data
 from sqlalchemy_session_proxy import SqlalchemySessionProxy
 from apflow.logger import get_logger
 
@@ -34,6 +35,14 @@ if TYPE_CHECKING:
     from apflow.core.types import TaskTreeNode
 
 logger = get_logger(__name__)
+
+
+def _redact_failure_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """Sanitize failure facts before a supported repository write reaches storage."""
+    return {
+        key: redact_public_data(value) if key in {"error", "error_info"} else value
+        for key, value in fields.items()
+    }
 
 
 class TaskRepository(Generic[TaskModelType]):
@@ -114,7 +123,7 @@ class TaskRepository(Generic[TaskModelType]):
         """
 
         # Create task instance using configured TaskModel class
-        task = self.task_model_class.create({"name": name, **kwargs})
+        task = self.task_model_class.create(_redact_failure_fields({"name": name, **kwargs}))
 
         self.db.add(task)
 
@@ -655,7 +664,9 @@ class TaskRepository(Generic[TaskModelType]):
                 if protected - {"token_usage", "actual_cost_usd", "estimated_cost_usd"}:
                     stmt = stmt.where(self._business_write_allowed())
             result = await self.db.execute(
-                stmt.values(**fields).execution_options(synchronize_session=False)
+                stmt.values(**_redact_failure_fields(fields)).execution_options(
+                    synchronize_session=False
+                )
             )
             if cast(CursorResult[Any], result).rowcount != 1:
                 raise ValidationError(f"Task {task_id} is archived or its execution lease was lost")
@@ -692,7 +703,9 @@ class TaskRepository(Generic[TaskModelType]):
         if not allow_cancel_requested:
             stmt = stmt.where(self.task_model_class.cancel_requested_at.is_(None))
         result = await self.db.execute(
-            stmt.values(**fields).execution_options(synchronize_session=False)
+            stmt.values(**_redact_failure_fields(fields)).execution_options(
+                synchronize_session=False
+            )
         )
         await self.db.commit()
         if cast(CursorResult[Any], result).rowcount != 1:

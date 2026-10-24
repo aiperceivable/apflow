@@ -1,6 +1,8 @@
 """Tests for the registry-driven REST adapter (apflow.api.rest)."""
 
 from datetime import datetime, timezone
+from collections.abc import AsyncIterator
+import json
 from typing import Any, Optional
 
 import pytest
@@ -110,6 +112,53 @@ def test_execute_module_returns_output(client: TestClient) -> None:
     resp = client.post("/modules/echo", json={"message": "hi"})
     assert resp.status_code == 200
     assert resp.json() == {"echo": "hi"}
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_rest_redacts_schema_sensitive_output_and_preserves_usage(streaming: bool) -> None:
+    class SensitiveModule:
+        description = "Return schema-sensitive data and public usage counters."
+        input_schema = {"type": "object"}
+        output_schema = {
+            "type": "object",
+            "$defs": {"private": {"type": "string", "x-sensitive": True}},
+            "properties": {
+                "private": {"$ref": "#/$defs/private"},
+                "custom": {"type": "string", "x-sensitive": True},
+            },
+        }
+
+        async def execute(self, inputs: dict[str, Any], context: Any) -> dict[str, Any]:
+            return {
+                "private": "private-reference-value",
+                "custom": "private-inline-value",
+                "token_usage": {"total": 7},
+                "remaining_tokens": 93,
+            }
+
+        async def stream(
+            self, inputs: dict[str, Any], context: Any
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield await self.execute(inputs, context)
+
+    registry = Registry()
+    registry.register("sensitive", SensitiveModule())
+    with TestClient(build_rest_app(registry)) as service:
+        response = service.post(
+            "/modules/sensitive",
+            json={},
+            headers={"Accept": "text/event-stream"} if streaming else {},
+        )
+    assert response.status_code == 200
+    assert "private-reference-value" not in response.text
+    assert "private-inline-value" not in response.text
+    if streaming:
+        output = json.loads(response.text.split("data: ", 1)[1].splitlines()[0])
+        assert response.text.endswith("event: done\ndata: {}\n\n")
+    else:
+        output = response.json()
+    assert output["token_usage"] == {"total": 7}
+    assert output["remaining_tokens"] == 93
 
 
 def test_invalid_input_preserves_canonical_validation_details(client: TestClient) -> None:
