@@ -148,6 +148,9 @@ Every orchestration capability is automatically exposed as an apcore Module:
 - **A2A** — Other services invoke orchestration via HTTP
 - **CLI** — Humans operate orchestration from the terminal
 
+See [MCP and A2A operations](docs/features/apcore-bridge.md#mcp-and-a2a-operations)
+for discovery, request examples, embedded servers, and accounting constraints.
+
 ## Architecture
 
 ```

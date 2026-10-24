@@ -15,6 +15,9 @@
 
 ### Added
 
+- Protocol-safe embedding through `ApflowMCP` and `PublicExecutor`, shared by
+  standalone and unified MCP/A2A servers. Document discovery, invocation,
+  authorization, Run IDs, accounting precision, and dispatcher requirements.
 - Top-level `apflow run`, `apflow budget`, and `apflow usage` CLI groups, preserving
   the generic dot-namespaced commands. Align API/CLI examples, Run recovery,
   module inventory, usage acknowledgement, and migration 006/007 guidance.
@@ -75,6 +78,11 @@
 
 ### Migration and Compatibility
 
+- Embedded MCP servers should use `ApflowMCP(app.registry)`; embedded A2A servers
+  should pass `PublicExecutor(Executor.from_registry(app.registry))` to the SDK.
+  See [MCP and A2A operations](docs/features/apcore-bridge.md#mcp-and-a2a-operations)
+  for examples and the A2A safe-integer limit. Approval-required skills may be
+  absent from the public agent card; authenticated discovery follows policy.
 - Add migrations `006` (service execution contracts) and `007` (Runs, lineage and
   usage events). Preserve existing task rows and legacy usage baselines; imported
   legacy consumption remains reportable and is excluded from new billing delivery.

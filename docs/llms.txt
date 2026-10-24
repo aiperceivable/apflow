@@ -24,7 +24,7 @@
 ## Feature specifications
 
 - [Feature Overview](https://apflow.aiperceivable.com/features/overview/): Feature index and dependency map.
-- [apcore Bridge](https://apflow.aiperceivable.com/features/apcore-bridge/): MCP, A2A, CLI, and REST exposure through apcore modules.
+- [apcore Bridge](https://apflow.aiperceivable.com/features/apcore-bridge/): Shared MCP/A2A module IDs, discovery, invocation examples, embedded server adapters, approval policy, and accounting precision.
 - [REST / HTTP API](https://apflow.aiperceivable.com/features/rest-api/): Registry-driven REST API, OpenAPI, durable submission, immutable Run retries, SSE, auth, webhook, and unified server behavior.
 - [Built-in Scheduler](https://apflow.aiperceivable.com/features/scheduler/): Scheduling modules, direct database poll loop, webhook triggers, and run history.
 - [Durable Execution](https://apflow.aiperceivable.com/features/durable-execution/): Checkpoint/resume, retry, and circuit breaker behavior.
@@ -47,5 +47,8 @@
 - Archive mode freezes existing completed workflow rows in place and keeps original task IDs.
 - Accepted Runs start once. Use run.retry for new task IDs and frozen completed results; unknown remote outcomes require evidence before replay.
 - CLI exposes task, schedule, run, budget, and usage groups against local configured storage.
+- Embed MCP with ApflowMCP(app.registry) and A2A with PublicExecutor(Executor.from_registry(app.registry)) from apflow.bridge.protocol to retain public output protections and readable accounting counters.
+- A2A task IDs identify protocol invocations, not apflow Runs; task.submit completion confirms acceptance. Standalone protocol servers need a dispatcher for durable work.
+- A2A public cards omit approval-required skills; authenticated discovery follows policy. A2A accounting integers must stay within the IEEE-754 safe integer range.
 - Usage consumers deduplicate event IDs and commit business writes before usage.ack; prices, credits, and wallets remain application responsibilities.
 - The scheduler runs through direct database access; `APFLOW_API_SERVER_URL` does not route scheduler execution.

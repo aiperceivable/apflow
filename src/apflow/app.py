@@ -69,8 +69,10 @@ def create_app(
     Example:
         app = create_app()
         # Start A2A server
+        from apcore import Executor
         from apcore_a2a import serve
-        serve(app.registry, name="apflow")
+        from apflow.bridge.protocol import PublicExecutor
+        serve(PublicExecutor(Executor.from_registry(app.registry)), name="apflow")
     """
     from apflow.core.storage.factory import create_session
     from apflow.core.storage.sqlalchemy.task_repository import TaskRepository

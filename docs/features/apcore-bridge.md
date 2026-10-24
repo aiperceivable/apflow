@@ -106,9 +106,10 @@ Contains `create_apflow_registry()` function.
 `PublicExecutor` delegates execution, identity, ACL, and approval to apcore and
 sanitizes returned objects and stream chunks using the declared output schema
 and apflow's credential rules. `ApflowMCP` retains the SDK's configured execution
-pipeline while replacing broad token-name masking with that public output policy.
-Token counters remain readable; declared sensitive fields and credentials remain
-redacted. The standalone and unified server entry points both use these adapters.
+pipeline and default sensitive-name masking, with exceptions for known integer
+accounting counters that have already passed schema and credential redaction.
+Declared sensitive fields and credentials remain redacted. The standalone and
+unified server entry points both use these adapters.
 
 ### Test Files
 
@@ -192,14 +193,45 @@ integral values such as `100.0` to integers and reject booleans, fractions, and
 floating values outside the safe integer range. Use REST or MCP when values
 exceed `2**53 - 1`; A2A cannot preserve those accounting integers exactly.
 
-For embedded MCP use `ApflowMCP(app.registry)` from
-`apflow.bridge.protocol`; for embedded A2A pass
-`PublicExecutor(Executor.from_registry(app.registry))` to the A2A SDK. These
-entry points retain the public output protections used by the CLI servers.
 Standalone MCP/A2A submission requires a dispatcher against the same database;
 the unified server already runs one. Consumers on either protocol must commit
 and deduplicate events before `usage.ack`. Pricing and wallets remain application
 responsibilities. See [budget and usage operations](cost-governance.md#public-budget-and-usage-operations).
+
+### Embedded Servers
+
+Use the same public output adapters as the CLI servers when embedding either
+protocol. For MCP:
+
+```python
+from apflow.app import create_app
+from apflow.bridge.protocol import ApflowMCP
+
+app = create_app()
+ApflowMCP(app.registry, name="apflow").serve(
+    transport="streamable-http", host="127.0.0.1", port=8001
+)
+```
+
+For A2A, in a separate server process:
+
+```python
+from apcore import Executor
+from apcore_a2a import serve
+from apflow.app import create_app
+from apflow.bridge.protocol import PublicExecutor
+
+app = create_app()
+serve(PublicExecutor(Executor.from_registry(app.registry)), name="apflow")
+```
+
+These adapters preserve readable usage and budget integers while honoring
+schema-sensitive fields and credential masking on returned objects and stream
+chunks. `ApflowMCP` wraps the executor after SDK initialization so its configured
+ACL, approval store, and middleware remain active. Configure authentication and
+authorization for your deployment; the minimal examples above do not configure
+an identity provider. Run `apflow dispatcher --db DATABASE_URL` separately for
+durable submissions, using the same database configuration as the embedded app.
 
 ---
 

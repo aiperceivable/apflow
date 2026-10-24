@@ -189,7 +189,7 @@ Pricing, credits, and wallets belong to the consuming application.
 
 ## 6. Let AI Agents Use apflow
 
-All task operations are automatically exposed as MCP tools:
+Registered operations are exposed as MCP tools and A2A skills with the same IDs:
 
 ```
 apflow.task.create_tree   — Create multi-step workflow
@@ -210,7 +210,19 @@ apflow.schedule.set       — Configure a task's schedule
 ... plus other management modules and discovered executors
 ```
 
-Start MCP server: `apflow mcp` — Claude/Cursor will discover these tools automatically.
+Start `apflow mcp` for an MCP client such as Claude/Cursor, or `apflow serve`
+for A2A. Use `apflow serve --all` to expose REST, MCP, and A2A together. Discovery
+and invocation follow the configured ACL and approval policy; approval-required
+skills such as `apflow.budget.reconcile` are omitted from the public A2A card.
+
+An A2A task ID identifies a protocol invocation. Use the module's returned
+`run_id` to inspect the apflow Run. Completion of a `task.submit` call means the
+workflow was accepted; observe `run.get` for its execution outcome. Standalone
+servers need a separate dispatcher against the same database for durable work.
+
+See [MCP and A2A operations](../features/apcore-bridge.md#mcp-and-a2a-operations)
+for endpoints, request examples, authenticated discovery, accounting precision,
+and embedded server adapters.
 
 ## Next Steps
 

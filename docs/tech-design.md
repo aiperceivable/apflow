@@ -1365,41 +1365,46 @@ def create_apflow_registry(
 
 #### Entry Points: How Users Start MCP/A2A/CLI Servers
 
-Users create a small Python script (or apflow provides a convenience function):
+Use the CLI entry points (`apflow mcp`, `apflow serve`, or `apflow serve --all`)
+or embed the same protocol adapters in Python:
 
 ```python
 # example: start_mcp_server.py
-from apflow import create_session, TaskManager
-from apflow.core.execution.task_creator import TaskCreator
-from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
-from apflow.bridge.registry_setup import create_apflow_registry
-from apcore_mcp import serve as serve_mcp
+from apflow.app import create_app
+from apflow.bridge.protocol import ApflowMCP
 
-# Initialize apflow
-session = create_session()
-repo = TaskRepository(session)
-creator = TaskCreator(session)
-manager = TaskManager(session)
-
-# Create registry and start MCP server
-registry = create_apflow_registry(manager, creator, repo)
-serve_mcp(registry, transport="streamable-http", port=8080)
+app = create_app()
+ApflowMCP(app.registry, name="apflow").serve(
+    transport="streamable-http", host="127.0.0.1", port=8080
+)
 ```
 
 For A2A:
 ```python
 from apcore_a2a import serve as serve_a2a
-registry = create_apflow_registry(manager, creator, repo)
-serve_a2a(registry)
+from apcore import Executor
+from apflow.app import create_app
+from apflow.bridge.protocol import PublicExecutor
+
+app = create_app()
+serve_a2a(PublicExecutor(Executor.from_registry(app.registry)), name="apflow")
 ```
 
 For CLI:
 ```python
 from apcore_cli import create_cli
-registry = create_apflow_registry(manager, creator, repo)
-cli = create_cli(registry=registry)
+from apflow.app import create_app
+
+app = create_app()
+cli = create_cli(registry=app.registry)
 cli()
 ```
+
+The public protocol adapters preserve accounting integers and redact credentials
+without replacing the SDK's authorization pipeline. Embedded and standalone
+servers need a dispatcher against the same database for durable submissions.
+See [MCP and A2A operations](features/apcore-bridge.md#mcp-and-a2a-operations)
+for discovery, invocation, approval policy, and A2A number constraints.
 
 ---
 
@@ -3002,7 +3007,9 @@ When exposed via apcore-mcp, each module becomes an MCP tool:
 - Tool input: Module's `input_schema` (JSON Schema)
 - Tool output: Module's `output_schema` (JSON Schema)
 
-The MCP tool call flow: `MCP client -> apcore-mcp -> apcore Registry.execute() -> module.execute(input) -> result`.
+The MCP tool call flow is `MCP client -> apcore-mcp -> PublicExecutor -> apcore Executor -> module.execute(inputs, context)`.
+The configured SDK execution pipeline applies validation, identity, ACL, approval,
+and middleware; `PublicExecutor` sanitizes the returned module result.
 
 ### A2A Skill Mapping
 
@@ -3010,7 +3017,8 @@ When exposed via apcore-a2a, each module becomes an A2A skill:
 
 - Skill name: Module name
 - Skill description: Module's `description`
-- Agent Card: Auto-generated from all registered module descriptions
+- Agent Card: Generated from eligible module descriptions; the public card omits
+  approval-required skills, and authenticated extended discovery follows policy
 - Streaming: Supported via apcore-a2a's built-in streaming
 
 ---

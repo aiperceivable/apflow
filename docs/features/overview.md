@@ -20,6 +20,9 @@ apflow capabilities are registered once in the apcore Registry and exposed throu
 multiple protocol faces:
 
 - [apcore Bridge](apcore-bridge.md) describes module registration and protocol reuse.
+- [MCP and A2A operations](apcore-bridge.md#mcp-and-a2a-operations) provides
+  discovery and invocation examples, embedded server adapters, approval behavior,
+  and accounting precision constraints for Run, budget, and usage modules.
 - [REST / HTTP API](rest-api.md) describes the registry-driven REST/OpenAPI surface,
   unified server, streaming, auth, webhook trigger, and scheduler integration.
 - [Function Executor](function-executor.md) describes the decorator path for turning
