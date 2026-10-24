@@ -255,3 +255,47 @@ errors/warnings), the import graph (132 modules, no cycles), and whitespace chec
 passed. All six required acceptance behaviors are covered, including the combined
 retry and late-receipt scenario. Live World wallet, provider side effects and a
 PostgreSQL cluster were not exercised.
+
+### Native PostgreSQL and World Wallet Acceptance
+
+This follow-up keeps business billing in corefirst-world. apflow production code
+has no new credit, price or wallet dependency; only its native PostgreSQL tests
+and shared disposable-database fixtures changed. World owns the usage consumer,
+trusted price binding, credit deduction, compensating refunds and wallet tests.
+The joint acceptance test lives in World's `apps/api/integration/apflow/` and
+invokes the actual World modules in a separate Node process against native
+PostgreSQL. It starts no development server and uses random disposable databases.
+
+- PostgreSQL 18.0: **14 apflow tests passed**, including concurrent final/late
+  reports, correction receipts, retry creation, cancellation failure, migration
+  007 and late lower-cursor commits.
+- World on native PostgreSQL: **81 wallet tests passed** across six files;
+  both joint acceptance tests passed. Receipt insertion failure rolls back all
+  wallet writes; acknowledgement failure leaves the upstream event retryable
+  without another debit. Retry reuse, late usage and signed corrections preserve
+  old Run outcomes and append-only financial history.
+- Confirmed World defects fixed: stable receipts across credit/debt transitions;
+  user-scoped generation keys with legacy receipt recognition; conflicting usage
+  rejection; duplicate settlement returning its historical charge; immutable
+  asynchronous delivery inputs and fixed invocation/task ownership.
+- The World consumer commits its receipt and wallet movement together, then
+  acknowledges the source event. It prices cumulative usage using World's
+  explicit frozen binding, deduplicates event IDs, and leaves incomplete token
+  breakdowns or premature negative corrections unacknowledged for resolution.
+- Full apflow suite: **1863 passed, 22 skipped, 34 warnings**. PostgreSQL cases
+  skipped by default were independently enabled and passed above.
+- Full World API run: **406 files passed**, with two pre-existing test problems
+  (remote audio lookup timeout and an outdated sourceHash privacy assertion).
+  After test-only corrections, both complete files passed **48 tests, 3 skipped**.
+  The combined current-code coverage is **408 files / 4491 passed, 3 skipped**;
+  this is a full run plus a fresh rerun of the two repaired files, not a second
+  clean monolithic run. No roleplay or lesson production behavior changed.
+- Ruff, Black, Pyright, World TypeScript, zero-warning changed-file ESLint and
+  whitespace checks passed. Joint test Python types passed as well.
+
+The wallet acceptance uses synthetic usage and explicit test prices, not live
+customer balances or real provider execution. It verifies the callable World
+consumer contract and does not enable a background billing service.
+
+World commits on `codex/apflow-wallet-acceptance`: `d881ac40` (wallet and
+joint acceptance), `e9d91d5b` (the two existing test-only corrections).

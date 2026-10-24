@@ -1,7 +1,7 @@
 {
   "feature": "apflow-training-integration-findings",
   "created": "2026-10-24T00:57:06.148128+00:00",
-  "updated": "2026-10-24T04:28:59.245029+00:00",
+  "updated": "2026-10-24T05:24:53.547857+00:00",
   "status": "completed",
   "execution_order": [
     "core-invariants",
@@ -159,6 +159,36 @@
       "final_run_bridge_governance": "348 passed, 1 skipped",
       "final_storage_and_execution_adjacent": "641 passed, 1 skipped",
       "commit_hooks": "52 changed files, imports and Ruff passed"
+    },
+    "postgres_world_acceptance": {
+      "source_commit": "a465fe9",
+      "status": "passed",
+      "responsibility_boundary": "apflow owns raw invocation usage, run history, deduplication and delivery acknowledgements; corefirst-world alone owns credits, prices, refunds and wallet transactions",
+      "apflow_production_changes": false,
+      "postgres_server": "PostgreSQL 18.0, disposable randomly named databases",
+      "apflow_native_postgres": "14 passed",
+      "world_native_postgres_wallet": "81 passed across 6 files",
+      "world_cross_service_acceptance": "2 passed, including native wallet regression runner",
+      "world_api_typecheck": "passed",
+      "world_changed_file_eslint": "0 errors, 0 warnings",
+      "world_wallet_test": "apps/api/integration/apflow/test_apflow_wallet_acceptance.py",
+      "world_consumer": "apps/api/src/ledger/apflow-usage.ts",
+      "provider_boundary": "Synthetic usage and explicit test prices; no external model calls or live customer wallets",
+      "apflow_default_suite": "1863 passed, 22 skipped, 34 warnings; PostgreSQL opt-in cases separately passed",
+      "world_full_api_initial": "406 files passed; 2 existing test failures; 4489 passed, 2 failed, 3 skipped",
+      "world_failed_files_after_fixture_fixes": "48 passed, 3 skipped in both complete files",
+      "world_final_coverage_union": "408 files covered: 4491 passed, 3 skipped across full run plus fresh rerun of both repaired test files",
+      "world_baseline_test_fixes": [
+        "roleplay contract test now isolates remote audio storage and speech synthesis",
+        "content-access assertion accepts contract-defined top-level sourceHash while retaining run-private field protection"
+      ],
+      "apflow_static": "Ruff, Black (287 files), Pyright and import graph passed",
+      "world_static": "ESLint zero errors/warnings; TypeScript and joint-test Pyright passed",
+      "completed_at": "2026-10-24T05:24:53.548194+00:00",
+      "world_commits": [
+        "d881ac40",
+        "e9d91d5b"
+      ]
     }
   }
 }

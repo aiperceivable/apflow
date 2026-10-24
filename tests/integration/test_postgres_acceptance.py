@@ -1,61 +1,48 @@
 """PostgreSQL acceptance checks using disposable databases on an explicit test server."""
 
-from collections.abc import Iterator
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+import asyncio
 import importlib
-import os
-import uuid
+from threading import Barrier
+from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import DateTime, Engine, create_engine, inspect, select, text
+from sqlalchemy import (
+    Column,
+    DateTime,
+    MetaData,
+    Table,
+    create_engine,
+    inspect,
+    select,
+    text,
+)
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 from sqlalchemy.schema import CreateColumn
 
-from apflow.core.storage.factory import create_session, normalize_postgresql_url
-from apflow.core.storage.sqlalchemy.models import TASK_TABLE_NAME, TaskCheckpointModel, TaskModel
+from apflow.core.execution.run_retry import retry_run
+from apflow.core.execution.runs import RunService
+from apflow.core.execution.task_manager import TaskManager
+from apflow.core.storage.sqlalchemy.models import (
+    TASK_TABLE_NAME,
+    BudgetReservation,
+    ExecutionAttempt,
+    TaskCheckpointModel,
+    TaskModel,
+    UsageEvent,
+    WorkflowRun,
+)
 from apflow.core.storage.sqlalchemy.task_repository import TaskRepository
+from apflow.durability.attempts import AttemptRecorder
 from apflow.durability.checkpoint import CheckpointManager
+from apflow.governance.ledger import BudgetLedger
+from apflow.governance.usage import UsageRecorder
+from tests.integration.postgres_helpers import postgres_session
 
 pytestmark = pytest.mark.integration
-
-
-@pytest.fixture
-def postgres_database_url() -> Iterator[str]:
-    """Create and remove only a randomly named database on the explicitly selected server."""
-    configured_url = os.getenv("APFLOW_TEST_POSTGRES_URL")
-    if not configured_url:
-        pytest.skip("APFLOW_TEST_POSTGRES_URL is required for live PostgreSQL acceptance tests")
-    admin_url = make_url(normalize_postgresql_url(configured_url, async_mode=False))
-    database_name = f"apflow_acceptance_{uuid.uuid4().hex}"
-    admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
-    try:
-        quoted_name = admin_engine.dialect.identifier_preparer.quote(database_name)
-        with admin_engine.connect() as connection:
-            connection.execute(text(f"CREATE DATABASE {quoted_name}"))
-        try:
-            yield admin_url.set(database=database_name).render_as_string(hide_password=False)
-        finally:
-            with admin_engine.connect() as connection:
-                connection.execute(text(f"DROP DATABASE {quoted_name}"))
-    finally:
-        admin_engine.dispose()
-
-
-@contextmanager
-def postgres_session(database_url: str) -> Iterator[Session]:
-    """Open a public-factory session and dispose its pool before database cleanup."""
-    session = create_session(connection_string=database_url, async_mode=False)
-    assert isinstance(session, Session)
-    engine = session.get_bind()
-    assert isinstance(engine, Engine)
-    try:
-        assert engine.dialect.name == "postgresql"
-        yield session
-    finally:
-        session.close()
-        engine.dispose()
 
 
 def test_postgres_migration_004_upgrades_legacy_schema(postgres_database_url: str) -> None:
@@ -176,3 +163,349 @@ async def test_postgres_factory_and_all_governance_fields_survive_reload(
         assert restored.estimated_cost_usd == Decimal("0.125000")
         assert restored.actual_cost_usd == Decimal("0.062500")
         assert restored.cost_policy == "notify-at-eighty"
+
+
+def legacy_run_metadata() -> MetaData:
+    """Represent the task and invocation tables before migration 007."""
+    metadata = MetaData()
+    for model in (TaskModel, ExecutionAttempt):
+        Table(
+            model.__tablename__,
+            metadata,
+            *[
+                Column(
+                    column.name,
+                    column.type,
+                    primary_key=column.primary_key,
+                    nullable=column.nullable,
+                    server_default=column.server_default,
+                )
+                for column in model.__table__.columns
+                if column.name not in {"run_id", "source_task_id", "result_snapshot_hash"}
+            ],
+        )
+    return metadata
+
+
+def test_postgres_migration_007_preserves_legacy_usage_and_event_sequence(
+    postgres_database_url: str,
+) -> None:
+    engine = create_engine(postgres_database_url)
+    metadata = legacy_run_metadata()
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as connection:
+            for identifier, origin in (("source", "create"), ("copy", "copy"), ("link", "link")):
+                connection.execute(
+                    metadata.tables[TaskModel.__tablename__]
+                    .insert()
+                    .values(
+                        id=identifier,
+                        name=identifier,
+                        origin_type=origin,
+                        user_id="alice",
+                        token_usage={"total": 7},
+                    )
+                )
+        migration = importlib.import_module(
+            "apflow.core.storage.migrations.007_add_workflow_runs_usage_events"
+        ).AddWorkflowRunsUsageEvents()
+        migration.upgrade(engine)
+        migration.upgrade(engine)
+        with Session(engine) as session:
+            baseline = session.scalars(select(UsageEvent)).all()
+            assert len(baseline) == 1
+            assert baseline[0].task_id == "source" and baseline[0].token_usage == {"total": 7}
+            session.add(
+                UsageEvent(
+                    id="new-receipt",
+                    invocation_id="new-invocation",
+                    task_id="new-task",
+                    owner_id="alice",
+                    kind="delta",
+                    digest="test",
+                    reported_usage={"total": 3},
+                    token_usage={"total": 3},
+                )
+            )
+            session.commit()
+            events = session.scalars(select(UsageEvent).order_by(UsageEvent.index)).all()
+            assert events[1].index > events[0].index > 0
+            original = session.get(TaskModel, "source")
+            assert original is not None and original.token_usage == {"total": 7}
+        assert {"run_id", "source_task_id", "result_snapshot_hash"} <= {
+            column["name"] for column in inspect(engine).get_columns(TASK_TABLE_NAME)
+        }
+    finally:
+        engine.dispose()
+
+
+async def cancel_run_with_completed_dependency(
+    session: Session,
+) -> tuple[TaskModel, TaskModel, str]:
+    """Build a cancelled run with reusable output and an unresolved final receipt."""
+    repository = TaskRepository(session)
+    root = await repository.create_task("B", user_id="alice", budget_scope_id="scope")
+    completed = await repository.create_task("A", parent_id=root.id, user_id="alice")
+    await repository.update_task(root.id, dependencies=[completed.id])
+    runs = RunService(session)
+    await runs.start_run(root.id)
+    recorder = AttemptRecorder(session)
+    ledger = BudgetLedger(session)
+    await ledger.configure_scope("scope", 100)
+    assert await repository.try_claim_for_execution(completed.id) is not None
+    first_invocation = await recorder.start(completed.id, 1, 1)
+    await ledger.reserve("scope", completed.id, first_invocation, 10)
+    await recorder.finish(first_invocation, "completed", token_usage={"total": 3})
+    await repository.transition_task(
+        completed.id, expected_statuses=["in_progress"], status="completed", result="A result"
+    )
+    assert await repository.try_claim_for_execution(root.id) is not None
+    old_invocation = await recorder.start(root.id, root.attempt_id, 1)
+    await ledger.reserve("scope", root.id, old_invocation, 10)
+    executor = AsyncMock()
+    executor.cancel.return_value = {
+        "status": "cancelled",
+        "partial_result": "B partial",
+        "token_usage": {"total": 2},
+    }
+    manager = TaskManager(session, executor_instances={root.id: executor})
+    assert (await manager.cancel_task(root.id))["stop_confirmed"] is True
+    await manager.cancel_task(root.id)
+    assert executor.cancel.await_count == 1
+    await recorder.finish(old_invocation, "cancelled")
+    assert (await ledger.get_scope("scope")).unknown_tokens == 10
+    assert await runs.finish_from_tasks(root.id) == "cancelled"
+    return root, completed, old_invocation
+
+
+@pytest.mark.asyncio
+async def test_postgres_retry_cancel_and_late_receipt_preserve_original_history(
+    postgres_database_url: str,
+) -> None:
+    with postgres_session(postgres_database_url) as session:
+        root, completed, old_invocation = await cancel_run_with_completed_dependency(session)
+        repository = TaskRepository(session)
+        runs, recorder, ledger = (
+            RunService(session),
+            AttemptRecorder(session),
+            BudgetLedger(session),
+        )
+        old_run = session.get(WorkflowRun, root.id)
+        assert old_run is not None
+        run_history = old_run.to_dict()
+        task_history = (root.status, root.result, root.completed_at, root.attempt_id)
+        receipt = await retry_run(repository, root.id, "retry-B", "alice")
+        assert await retry_run(repository, root.id, "retry-B", "alice") == receipt
+        new_root_id = receipt["root_task_id"]
+        await runs.start_run(new_root_id)
+        assert await repository.try_claim_for_execution(new_root_id) is not None
+        new_invocation = await recorder.start(new_root_id, 1, 1)
+        await ledger.reserve("scope", new_root_id, new_invocation, 10)
+        await recorder.finish(new_invocation, "completed", token_usage={"total": 5})
+        await repository.transition_task(
+            new_root_id, expected_statuses=["in_progress"], status="completed", result="B result"
+        )
+        assert await runs.finish_from_tasks(new_root_id) == "completed"
+        await recorder.finish(old_invocation, "completed", token_usage={"total": 7})
+        await recorder.finish(old_invocation, "completed", token_usage={"total": 7})
+        session.refresh(old_run)
+        session.refresh(root)
+        assert old_run.to_dict() == run_history
+        assert (root.status, root.result, root.completed_at, root.attempt_id) == task_history
+        assert root.token_usage["total"] == 7
+        reused = session.get(TaskModel, receipt["task_mapping"][completed.id])
+        assert reused is not None and reused.result == "A result" and reused.token_usage is None
+        events = await UsageRecorder(session).list_events("alice")
+        assert sum(e["token_usage"]["total"] for e in events if e["run_id"] == root.id) == 10
+        assert sum(e["token_usage"]["total"] for e in events if e["run_id"] == new_root_id) == 5
+        balance = await ledger.get_scope("scope")
+        assert balance.spent_tokens == 15
+        assert balance.reserved_tokens == balance.unknown_tokens == 0
+        original_attempt = session.get(ExecutionAttempt, old_invocation)
+        assert original_attempt is not None and original_attempt.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_postgres_cancel_usage_failure_is_atomic_and_retryable(
+    postgres_database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with postgres_session(postgres_database_url) as session:
+        repository = TaskRepository(session)
+        task = await repository.create_task("Cancelling", status="in_progress", attempt_id=1)
+        task_id = task.id
+        invocation = await AttemptRecorder(session).start(task_id, 1, 1)
+        executor = AsyncMock()
+        executor.cancel.return_value = {"status": "cancelled", "token_usage": {"total": 2}}
+        manager = TaskManager(session, executor_instances={task_id: executor})
+        original = TaskRepository.increment_token_usage
+
+        async def fail_projection(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("Injected projection failure")
+
+        monkeypatch.setattr(TaskRepository, "increment_token_usage", fail_projection)
+        with pytest.raises(RuntimeError, match="projection failure"):
+            await manager.cancel_task(task_id)
+        session.refresh(task)
+        assert task.status == "in_progress" and task.token_usage is None
+        assert session.scalars(select(UsageEvent)).all() == []
+        monkeypatch.setattr(TaskRepository, "increment_token_usage", original)
+        assert (await manager.cancel_task(task_id))["stop_confirmed"] is True
+        await AttemptRecorder(session).finish(invocation, "cancelled", token_usage={"total": 2})
+        assert (await UsageRecorder(session).total(invocation))["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_postgres_outbox_redelivers_late_commit_below_acknowledged_cursor(
+    postgres_database_url: str,
+) -> None:
+    with postgres_session(postgres_database_url) as session:
+        repository = TaskRepository(session)
+        first = await repository.create_task("First", user_id="alice")
+        second = await repository.create_task("Second", user_id="alice")
+        recorder = AttemptRecorder(session)
+        first_invocation = await recorder.start(first.id, 1, 1)
+        second_invocation = await recorder.start(second.id, 1, 1)
+        engine = session.get_bind()
+        with Session(engine) as late_session, Session(engine) as early_session:
+            late = UsageRecorder(late_session)
+            first_event = await late.record(
+                first_invocation, "late-commit", {"total": 3}, commit=False
+            )
+            early = UsageRecorder(early_session)
+            second_event = await early.record(second_invocation, "early-commit", {"total": 5})
+            assert first_event["index"] < second_event["index"]
+            visible = await early.list_events("alice")
+            assert [event["id"] for event in visible] == ["early-commit"]
+            await early.acknowledge("early-commit", "alice")
+            late_session.commit()
+            visible = await early.list_events("alice", second_event["index"])
+            assert [event["id"] for event in visible] == ["late-commit"]
+            await early.acknowledge("late-commit", "alice")
+            await early.acknowledge("late-commit", "alice")
+            assert await early.list_events("alice", second_event["index"]) == []
+
+
+@pytest.mark.parametrize("reports", [(5, 5), (5, 9)])
+def test_postgres_concurrent_corrections_keep_events_projection_and_budget_aligned(
+    postgres_database_url: str, reports: tuple[int, int]
+) -> None:
+    with postgres_session(postgres_database_url) as session:
+        repository = TaskRepository(session)
+        task = asyncio.run(repository.create_task("Concurrent receipts", user_id="alice"))
+        task_id = task.id
+        recorder = AttemptRecorder(session)
+        invocation = asyncio.run(recorder.start(task_id, 1, 1))
+        ledger = BudgetLedger(session)
+        asyncio.run(ledger.configure_scope("scope", 100))
+        asyncio.run(ledger.reserve("scope", task_id, invocation, 20))
+        asyncio.run(recorder.finish(invocation, "completed", token_usage={"total": 7}))
+        engine = session.get_bind()
+        ready = Barrier(2)
+
+        def reconcile(total: int) -> None:
+            with Session(engine, expire_on_commit=False) as worker:
+                cached = worker.get(BudgetReservation, invocation)
+                assert cached is not None and cached.actual_tokens == 7
+                ready.wait(timeout=5)
+                asyncio.run(
+                    UsageRecorder(worker).reconcile(
+                        invocation,
+                        f"correction-{total}",
+                        {"total": total},
+                        {
+                            "evidence_ref": f"provider:{total}",
+                            "actor": "operator",
+                            "observed_at": "2026-10-24T00:00:00+00:00",
+                        },
+                    )
+                )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(reconcile, reports))
+        session.expire_all()
+        events = session.scalars(select(UsageEvent).order_by(UsageEvent.index)).all()
+        assert len(events) == len(set(reports)) + 1
+        total = sum(event.token_usage["total"] for event in events)
+        assert total == events[-1].reported_usage["total"]
+        restored = session.get(TaskModel, task_id)
+        assert restored is not None and restored.token_usage["total"] == total
+        assert asyncio.run(ledger.get_scope("scope")).spent_tokens == total
+        attempt = session.get(ExecutionAttempt, invocation)
+        assert attempt is not None and attempt.status == "completed"
+        assert attempt.token_usage == {"total": 7}
+
+
+@pytest.mark.parametrize("same_invocation", [False, True])
+@pytest.mark.parametrize("initial_status", ["running", "unknown"])
+def test_postgres_concurrent_final_reports_do_not_duplicate_or_lose_consumption(
+    postgres_database_url: str, same_invocation: bool, initial_status: str
+) -> None:
+    with postgres_session(postgres_database_url) as session:
+        task = asyncio.run(TaskRepository(session).create_task("Parallel reports", user_id="alice"))
+        task_id = task.id
+        recorder = AttemptRecorder(session)
+        ledger = BudgetLedger(session)
+        asyncio.run(ledger.configure_scope("scope", 100))
+        invocations = [asyncio.run(recorder.start(task_id, 1, 1))]
+        if not same_invocation:
+            invocations.append(asyncio.run(recorder.start(task_id, 2, 1)))
+        for invocation in invocations:
+            asyncio.run(ledger.reserve("scope", task_id, invocation, 10))
+            if initial_status == "unknown":
+                asyncio.run(recorder.finish(invocation, "unknown"))
+        engine = session.get_bind()
+        ready = Barrier(2)
+
+        def finish(invocation: str) -> None:
+            with Session(engine) as worker:
+                ready.wait(timeout=5)
+                asyncio.run(
+                    AttemptRecorder(worker).finish(
+                        invocation, "completed", token_usage={"total": 5}
+                    )
+                )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(finish, [invocations[0], invocations[-1]]))
+        session.expire_all()
+        expected = 5 * len(invocations)
+        events = session.scalars(select(UsageEvent)).all()
+        assert len(events) == len(invocations)
+        assert sum(event.token_usage["total"] for event in events) == expected
+        restored = session.get(TaskModel, task_id)
+        assert restored is not None and restored.token_usage["total"] == expected
+        balance = asyncio.run(ledger.get_scope("scope"))
+        assert balance.spent_tokens == expected
+        assert balance.reserved_tokens == balance.unknown_tokens == 0
+        attempts = session.scalars(select(ExecutionAttempt)).all()
+        expected_status = "unknown" if initial_status == "unknown" else "completed"
+        assert {attempt.status for attempt in attempts} == {expected_status}
+
+
+def test_postgres_concurrent_retry_request_creates_only_one_new_run(
+    postgres_database_url: str,
+) -> None:
+    with postgres_session(postgres_database_url) as session:
+        task = asyncio.run(
+            TaskRepository(session).create_task("Failed run", user_id="alice", status="failed")
+        )
+        run = asyncio.run(RunService(session).ensure_run(task.id))
+        history = run.to_dict()
+        run_id = run.id
+        engine = session.get_bind()
+        ready = Barrier(2)
+
+        def retry(_: int) -> dict[str, Any]:
+            with Session(engine) as worker:
+                ready.wait(timeout=5)
+                return asyncio.run(retry_run(TaskRepository(worker), run_id, "retry-once", "alice"))
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            receipts = list(pool.map(retry, [0, 1]))
+        assert receipts[0] == receipts[1]
+        session.refresh(run)
+        assert run.to_dict() == history
+        assert len(session.scalars(select(WorkflowRun)).all()) == 2
+        assert len(session.scalars(select(TaskModel)).all()) == 2
+        assert session.scalars(select(UsageEvent)).all() == []
