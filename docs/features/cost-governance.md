@@ -374,7 +374,7 @@ public scope name as `budget_scope_id` and derive the internal owner-scoped key,
 including for trusted local CLI calls. Code using `TaskCreator` or the repository
 directly must bind that internal key itself. Configuring a scope alone does not
 enroll existing tasks. A bounded executor is still required. CLI reconciliation
-requires confirmation. With the current apcore-cli 0.12.5 baseline, `--yes` clears
+requires confirmation. With the current apcore-cli 0.12.6 baseline, `--yes` clears
 the CLI check but does not reach the executor's second approval gate. For a
 reviewed noninteractive operation, the command-scoped `APCORE_CLI_AUTO_APPROVE=1`
 shown above confirms both gates without granting administrator privileges. Do

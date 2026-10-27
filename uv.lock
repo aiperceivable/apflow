@@ -108,7 +108,7 @@ wheels = [
 
 [[package]]
 name = "apcore-a2a"
-version = "0.8.4"
+version = "0.8.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server"] },
@@ -119,14 +119,14 @@ dependencies = [
     { name = "starlette" },
     { name = "uvicorn" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/30/23/d9760ad1574faa028fac279bf19991464042fdda88d0dea23d080e120cdc/apcore_a2a-0.8.4.tar.gz", hash = "sha256:529dee5759fdea2625e842f2d97a38d8bc720d985fcacc3ec246f1a1f042ae30", size = 161055, upload-time = "2026-10-19T08:47:15.445Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a1/5f/a30adf6e71ea9fb443ab8227565c6a88e7cb651fe5e68e11e390cf0b42f9/apcore_a2a-0.8.5.tar.gz", hash = "sha256:95408fd8515591ac4a5f396a32549faf04915ad855a53516738f9fc4ebfafa4e", size = 161062, upload-time = "2026-10-26T09:15:06.58Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4c/83/500a4b93c6111cf8fad695d78439294fd92324a058909e6cab314d1f8c95/apcore_a2a-0.8.4-py3-none-any.whl", hash = "sha256:3b99321e6aa265e4b1f624841e6288d5c7691da92a32441e0d8dd8042a0e252f", size = 81141, upload-time = "2026-10-19T08:47:13.46Z" },
+    { url = "https://files.pythonhosted.org/packages/4e/f3/68e616173f4bb64ead7c8cc711ad6dd03f2a1a50f8372460006e574d2cb6/apcore_a2a-0.8.5-py3-none-any.whl", hash = "sha256:bb5029cc7648252b9ad9112efdd7ff45e09d0124668f0a3877803a7d8566c099", size = 81142, upload-time = "2026-10-26T09:15:04.342Z" },
 ]
 
 [[package]]
 name = "apcore-cli"
-version = "0.12.5"
+version = "0.12.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "apcore" },
@@ -138,14 +138,14 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/23/d7/b8bd9359337143c7e5e027345dd74a171b83dfcb25d90dc48331d8297b31/apcore_cli-0.12.5.tar.gz", hash = "sha256:06ef5e671125a72371b0ecf2e8641da20f95c8cc02dc701e7508f98a9abe3752", size = 280550, upload-time = "2026-10-19T08:48:44.667Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c8/90/32ef626abc825a2523da99a321a772d1cc8d12a1685355ffdf3aef9f8118/apcore_cli-0.12.6.tar.gz", hash = "sha256:82996f6efa4d0253ce108f8f168ea35db8d7572626f7df4758e5a80a2919b80c", size = 280554, upload-time = "2026-10-26T08:51:33.119Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8f/57/5c3b0e08e70fd238c7adce4a3f631c6a60b6b163ded4bb249e54f5d6cb46/apcore_cli-0.12.5-py3-none-any.whl", hash = "sha256:f6ced97231771d5ef9c6c20af65aa6ca0c4a1acf339d2e77d6ce9dc0a83f39c8", size = 131781, upload-time = "2026-10-19T08:48:42.449Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/e2/8322fb685ea1b508abcf31cdfba943e991661e89f9e8994c7e53ac3e7a1d/apcore_cli-0.12.6-py3-none-any.whl", hash = "sha256:dec48dcde273d20519f79f0bd6a0e10c0c4a8aa8d0444840f937caca18a79e53", size = 131784, upload-time = "2026-10-26T08:51:30.265Z" },
 ]
 
 [[package]]
 name = "apcore-mcp"
-version = "0.23.1"
+version = "0.23.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "apcore" },
@@ -155,23 +155,23 @@ dependencies = [
     { name = "pyjwt" },
     { name = "referencing" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c9/41/ff3ae1825a003768437204fb69c52300c3e09dcd08f7443434eb7736457a/apcore_mcp-0.23.1.tar.gz", hash = "sha256:3b39fca4c2e1cb0db3ee2676fd1a0a0aa00cd39bee7d7ba7ef514a9e5568000d", size = 292764, upload-time = "2026-10-19T09:08:40.705Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d6/c8/9ba502990b506551b50432db5ea3cf43102a4b93d0658e839fc4bcfab270/apcore_mcp-0.23.3.tar.gz", hash = "sha256:f3f8bc641b323a9f5792f3f1fd6892479df304aa6cf2d7d033bf939a3f0efc02", size = 305256, upload-time = "2026-10-26T08:38:30.726Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/06/3d/b8e03026bfa5077d202ef813d140788cf732fd4e89076a2349e372c1d3d3/apcore_mcp-0.23.1-py3-none-any.whl", hash = "sha256:1c8d2d1352790fe3e358fb29947f3a195d85bd9d54054f038096513678c97fe3", size = 125165, upload-time = "2026-10-19T09:08:38.166Z" },
+    { url = "https://files.pythonhosted.org/packages/59/34/a08778e0d44ed9d9081272f7d81e457cb9dc3d0e5390bd109200f5bc52c0/apcore_mcp-0.23.3-py3-none-any.whl", hash = "sha256:9ed1b33f10eab4f49ac5fb03550bd643ada406d7d82f48faa87f4da04377d060", size = 129254, upload-time = "2026-10-26T08:38:28.773Z" },
 ]
 
 [[package]]
 name = "apcore-toolkit"
-version = "0.14.0"
+version = "0.14.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "apcore" },
     { name = "pydantic" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/64/24/a35c1e2174a12b23b8859eb999efcb338ff174364358505b0b442dd05a73/apcore_toolkit-0.14.0.tar.gz", hash = "sha256:9a174bad604a3deeca2606fb066c247d6a8846fc23c6aed3decd486082a13557", size = 202432, upload-time = "2026-10-09T01:42:53.681Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/06/66/1e6c994783ab627e5a3d59c0bb2b4699476e225e887931bb08494360c1de/apcore_toolkit-0.14.1.tar.gz", hash = "sha256:4d6b9c54c9118ffcb540bfa21e03209322386813fe8e9c22e723f8ef3efa5a34", size = 214918, upload-time = "2026-10-26T07:16:00.381Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/14/07/808aed71e83877a4a6c0f2a63f12a5c953f0c7307b9e6133484c24b591fb/apcore_toolkit-0.14.0-py3-none-any.whl", hash = "sha256:d66fbb0d6dffaab6ff68718a03af40f61bd7758dfeca40764cc067e308e8e124", size = 124741, upload-time = "2026-10-09T01:42:52.275Z" },
+    { url = "https://files.pythonhosted.org/packages/12/3b/4876835fd2c80c1d4d24ffe3072494578da74f3bf939aaa1295631bf796a/apcore_toolkit-0.14.1-py3-none-any.whl", hash = "sha256:448515b2c72046a191e953a6f415a28b2d11ebb2c3fe4c9f363aa366c83ff560", size = 129906, upload-time = "2026-10-26T07:15:57.224Z" },
 ]
 
 [package.optional-dependencies]
@@ -256,10 +256,10 @@ requires-dist = [
     { name = "aiosmtplib", marker = "extra == 'email'", specifier = ">=3.0.0" },
     { name = "alembic", specifier = ">=1.13.0" },
     { name = "apcore", specifier = ">=0.32.2" },
-    { name = "apcore-a2a", specifier = ">=0.8.4" },
-    { name = "apcore-cli", specifier = ">=0.12.5" },
-    { name = "apcore-mcp", specifier = ">=0.23.1" },
-    { name = "apcore-toolkit", specifier = ">=0.14.0" },
+    { name = "apcore-a2a", specifier = ">=0.8.5" },
+    { name = "apcore-cli", specifier = ">=0.12.6" },
+    { name = "apcore-mcp", specifier = ">=0.23.3" },
+    { name = "apcore-toolkit", specifier = ">=0.14.1" },
     { name = "apdev", marker = "extra == 'dev'", specifier = ">=0.2.3" },
     { name = "apflow", extras = ["postgres", "scheduling", "email"], marker = "extra == 'all'" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.29.0" },

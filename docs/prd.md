@@ -540,10 +540,10 @@ Layer 1: Agent Frameworks (USER'S CHOICE — not built by apflow)
 
 **Added to `pyproject.toml`:**
 - `apcore>=0.32.2` (core dependency, including reference-aware sensitive-data redaction)
-- `apcore-toolkit>=0.14.0` (shared scanner/schema and binding-validation baseline)
-- `apcore-mcp>=0.23.1` (MCP exposure with validated structured output)
-- `apcore-a2a>=0.8.4` (A2A exposure — A2A protocol 1.0)
-- `apcore-cli>=0.12.5` (CLI generation)
+- `apcore-toolkit>=0.14.1` (shared scanner/schema and binding-validation baseline)
+- `apcore-mcp>=0.23.3` (MCP exposure with validated structured output)
+- `apcore-a2a>=0.8.5` (A2A exposure — A2A protocol 1.0)
+- `apcore-cli>=0.12.6` (CLI generation)
 
 ---
 

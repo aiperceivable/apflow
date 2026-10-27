@@ -36,10 +36,10 @@ dependencies = [
     # apcore ecosystem (MCP + A2A + CLI standard)
     # Shared baseline for binding validation, governance, and schema redaction.
     "apcore>=0.32.2",
-    "apcore-toolkit>=0.14.0",
-    "apcore-mcp>=0.23.1",
-    "apcore-a2a>=0.8.4",
-    "apcore-cli>=0.12.5",
+    "apcore-toolkit>=0.14.1",
+    "apcore-mcp>=0.23.3",
+    "apcore-a2a>=0.8.5",
+    "apcore-cli>=0.12.6",
     # Resolve local schema references for redacted MCP output contracts.
     "referencing>=0.37.0",
 ]

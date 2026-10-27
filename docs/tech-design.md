@@ -540,10 +540,10 @@ dependencies = [
     # SQLite is Python stdlib -- no additional dependency
     # apcore ecosystem is core (MCP/A2A/CLI are standard apflow features, not extras).
     "apcore>=0.32.2",
-    "apcore-toolkit>=0.14.0",
-    "apcore-mcp>=0.23.1",
-    "apcore-a2a>=0.8.4",
-    "apcore-cli>=0.12.5",
+    "apcore-toolkit>=0.14.1",
+    "apcore-mcp>=0.23.3",
+    "apcore-a2a>=0.8.5",
+    "apcore-cli>=0.12.6",
 ]
 
 # Storage
