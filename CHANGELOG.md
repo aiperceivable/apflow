@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 
+## [0.24.2] - 2026-11-19
+
+### Changed
+
+- Upgrade the development formatter to `black` 26.10.1.
+- Refresh `uv.lock` (`a2a-sdk` 1.3.1, `filelock` 4.2.11, and other patch
+  updates). No runtime requirement or public API changes.
+
 ## [0.24.0] - 2026-10-24
 
 ### Breaking
@@ -2180,4 +2188,3 @@ Stripped down to 4 core executors. The remaining executors are examples; real ex
 - Comprehensive documentation in `docs/` directory
 - Test suite with pytest fixtures
 - Modular architecture separating core from optional features
-

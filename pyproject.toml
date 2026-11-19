@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "apflow"
-version = "0.24.1"
+version = "0.24.2"
 description = "AI-Perceivable Distributed Orchestration"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -35,11 +35,11 @@ dependencies = [
     "click>=8.0",
     # apcore ecosystem (MCP + A2A + CLI standard)
     # Shared baseline for binding validation, governance, and schema redaction.
-    "apcore>=0.32.2",
-    "apcore-toolkit>=0.14.1",
+    "apcore>=0.33.0",
+    "apcore-toolkit>=0.14.2",
     "apcore-mcp>=0.23.3",
-    "apcore-a2a>=0.8.5",
-    "apcore-cli>=0.12.6",
+    "apcore-a2a>=0.8.6",
+    "apcore-cli>=0.14.0",
     # Resolve local schema references for redacted MCP output contracts.
     "referencing>=0.37.0",
 ]
@@ -86,7 +86,7 @@ dev = [
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
     "pytest-timeout>=2.1.0",
-    "black==26.1.0",
+    "black==26.10.1",
     "ruff==0.15.1",
     "mypy>=1.5.0",
     "build>=1.0.0",
