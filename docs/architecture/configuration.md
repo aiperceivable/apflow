@@ -71,9 +71,9 @@ addresses or task-supplied credentials. Keep deployment egress restrictions to
 enforce network boundaries at connection time, including DNS changes. Never put
 real database passwords or credential values into tracked configuration.
 
-For reproducible integration testing, install from `uv.lock` (`uv sync --frozen`)
-or use equivalent lock-derived constraints. CI installs constrained dependencies
-and runs `pip check` plus the dependency closure test before the full suite.
+For reproducible integration testing, run `uv sync --locked --extra dev` to
+install from `uv.lock`. CI runs `uv pip check` and the dependency closure test
+before the full suite.
 
 ## Overview
 

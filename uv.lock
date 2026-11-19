@@ -96,7 +96,7 @@ wheels = [
 
 [[package]]
 name = "apcore"
-version = "0.32.2"
+version = "0.33.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jsonschema" },
@@ -104,14 +104,14 @@ dependencies = [
     { name = "pyyaml" },
     { name = "referencing" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/cf/40/350583e9cf3a6cff0420509ea006a2b74281d895396856e60c7b0689b567/apcore-0.32.2.tar.gz", hash = "sha256:fafd5155bdd5c5325079d848cf414cf1936a260591c2887befc957624e608597", size = 768017, upload-time = "2026-10-19T07:27:19.599Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f3/f3/24702bc158d33443e781d9045c35d53b77686b12c530950f2737eb517619/apcore-0.33.0.tar.gz", hash = "sha256:f74d4534a29faaecefd34661bc5baa2804d9db0b79838b9c45d7c0d2fe5098d2", size = 766002, upload-time = "2026-11-18T10:02:49.06Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/64/1e/88a43e0cea06d5a1339f1298c05741c9f9df745963dabb23f6f553a37613/apcore-0.32.2-py3-none-any.whl", hash = "sha256:5f64e03d23d5722e7f37acd60a347fe67a1071d112af9afb37ea00ee92400e32", size = 432066, upload-time = "2026-10-19T07:27:17.097Z" },
+    { url = "https://files.pythonhosted.org/packages/5c/27/a7522496f5ee300c09a4eb20872ca69bc11e037de789ec7d3868d56bb0b9/apcore-0.33.0-py3-none-any.whl", hash = "sha256:c7797d0e217445a9935eaa313c1e07b3ee1874515a0cbd6235f532297f5990e8", size = 432560, upload-time = "2026-11-18T10:02:45.77Z" },
 ]
 
 [[package]]
 name = "apcore-a2a"
-version = "0.8.5"
+version = "0.8.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server"] },
@@ -122,14 +122,14 @@ dependencies = [
     { name = "starlette" },
     { name = "uvicorn" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a1/5f/a30adf6e71ea9fb443ab8227565c6a88e7cb651fe5e68e11e390cf0b42f9/apcore_a2a-0.8.5.tar.gz", hash = "sha256:95408fd8515591ac4a5f396a32549faf04915ad855a53516738f9fc4ebfafa4e", size = 161062, upload-time = "2026-10-26T09:15:06.58Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/65/fc/2a0a6160bb9288e4e083a72e32b303ae86e67ecab99926247cd22505498e/apcore_a2a-0.8.6.tar.gz", hash = "sha256:bca93351c0c2f77d340a9a95000aa2a36611e294466af5bac0b0b9aa52d35e8d", size = 161070, upload-time = "2026-11-19T08:15:30.931Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4e/f3/68e616173f4bb64ead7c8cc711ad6dd03f2a1a50f8372460006e574d2cb6/apcore_a2a-0.8.5-py3-none-any.whl", hash = "sha256:bb5029cc7648252b9ad9112efdd7ff45e09d0124668f0a3877803a7d8566c099", size = 81142, upload-time = "2026-10-26T09:15:04.342Z" },
+    { url = "https://files.pythonhosted.org/packages/88/78/26dc560bc0800fb3f9ab012e0b32289c3d7c7a847ed2f6df59f5890e9dcd/apcore_a2a-0.8.6-py3-none-any.whl", hash = "sha256:ad49a9c1d7af5a716ca9958e83240919463c33ccc0c5ca08469fbaa406753031", size = 81146, upload-time = "2026-11-19T08:15:29.426Z" },
 ]
 
 [[package]]
 name = "apcore-cli"
-version = "0.12.6"
+version = "0.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "apcore" },
@@ -141,9 +141,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c8/90/32ef626abc825a2523da99a321a772d1cc8d12a1685355ffdf3aef9f8118/apcore_cli-0.12.6.tar.gz", hash = "sha256:82996f6efa4d0253ce108f8f168ea35db8d7572626f7df4758e5a80a2919b80c", size = 280554, upload-time = "2026-10-26T08:51:33.119Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7d/e1/db53e59ce772e7b5609ebaf2d74fe2d9a05d1da505fcd36a5fd733d6330a/apcore_cli-0.14.0.tar.gz", hash = "sha256:402da16a79e6fab7fc244be1713b7a175ebee75a0a64da210c6862817ef2da0f", size = 288559, upload-time = "2026-11-19T06:58:05.093Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5f/e2/8322fb685ea1b508abcf31cdfba943e991661e89f9e8994c7e53ac3e7a1d/apcore_cli-0.12.6-py3-none-any.whl", hash = "sha256:dec48dcde273d20519f79f0bd6a0e10c0c4a8aa8d0444840f937caca18a79e53", size = 131784, upload-time = "2026-10-26T08:51:30.265Z" },
+    { url = "https://files.pythonhosted.org/packages/12/8f/e4a669dd3e9ef7ed8b930c44aa376de1b70f7092e37646a1084e9c7df388/apcore_cli-0.14.0-py3-none-any.whl", hash = "sha256:4ae082a936204514694659b4b32bcf8f1e5755225095d6e692390a148b53716e", size = 136849, upload-time = "2026-11-19T06:58:03.254Z" },
 ]
 
 [[package]]
@@ -165,16 +165,16 @@ wheels = [
 
 [[package]]
 name = "apcore-toolkit"
-version = "0.14.1"
+version = "0.14.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "apcore" },
     { name = "pydantic" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/06/66/1e6c994783ab627e5a3d59c0bb2b4699476e225e887931bb08494360c1de/apcore_toolkit-0.14.1.tar.gz", hash = "sha256:4d6b9c54c9118ffcb540bfa21e03209322386813fe8e9c22e723f8ef3efa5a34", size = 214918, upload-time = "2026-10-26T07:16:00.381Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1f/2f/ce557cc3af057f5a68573c6c763bc8c6268d314c64fe25684e02b046eaf8/apcore_toolkit-0.14.2.tar.gz", hash = "sha256:77605b2e807e208e1e49145f5d6ef9d8fe8ddfdd8ce48d2786080e8d41f87a5e", size = 215107, upload-time = "2026-11-19T02:10:17.369Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/12/3b/4876835fd2c80c1d4d24ffe3072494578da74f3bf939aaa1295631bf796a/apcore_toolkit-0.14.1-py3-none-any.whl", hash = "sha256:448515b2c72046a191e953a6f415a28b2d11ebb2c3fe4c9f363aa366c83ff560", size = 129906, upload-time = "2026-10-26T07:15:57.224Z" },
+    { url = "https://files.pythonhosted.org/packages/ef/93/2c1d1b8bf1a06dd2b876391d537ae7bceadbebf1147216a403289fa061df/apcore_toolkit-0.14.2-py3-none-any.whl", hash = "sha256:04a42df636e98c2e11b3187c3269113bef9d0e1efb5186536709d100ff6e2c94", size = 129746, upload-time = "2026-11-19T02:10:15.864Z" },
 ]
 
 [package.optional-dependencies]
@@ -210,7 +210,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pyyaml" },
     { name = "referencing" },
-    { name = "sqlalchemy" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "sqlalchemy-session-proxy" },
 ]
 
@@ -259,11 +259,11 @@ scheduling = [
 requires-dist = [
     { name = "aiosmtplib", marker = "extra == 'email'", specifier = ">=3.0.0" },
     { name = "alembic", specifier = ">=1.13.0" },
-    { name = "apcore", specifier = ">=0.32.2" },
-    { name = "apcore-a2a", specifier = ">=0.8.5" },
-    { name = "apcore-cli", specifier = ">=0.12.6" },
+    { name = "apcore", specifier = ">=0.33.0" },
+    { name = "apcore-a2a", specifier = ">=0.8.6" },
+    { name = "apcore-cli", specifier = ">=0.14.0" },
     { name = "apcore-mcp", specifier = ">=0.23.3" },
-    { name = "apcore-toolkit", specifier = ">=0.14.1" },
+    { name = "apcore-toolkit", specifier = ">=0.14.2" },
     { name = "apdev", marker = "extra == 'dev'", specifier = ">=0.2.3" },
     { name = "apflow", extras = ["postgres", "scheduling", "email"], marker = "extra == 'all'" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.29.0" },
@@ -289,7 +289,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "referencing", specifier = ">=0.37.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.1" },
-    { name = "sqlalchemy", specifier = ">=2.0.0" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.0" },
     { name = "sqlalchemy-session-proxy", specifier = ">=0.1.0" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=4.0.0" },
 ]
@@ -3095,6 +3095,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/16/9e/b86c9b7e02bb3142d6bf464262b3cf617522561515cebae298be35bd6f97/sqlalchemy-2.1.9-cp315-cp315t-win_amd64.whl", hash = "sha256:65b8257c62c6151f8c5f03680fe6e470153a94c92196e9e5d00be3f1510edae3", size = 2521333, upload-time = "2026-11-16T21:19:57.177Z" },
     { url = "https://files.pythonhosted.org/packages/8f/13/a7dd1788974530f5e402656d310e32b97606b684d82dbc57c885c97f518b/sqlalchemy-2.1.9-cp315-cp315t-win_arm64.whl", hash = "sha256:c7d8e10c1f9b82c21be141a21f3fb94469eec820d946c14544e0734de42e7614", size = 2443055, upload-time = "2026-11-16T21:53:43.918Z" },
     { url = "https://files.pythonhosted.org/packages/7a/ee/9926603a1f7e88b41bc0d1e068e889fc84981553fb4e6037426d6b174da3/sqlalchemy-2.1.9-py3-none-any.whl", hash = "sha256:449fed5c2caa3b278cc57499d09db001fb3f28dc7f18affc48142aee4dcc0cdf", size = 2071860, upload-time = "2026-11-16T21:16:28.413Z" },
+]
+
+[package.optional-dependencies]
+asyncio = [
+    { name = "greenlet" },
 ]
 
 [[package]]

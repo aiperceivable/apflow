@@ -27,7 +27,7 @@ dependencies = [
     "pydantic[email]>=2.0.0",
     "pydantic-settings>=2.0.0",
     # Default storage (SQLite via Python stdlib, no extra dep)
-    "sqlalchemy>=2.0.0",
+    "sqlalchemy[asyncio]>=2.0.0",
     "sqlalchemy-session-proxy>=0.1.0",
     "alembic>=1.13.0",
     # Configuration and CLI

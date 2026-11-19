@@ -88,6 +88,7 @@ def test_core_dependency_closure_excludes_removed_optional_integrations() -> Non
         assert requirement.specifier.contains(distribution.version, prereleases=True), requirement
         pending.extend((Requirement(value), extras) for value in distribution.requires or [])
     names = {name for name, _ in visited}
+    assert "greenlet" in names
     assert not REMOVED_DEPENDENCIES.intersection(names)
     assert "duckdb-engine" not in names
 
