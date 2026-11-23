@@ -1,7 +1,12 @@
 # Changelog
 
-## [Unreleased]
+## [0.24.3] - 2026-11-23
 
+### Changed
+
+- Upgrade apcore ecosystem dependencies (`apcore-toolkit>=0.15.0`,
+  `apcore-mcp>=0.23.4`, `apcore-a2a>=0.8.7`, `apcore-cli>=0.14.1`) and refresh
+  `uv.lock`.
 
 ## [0.24.2] - 2026-11-19
 

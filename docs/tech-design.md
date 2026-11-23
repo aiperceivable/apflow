@@ -539,11 +539,11 @@ dependencies = [
     "alembic>=1.13.0",
     # SQLite is Python stdlib -- no additional dependency
     # apcore ecosystem is core (MCP/A2A/CLI are standard apflow features, not extras).
-    "apcore>=0.32.2",
-    "apcore-toolkit>=0.14.1",
-    "apcore-mcp>=0.23.3",
-    "apcore-a2a>=0.8.5",
-    "apcore-cli>=0.12.6",
+    "apcore>=0.33.0",
+    "apcore-toolkit>=0.15.0",
+    "apcore-mcp>=0.23.4",
+    "apcore-a2a>=0.8.7",
+    "apcore-cli>=0.14.1",
 ]
 
 # Storage
